@@ -26,6 +26,23 @@ TABLES = ARTIFACT / "paper-tables"
 RUST_TOOLCHAIN = "1.99.1"
 AERIE_TOOLCHAIN = "1.95.0"
 
+# Relations the scripts accept. H-FIPS is the relation of every default run;
+# H-exact is an opt-in reference (`--relations h-fips,h-exact`).
+RELATIONS = ("h-fips", "h-exact")
+DEFAULT_RELATIONS = ("h-fips",)
+DEFAULT_RELATION = "h-fips"
+
+
+def parse_relations(text):
+    """A comma-separated relation list (`h-fips,h-exact`); raises ValueError on an unknown one."""
+    items = [item.strip().lower() for item in str(text).split(",") if item.strip()]
+    unknown = [item for item in items if item not in RELATIONS]
+    if unknown or not items:
+        raise ValueError(
+            f"relations: a comma-separated subset of {','.join(RELATIONS)}, not {text!r}"
+        )
+    return list(dict.fromkeys(items))
+
 def load_toml(path):
     with open(path, "rb") as f:
         data = f.read()

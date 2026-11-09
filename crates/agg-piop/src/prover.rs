@@ -248,12 +248,9 @@ pub(crate) fn no_bridge_matrices() -> BridgeMatrices {
 }
 
 /// Threads of the Flock fork pool. `AGG_FLOCK_THREADS` overrides the default
-/// (0 disables the fork). Without an override the default is half of the current pool
-/// rounded up when Flock's GF(2^128) kernels run below the AVX-512 width, and 3/8 of the
-/// current pool rounded up otherwise, capped at [`max_flock_threads`]. The narrower
-/// vectors do half as many field elements per instruction, so the proof kernels need the
-/// larger share of the pool to keep the fork-join wall short. A Rayon worker or a
-/// one-thread pool disables the fork to avoid blocking the pool.
+/// (0 disables the fork). Without an override the default is 5/16 of the current pool
+/// rounded up, capped at [`max_flock_threads`]. A Rayon worker or a one-thread pool
+/// disables the fork to avoid blocking the pool.
 #[must_use]
 pub fn flock_pool_threads() -> usize {
     if crate::pcs::on_calling_thread() {
@@ -277,22 +274,13 @@ pub fn flock_pool_threads() -> usize {
 }
 
 /// [`flock_pool_threads`] on a pool of `threads` workers: the share that
-/// Flock's proof kernels need. The AVX-512 kernels process four GF(2^128)
-/// elements per instruction and take 3/8 of the pool. The narrower AVX2 and
-/// portable kernels need more instructions per element, but a pool of half the
-/// workers starves the PIOP that runs beside them; 7/16 keeps the fork-join
-/// wall short without that starvation.
+/// Flock's proof kernels get beside the PIOP. The PIOP side is the critical
+/// path of the fork, and Flock threads at equal priority slow its round
+/// barriers, so Flock gets the smallest share that still finishes beside the
+/// PIOP: 5/16 of the pool, with AVX2 and AVX-512 kernels alike (on Zen 5, 10
+/// of 32 and 5 of 16 threads were fastest or within noise of it at 2^15).
 fn default_flock_threads(threads: usize) -> usize {
-    flock_default_for(threads, flock_core::f128_avx512_kernels())
-}
-
-/// [`default_flock_threads`] with the kernel width given, for tests.
-fn flock_default_for(threads: usize, avx512: bool) -> usize {
-    if avx512 {
-        (3 * threads).div_ceil(8)
-    } else {
-        (7 * threads).div_ceil(16)
-    }
+    (5 * threads).div_ceil(16)
 }
 
 /// Logical CPUs of the machine (`available_parallelism`, at least one).
@@ -639,7 +627,7 @@ pub struct ProverInputs<'a, P: ParamSet = Set44> {
     pub records: &'a [(&'a [u8], &'a [u8], P::CTilde)],
     /// The signatures, in order.
     pub signatures: &'a [&'a [u8]],
-    /// The relation to prove: H-u, H-exact or H-FIPS.
+    /// The relation to prove: H-FIPS (the default) or H-exact.
     pub relation: Relation,
 }
 
@@ -1518,6 +1506,12 @@ pub fn prove_with_tables_using(
     }
     let public = public.unwrap_or_else(|| PublicData::from_instance(inputs.instance));
     if manifest.hash_field() == HashField::Fp {
+        if manifest.relation() != Relation::HExact {
+            return Err(ProveError::Internal(format!(
+                "the Fp aggregate is defined under H-exact only, not {}",
+                manifest.relation()
+            )));
+        }
         return prove_core_fp(total, committer, &public, inputs, manifest, main, keccak, flock, hooks);
     }
     prove_core(
@@ -2118,16 +2112,12 @@ mod tests {
     }
 
     #[test]
-    fn the_default_flock_pool_follows_the_kernel_width() {
+    fn the_default_flock_pool_is_five_sixteenths() {
         for threads in [1, 4, 8, 16, 32, 64, 96] {
-            assert_eq!(flock_default_for(threads, true), (3 * threads).div_ceil(8));
-            assert_eq!(flock_default_for(threads, false), (7 * threads).div_ceil(16));
+            assert_eq!(default_flock_threads(threads), (5 * threads).div_ceil(16));
         }
-        // The measured sizes: 12 (AVX-512) or 14 (AVX2) at 32 threads,
-        // and 6 or 7 at 16 threads.
-        assert_eq!(flock_default_for(32, true), 12);
-        assert_eq!(flock_default_for(32, false), 14);
-        assert_eq!(flock_default_for(16, true), 6);
-        assert_eq!(flock_default_for(16, false), 7);
+        // The measured sizes: 10 of 32 threads and 5 of 16.
+        assert_eq!(default_flock_threads(32), 10);
+        assert_eq!(default_flock_threads(16), 5);
     }
 }

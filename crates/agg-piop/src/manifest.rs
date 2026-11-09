@@ -4,7 +4,8 @@
 //! order, the commitment round, the preset family, the logical and physical domain of every
 //! Akita group, and the role and alphabet of each committed polynomial, and serializes the
 //! public profile bound in the instance record before any commitment. The seven groups are `G_main16`
-//! (`Z_lo, U_lo, V_lo, V_hi`, width 16) and `G_main4` (`Z_hi, U_hi, b_0..b_5`, width 4) in
+//! (the looked-up low digits of `z` and `u`, `V_lo, V_hi`, width 16) and `G_main4` (the high
+//! digits of `z` and `u`, `b_0..b_5`, the slack bit `a_z` and H-FIPS's columns, width 4) in
 //! round 1, before the bridge seed, and `G_1` (`kappa^(1)_t`), `G_2` (`y^(2)_t`,
 //! `kappa^(2)_t`), `G_3` (`kappa^(3)` and zero polynomials up to `G_2`'s layout), `G_k` (the
 //! digits `K_0, K_1, K_2, K_3` of the projection outputs `k = <Psi_o, v_i>`), all width 16, and
@@ -14,18 +15,16 @@
 //! base-4 and base-6 leaves), never by Akita. `V_lo, V_hi` have no range check: the
 //! projection bounds `v` through `k`.
 //!
-//! Relation H-u (the default): `z` relaxed to `[-2^17, 2^17)`, `u`
-//! exact, `u = B_ulo + 63,079 H_u - 190,465` with `B_ulo` the looked-up `U_lo + 2^15` and
-//! `H_u = U_hi + 3` a six-valued digit, so `|u| <= B_u = 190,465`.
-//!
-//! Relation H-exact (relation byte 1): `u` as in H-u and `z` exact,
+//! Relation H-exact (relation byte 1, a reference relation): `u` exact,
+//! `u = B_ulo + 63,079 H_u - 190,465` with `B_ulo` the looked-up `U_lo + 2^15` and
+//! `H_u = U_hi + 3` a six-valued digit, so `|u| <= B_u = 190,465`, and `z` exact,
 //! `z = B_zlo + 2^16 B_zhi + 130,915 a_z - 130,993` with `B_zlo = S_zlo + 2^15` looked up (the
 //! slot of `Z_lo`) and `B_zhi`, `a_z` Boolean (`B_zhi` in the slot of `Z_hi`, `a_z` appended
 //! to `G_main4` after the bits), so `|z| <= B_z = 130,993`. The value `z` of H-exact is
 //! [`DigitValue::Zx`] with the columns `bz_lo`, `bz_hi`, `a_z`; the Booleanity of `bz_hi`
 //! and `a_z` is proven by two zero-checks at `r^(2)` in stage 3.
 //!
-//! Relation H-FIPS (relation byte 2): `z` as in H-exact, and in
+//! Relation H-FIPS (relation byte 2, the default): `z` as in H-exact, and in
 //! place of `u`'s digits the per-coefficient witness of `agg_witness::hfips`: the magnitude
 //! `L = L_lo + 29,696 L_hi` ([`DigitValue::L`]: `l_lo` looked up in the slot of `U_lo`, the
 //! bit `l_hi` in the slot of `U_hi`), the sign bit `s = (1 + sigma)/2`, `delta` and `e`
@@ -38,9 +37,8 @@
 //! polynomial lane instead of two domain variables, so the main domain is `(j, i)` with
 //! `8 + d_sig` variables and every main-domain column is a family of `k` or `l` polynomials
 //! ([`Column::lane`]). `z` and `u` take digit-slack forms with a base-8 middle digit and a
-//! Boolean slack ([`DigitValue::Zd`], [`DigitValue::Ud`]); H-exact changes only the slack
-//! weight and the offset of `z` ([`DigitValue::Zdx`]: `|z| <= B_z` exactly, the same columns,
-//! alphabets and Akita layout as H-u); H-FIPS takes H-exact's `z`, the magnitude
+//! Boolean slack ([`DigitValue::Zdx`]: `|z| <= B_z` exactly, [`DigitValue::Ud`]) under
+//! H-exact; H-FIPS takes H-exact's `z`, the magnitude
 //! [`DigitValue::Ld`] in the slots of `u` and the columns `s, delta, e` per row lane, with the
 //! hint slack `u_h` in `G_2` and in a fifth slot of the level-2 lookup stack. `w_1'` has four bits, the
 //! projection outputs five digits ([`K39_DIGITS`]), and the looked-up main columns split
@@ -50,13 +48,12 @@ use agg_pcs_config::catalogs::{
     BatchLayout, Family, Group, Set, MULTIPLICITY_DIGITS, TABLE_VARS,
 };
 pub use agg_pcs_config::catalogs::{
-    HashField, Relation, GROUP_COUNT_FP, KECCAK_GROUP_COUNT, RELATION_HU, RELATION_H_EXACT,
-    RELATION_H_FIPS,
+    HashField, Relation, GROUP_COUNT_FP, KECCAK_GROUP_COUNT, RELATION_H_EXACT, RELATION_H_FIPS,
 };
 use agg_pcs_config::work_plan::{padded_size, PlanError, WorkPlan};
 use agg_witness::digits::{
     z_digit_slack_exact, Alphabet, BitSlackLayout, DigitLayout, SlackLayout, StepLayout, ValueForm, L_SLACK,
-    L_BIT_SLACK, U_DIGIT_SLACK, Z_BIT_SLACK, Z_DIGIT_SLACK,
+    L_BIT_SLACK, U_DIGIT_SLACK, Z_BIT_SLACK,
 };
 use agg_witness::params::{ParamSet, B_U, STEP_U, U_TOP_BASE, W1_BITS};
 
@@ -83,12 +80,6 @@ pub const LOOKUP_CHALLENGES: usize = 2;
 /// `f = stored + 2^15`.
 pub const LOOKUP_SHIFT: i32 = 1 << 15;
 
-/// `z + 2^17 = z_lo + 2^16 z_hi` (bases `2^16, 4`, signed): `z = Z_lo + 2^16 Z_hi + 2^15`.
-pub const Z16_DIGITS: DigitLayout = DigitLayout {
-    name: "z",
-    bases: &[1 << 16, 4],
-    signed: true,
-};
 /// Relation H-exact: `z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225` over exactly `[-B_z, B_z]`:
 /// `S_zlo = B_zlo - 2^15` looked up, `B_zhi, a_z` bits.
 pub const ZX16_DIGITS: BitSlackLayout = Z_BIT_SLACK;
@@ -98,7 +89,7 @@ pub const ULO16_DIGITS: DigitLayout = DigitLayout {
     bases: &[1 << 16],
     signed: false,
 };
-/// Relation H-u: `u = B_ulo + 63,079 H_u - 190,465` with `B_ulo = U_lo + 2^15` looked up and
+/// Relation H-exact: `u = B_ulo + 63,079 H_u - 190,465` with `B_ulo = U_lo + 2^15` looked up and
 /// `H_u = U_hi + 3 in [0, 6)`, so `u = U_lo + 63,079 U_hi + 31,540` over exactly `[-B_u, B_u]`
 /// (`5 * 63,079 + 2^16 = 2 B_u + 1`).
 pub const U16_DIGITS: StepLayout = StepLayout {
@@ -241,11 +232,9 @@ impl SetShape {
 /// A value committed through its balanced digits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DigitValue {
-    /// The response `z` of relation H-u (main domain, indexed by `(j, s, i)`).
-    Z,
     /// The response `z` of relation H-exact: `bz_lo` (looked up), `bz_hi`, `a_z` (bits).
     Zx,
-    /// The UseHint residual `u` (main domain; relations H-u and H-exact).
+    /// The UseHint residual `u` (main domain; relation H-exact).
     U,
     /// Relation H-FIPS's magnitude `L = L_lo + 29,696 L_hi` (main domain): `l_lo` (looked
     /// up), `l_hi` (bit).
@@ -254,14 +243,10 @@ pub enum DigitValue {
     V,
     /// The projection outputs `k_{o,i} = <Psi_o, v_i>` on the projection domain `(o, i)`.
     K,
-    /// The response `z` of ML-DSA-65 and ML-DSA-87 (relation H-u, one polynomial per
-    /// vector entry `s`): `z + 2^19 = z_lo + 2^16 z_mid + 2^19 a_z` with `Z_lo` looked up,
-    /// `Z_mid` base 8 (leaf and link) and the Boolean `a_z`, so `z in [-2^19, 2^19)`.
-    Zd,
-    /// The response `z` of ML-DSA-65 and ML-DSA-87 under relation H-exact: the columns and
-    /// alphabets of [`DigitValue::Zd`] with the slack weight `2 B_z + 1 - 2^19`, `z + B_z =
-    /// z_lo + 2^16 z_mid + (2 B_z + 1 - 2^19) a_z`, so `|z| <= B_z = gamma_1 - beta - 1` exactly
-    /// (`agg_witness::digits::z_digit_slack_exact`).
+    /// The response `z` of ML-DSA-65 and ML-DSA-87 (relations H-exact and H-FIPS, one
+    /// polynomial per vector entry `s`): `z + B_z = z_lo + 2^16 z_mid + (2 B_z + 1 - 2^19) a_z`
+    /// with `Z_lo` looked up, `Z_mid` base 8 (leaf and link) and the Boolean `a_z`, so
+    /// `|z| <= B_z = gamma_1 - beta - 1` exactly (`agg_witness::digits::z_digit_slack_exact`).
     Zdx(Set),
     /// The UseHint residual `u` of ML-DSA-65 and ML-DSA-87: `u + B_u = B_ulo + 2^16 H_u +
     /// 523,267 a_u` with `U_lo` looked up, `U_mid = H_u - 4` base 8 (leaf and link) and the
@@ -291,13 +276,11 @@ impl DigitValue {
     #[must_use]
     pub const fn layout(self) -> ValueForm {
         match self {
-            Self::Z => ValueForm::Radix(Z16_DIGITS),
             Self::Zx => ValueForm::BitSlack(ZX16_DIGITS),
             Self::U => ValueForm::Step(U16_DIGITS),
             Self::L => ValueForm::Slack(L16_SLACK),
             Self::V => ValueForm::Radix(V16_DIGITS),
             Self::K => ValueForm::Radix(K16_DIGITS),
-            Self::Zd => ValueForm::DigitSlack(Z_DIGIT_SLACK),
             Self::Zdx(set) => ValueForm::DigitSlack(z_digit_slack_exact(agg_witness::dispatch_set!(set, |P| P::B_Z))),
             Self::Ld => ValueForm::BitSlack(L_BIT_SLACK),
             Self::Ud => ValueForm::DigitSlack(U_DIGIT_SLACK),
@@ -312,10 +295,10 @@ impl DigitValue {
     #[must_use]
     pub const fn group(self, digit: u8) -> GroupRole {
         match self {
-            Self::Z | Self::Zx | Self::Zd | Self::Zdx(_) | Self::U | Self::Ud | Self::L | Self::Ld if digit == 0 => {
+            Self::Zx | Self::Zdx(_) | Self::U | Self::Ud | Self::L | Self::Ld if digit == 0 => {
                 Group::Main16
             }
-            Self::Z | Self::Zx | Self::Zd | Self::Zdx(_) | Self::U | Self::Ud | Self::L | Self::Ld => Group::Main,
+            Self::Zx | Self::Zdx(_) | Self::U | Self::Ud | Self::L | Self::Ld => Group::Main,
             Self::V => Group::Main16,
             Self::K | Self::K5 => Group::Proj,
             Self::Kappa1(_) => Group::Level1,
@@ -398,18 +381,6 @@ pub enum Column {
 }
 
 impl Column {
-    /// `Z_lo`.
-    pub const Z_LO: Self = Self::Digit {
-        value: DigitValue::Z,
-        digit: 0,
-        lane: 0,
-    };
-    /// `Z_hi`.
-    pub const Z_HI: Self = Self::Digit {
-        value: DigitValue::Z,
-        digit: 1,
-        lane: 0,
-    };
     /// `bz_lo` (H-exact `S_zlo`, the slot of `Z_lo`).
     pub const ZX_LO: Self = Self::Digit {
         value: DigitValue::Zx,
@@ -586,7 +557,7 @@ impl Column {
         matches!(self, Self::Digit { value: DigitValue::V, .. })
     }
 
-    /// True for a digit range-checked by a leaf and a link (`Z_hi` base 4, `U_hi` base 6,
+    /// True for a digit range-checked by a leaf and a link (`U_hi` base 6,
     /// the projection digits `K_2, K_3` base 8; for ML-DSA-65 and ML-DSA-87 `Z_mid`, `U_mid`
     /// base 8 and `K_4` base 4).
     #[must_use]
@@ -654,13 +625,12 @@ impl Column {
         let half = |digit: u8| if digit == 0 { "lo" } else { "hi" };
         match self {
             Self::Digit { value, digit, .. } => match value {
-                DigitValue::Z => format!("z_{}", half(digit)),
                 DigitValue::Zx => ["bz_lo", "bz_hi", "a_z"][usize::from(digit)].to_owned(),
                 DigitValue::U => format!("u_{}", half(digit)),
                 DigitValue::L => format!("l_{}", half(digit)),
                 DigitValue::V => format!("v_{}", half(digit)),
                 DigitValue::K | DigitValue::K5 => format!("k_{digit}"),
-                DigitValue::Zd | DigitValue::Zdx(_) => ["z_lo", "z_mid", "a_z"][usize::from(digit)].to_owned(),
+                DigitValue::Zdx(_) => ["z_lo", "z_mid", "a_z"][usize::from(digit)].to_owned(),
                 DigitValue::Ud => ["u_lo", "u_mid", "a_u"][usize::from(digit)].to_owned(),
                 DigitValue::Ld => ["l_lo", "l_mid", "a_l"][usize::from(digit)].to_owned(),
                 DigitValue::HintSlack => "u_h".to_owned(),
@@ -698,33 +668,29 @@ impl Column {
     }
 }
 
-/// The value `z` of `relation` (`Z` for H-u, `Zx` for H-exact and H-FIPS).
+/// The value `z` of ML-DSA-44 (`Zx` under every relation).
 #[must_use]
-pub const fn z_value(relation: Relation) -> DigitValue {
-    match relation {
-        Relation::Hu => DigitValue::Z,
-        Relation::HExact | Relation::HFips => DigitValue::Zx,
-    }
+pub const fn z_value(_relation: Relation) -> DigitValue {
+    DigitValue::Zx
 }
 
-/// The digit-decomposed value in the slots of `U_lo, U_hi`: `u` (H-u, H-exact) or H-FIPS's
+/// The digit-decomposed value in the slots of `U_lo, U_hi`: `u` (H-exact) or H-FIPS's
 /// magnitude `L`.
 #[must_use]
 pub const fn u_slot_value(relation: Relation) -> DigitValue {
     match relation {
-        Relation::Hu | Relation::HExact => DigitValue::U,
+        Relation::HExact => DigitValue::U,
         Relation::HFips => DigitValue::L,
     }
 }
 
-/// The value `z` of `relation` under `set` ([`z_value`] for ML-DSA-44; for ML-DSA-65 and
-/// ML-DSA-87 [`DigitValue::Zd`] under H-u and [`DigitValue::Zdx`] under H-exact).
+/// The value `z` of `relation` under `set` ([`z_value`] for ML-DSA-44, [`DigitValue::Zdx`]
+/// for ML-DSA-65 and ML-DSA-87).
 #[must_use]
 pub const fn z_value_for(set: Set, relation: Relation) -> DigitValue {
-    match (set, relation) {
-        (Set::S44, _) => z_value(relation),
-        (Set::S65 | Set::S87, Relation::Hu) => DigitValue::Zd,
-        (Set::S65 | Set::S87, _) => DigitValue::Zdx(set),
+    match set {
+        Set::S44 => z_value(relation),
+        Set::S65 | Set::S87 => DigitValue::Zdx(set),
     }
 }
 
@@ -810,7 +776,7 @@ pub fn group_columns(role: GroupRole, relation: Relation) -> Vec<Column> {
 
 /// The canonical polynomial order of a group of `set` under `relation`: [`group_columns`] for
 /// ML-DSA-44; for ML-DSA-65 and ML-DSA-87 every main-domain column is a family of lanes, in
-/// lane order inside the family (H-exact has H-u's order; H-FIPS puts `L_lo, L_mid, a_L` in the
+/// lane order inside the family (H-FIPS puts `L_lo, L_mid, a_L` in the
 /// slots of `U_lo, U_mid, a_u`, appends `s^(rho)`, then `delta^(rho)`, then `e^(rho)` to
 /// `G_main4` and `u_h` to `G_2`):
 ///
@@ -1049,14 +1015,14 @@ pub struct CommitmentManifest {
 }
 
 impl CommitmentManifest {
-    /// The `HashField::Gf2` manifest of a batch of `records` live records (`1 <= N <= 2^15`)
-    /// under the default relation H-u.
+    /// The `HashField::Gf2` ML-DSA-44 manifest of a batch of `records` live records
+    /// (`1 <= N <= 2^15`) under the default relation H-FIPS.
     pub fn for_batch(records: usize) -> Result<Self, PlanError> {
         Self::for_relation(records, Relation::default())
     }
 
     /// The `HashField::Fp` manifest of a ML-DSA-44 batch of `records` live records under the
-    /// default relation H-u.
+    /// default relation H-FIPS.
     pub fn for_batch_fp(records: usize) -> Result<Self, PlanError> {
         Self::for_relation_fp(records, Relation::default())
     }
@@ -1353,8 +1319,8 @@ impl CommitmentManifest {
         }
     }
 
-    /// The leaf-checked digits in the order of the leaf and link instances: `Z_hi` (base 4),
-    /// `U_hi` (base 6) and `K_2, K_3` (base 8) under H-u; `U_hi, K_2, K_3` under H-exact.
+    /// The leaf-checked digits in the order of the leaf and link instances: `U_hi` (base 6)
+    /// and `K_2, K_3` (base 8) under H-exact; `K_2, K_3` under H-FIPS.
     #[must_use]
     pub fn leaf_digits(&self) -> Vec<Column> {
         self.groups
@@ -1365,7 +1331,7 @@ impl CommitmentManifest {
     }
 
     /// The Boolean value digits proven by a zero-check at `r^(2)` (stage 3), in manifest
-    /// order: none under H-u, `bz_hi` and `a_z` under H-exact.
+    /// order: `bz_hi` and `a_z` under H-exact, also `l_hi` under H-FIPS.
     #[must_use]
     pub fn bool_digits(&self) -> Vec<Column> {
         self.groups
@@ -1376,7 +1342,7 @@ impl CommitmentManifest {
     }
 
     /// Committed polynomials opened at `r^(3)` through stage-3 claims (every group but `G_m`,
-    /// without `G_3`'s zero polynomials): 35 under H-u, 36 under H-exact, 40 under H-FIPS.
+    /// without `G_3`'s zero polynomials): 36 under H-exact, 40 under H-FIPS.
     #[must_use]
     pub fn stage3_polynomials(&self) -> usize {
         self.groups
@@ -1410,7 +1376,7 @@ impl CommitmentManifest {
         }
     }
 
-    /// Total committed polynomials (53 under H-u, 54 under H-exact, 59 under H-FIPS).
+    /// Total committed polynomials (54 under H-exact, 59 under H-FIPS).
     #[must_use]
     pub fn total_polynomials(&self) -> usize {
         self.groups
@@ -1450,7 +1416,7 @@ impl CommitmentManifest {
     /// Canonical byte encoding of the manifest part of the instance record.
     ///
     /// `LE16` wire version, parameter-set byte (`0x44`, `0x65`, `0x87`), relation byte ([`Relation::id`],
-    /// `0` = H-u, `1` = H-exact, `2` = H-FIPS), `LE64` `N`, `LE64` `N*`, digit layout id
+    /// `1` = H-exact, `2` = H-FIPS), `LE64` `N`, `LE64` `N*`, digit layout id
     /// ([`DIGIT_LAYOUT_ID`] = 2, the lookup layout with the projected quotient), group count
     /// (`7` under `Gf2`, `11` under `Fp`); per group: role, round, family (0 = width 4, 1 =
     /// width 16), logical and physical variable counts, polynomial count and one alphabet byte
@@ -1511,15 +1477,15 @@ mod tests {
 
     #[test]
     fn group_shapes_and_digit_counts_match_the_committed_layout() {
-        let manifest = CommitmentManifest::for_batch(256).unwrap();
+        let manifest = CommitmentManifest::for_relation(256, Relation::HExact).unwrap();
         let counts: Vec<usize> = manifest
             .groups()
             .iter()
             .map(GroupDescriptor::polynomial_count)
             .collect();
-        assert_eq!(counts, [4, 8, 6, 12, 12, 4, 7]);
-        assert_eq!(manifest.total_polynomials(), 53);
-        assert_eq!(manifest.stage3_polynomials(), 35);
+        assert_eq!(counts, [4, 9, 6, 12, 12, 4, 7]);
+        assert_eq!(manifest.total_polynomials(), 54);
+        assert_eq!(manifest.stage3_polynomials(), 36);
         // G_3: the carry, then 11 zero polynomials (G_2's layout).
         let level3 = &manifest.group(Group::Level3).columns;
         assert_eq!((level3[0], level3[1], level3[11]), (Column::carry(3, 0), Column::Zero(1), Column::Zero(11)));
@@ -1537,8 +1503,8 @@ mod tests {
         assert_eq!(K16_DIGITS.range(), (-PROJ_BOUND, PROJ_BOUND - 1));
         assert_eq!(K16_DIGITS.constant(), (1 << 34) + (1 << 31) + (1 << 15));
         assert_eq!(K16_DIGITS.decompose(0), vec![-(1 << 15), -(1 << 15), -4, 0]);
-        assert!(manifest.bool_digits().is_empty());
-        assert_eq!(manifest.z_value(), DigitValue::Z);
+        assert_eq!(manifest.bool_digits(), [Column::ZX_HI, Column::A_Z]);
+        assert_eq!(manifest.z_value(), DigitValue::Zx);
         let lookups: Vec<Column> = manifest
             .groups()
             .iter()
@@ -1548,11 +1514,10 @@ mod tests {
         // 2 main-domain columns, 6 + 6 + 1 carries and K_0, K_1.
         assert_eq!(lookups.len(), 17);
         let names: Vec<String> = manifest.leaf_digits().iter().map(|c| c.name()).collect();
-        assert_eq!(names, ["z_hi", "u_hi", "k_2", "k_3"]);
-        assert_eq!(Column::Z_HI.base(), Some(4));
+        assert_eq!(names, ["u_hi", "k_2", "k_3"]);
         assert_eq!(Column::U_HI.base(), Some(6));
         assert_eq!(Column::U_HI.alphabet(), Alphabet::Balanced(6));
-        assert!(Column::Z_HI.is_leaf_digit() && Column::U_HI.is_leaf_digit());
+        assert!(Column::U_HI.is_leaf_digit());
         for group in manifest.groups() {
             assert_eq!(group.round, group.role.round());
             assert_eq!(group.family, group.role.family());
@@ -1609,12 +1574,8 @@ mod tests {
         assert_eq!((Column::ZX_HI.base(), Column::A_Z.alphabet()), (None, Alphabet::Bool));
         assert_eq!((Column::ZX_HI.alphabet_code(), Column::A_Z.alphabet_code()), (0, 0));
         assert!(Column::ZX_HI.is_bool_digit() && !Column::W1Bit(0, 0).is_bool_digit());
-        // The lookup stacks keep their shapes: bz_lo takes the slot of z_lo.
+        // The main lookup stack holds bz_lo and u_lo.
         assert_eq!(manifest.stack_columns(0), [Column::ZX_LO, Column::U_LO]);
-        assert_eq!(
-            manifest.lookup_shape(),
-            CommitmentManifest::for_batch(256).unwrap().lookup_shape()
-        );
         for group in manifest.groups() {
             for (position, &column) in group.columns.iter().enumerate() {
                 assert_eq!(manifest.locate(column), (group.role, position));
@@ -1624,9 +1585,11 @@ mod tests {
             }
         }
         // b_t keep positions 2..7 of G_main4 under both relations.
-        let hu = CommitmentManifest::for_batch(256).unwrap();
+        let fips = CommitmentManifest::for_batch(256).unwrap();
+        assert_eq!(fips.relation(), Relation::HFips);
         for t in 0..W1_BITS as u8 {
-            assert_eq!(manifest.locate(Column::W1Bit(t, 0)), hu.locate(Column::W1Bit(t, 0)));
+            assert_eq!(manifest.locate(Column::W1Bit(t, 0)), fips.locate(Column::W1Bit(t, 0)));
+            assert_eq!(manifest.locate(Column::W1Bit(t, 0)), (Group::Main, 2 + usize::from(t)));
         }
         // H-exact z: z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225 over exactly [-B_z, B_z].
         let form = DigitValue::Zx.layout();
@@ -1671,12 +1634,13 @@ mod tests {
         // u_h takes the free slot 6 of stack 2: the lookup keeps its depths and L.
         assert_eq!(manifest.stack_columns(2).len(), 7);
         assert_eq!(manifest.stack_columns(2)[6], Column::HINT_SLACK);
-        let (fips, hu) = (manifest.lookup_shape(), CommitmentManifest::for_batch(256).unwrap().lookup_shape());
-        assert_eq!(fips.stacks[2].columns, 7);
-        for (a, b) in fips.stacks.iter().zip(&hu.stacks) {
+        let exact = CommitmentManifest::for_relation(256, Relation::HExact).unwrap().lookup_shape();
+        let fips = manifest.lookup_shape();
+        assert_eq!((fips.stacks[2].columns, exact.stacks[2].columns), (7, 6));
+        for (a, b) in fips.stacks.iter().zip(&exact.stacks) {
             assert_eq!(a.depth(), b.depth());
         }
-        assert_eq!(fips.lookups(0), hu.lookups(0));
+        assert_eq!(fips.lookups(0), exact.lookups(0));
         for group in manifest.groups() {
             for (position, &column) in group.columns.iter().enumerate() {
                 assert_eq!(manifest.locate(column), (group.role, position));
@@ -1711,12 +1675,10 @@ mod tests {
 
     #[test]
     fn digit_layouts_give_the_l16_ranges() {
-        // z = Z_lo + 2^16 Z_hi + 2^15 and likewise for v.
-        for layout in [Z16_DIGITS, V16_DIGITS] {
-            assert_eq!(layout.constant(), 1 << 15);
-            assert_eq!(layout.weights(), vec![1, 1 << 16]);
-        }
-        // H-u: u = U_lo + 63,079 U_hi + 31,540 over exactly [-190,465, 190,465].
+        // v = V_lo + 2^16 V_hi + 2^15.
+        assert_eq!(V16_DIGITS.constant(), 1 << 15);
+        assert_eq!(V16_DIGITS.weights(), vec![1, 1 << 16]);
+        // H-exact: u = U_lo + 63,079 U_hi + 31,540 over exactly [-190,465, 190,465].
         assert_eq!(U16_DIGITS.weights(), vec![1, 63_079]);
         assert_eq!(U16_DIGITS.constant(), 31_540);
         assert_eq!(U16_DIGITS.range(), (-190_465, 190_465));
@@ -1730,20 +1692,13 @@ mod tests {
         for x in [190_466, -190_466, 1 << 18] {
             assert!(!U16_DIGITS.in_alphabets(&U16_DIGITS.decompose(x)), "{x}");
         }
-        assert_eq!(Z16_DIGITS.range(), (-(1 << 17), (1 << 17) - 1));
         assert_eq!(V16_DIGITS.range(), (-(1 << 31), (1 << 31) - 1));
         assert_eq!(CARRY16_DIGITS.range(), (0, (1 << 16) - 1));
         assert_eq!(CARRY16_DIGITS.constant(), 1 << 15);
-        // The digits of zero: Z_lo = V_lo = -2^15, Z_hi = V_hi = 0; U_lo = -31,540 (B_ulo =
-        // 1,228), U_hi = 0 (H_u = 3).
-        assert_eq!(Z16_DIGITS.decompose(0), vec![-(1 << 15), 0]);
+        // The digits of zero: V_lo = -2^15, V_hi = 0; U_lo = -31,540 (B_ulo = 1,228),
+        // U_hi = 0 (H_u = 3).
         assert_eq!(U16_DIGITS.decompose(0), vec![-31_540, 0]);
         assert_eq!(V16_DIGITS.decompose(0), vec![-(1 << 15), 0]);
-        for x in [-(1 << 17), -130_993, -1, 0, 1, 130_993, (1 << 17) - 1] {
-            let digits = Z16_DIGITS.decompose(x);
-            assert!(Z16_DIGITS.in_alphabets(&digits));
-            assert_eq!(Z16_DIGITS.compose(&digits), x);
-        }
         for x in [-67_068_447, 0, 67_068_447, -(1 << 31), (1 << 31) - 1] {
             let digits = V16_DIGITS.decompose(x);
             assert!(V16_DIGITS.in_alphabets(&digits));
@@ -1753,14 +1708,15 @@ mod tests {
 
     #[test]
     fn committed_elements_per_signature() {
-        // 12,288 main-domain elements, 96 + 12 + 0.5 bridge elements, 5.5 for G_3's 11 zero
-        // polynomials, 4 * 128 projection digits and the 7 * 2^16 multiplicity cells (14 per
-        // signature) at N = 2^15.
-        let full = CommitmentManifest::for_batch(1 << 15).unwrap();
+        // H-exact: 13,312 main-domain elements, 96 + 12 + 0.5 bridge elements, 5.5 for G_3's
+        // 11 zero polynomials, 4 * 128 projection digits and the 7 * 2^16 multiplicity cells
+        // (14 per signature) at N = 2^15: 13,952; 14,560 physical at N = 1,024.
+        let full = CommitmentManifest::for_relation(1 << 15, Relation::HExact).unwrap();
         assert_eq!(full.d_main(), 25);
         assert_eq!(full.segments(), 4);
         let per_signature = full.total_logical_cells() as f64 / f64::from(1 << 15);
-        assert!((per_signature - 12_928.0).abs() < 1e-9, "{per_signature}");
+        assert!((per_signature - 13_952.0).abs() < 1e-9, "{per_signature}");
+        assert_eq!(full.catalog_row(), "mldsa-44-p16x-batch-32768-mult-final");
         let small = CommitmentManifest::for_batch(256).unwrap();
         assert_eq!(small.d_main(), 18);
         assert_eq!(small.segments(), 1);
@@ -1769,7 +1725,7 @@ mod tests {
         assert_eq!(logical, [18, 18, 13, 13, 12, 15, 16]);
         assert_eq!(physical, [18, 18, 13, 13, 13, 15, 16]);
         assert_eq!(small.group(Group::Level3).pad_vars(), 1);
-        assert_eq!(small.catalog_row(), "mldsa-44-p16-batch-256-mult-final");
+        assert_eq!(small.catalog_row(), "mldsa-44-p16f-batch-256-mult-final");
         // G_3 has G_2's physical layout at every size (one trailing pad variable).
         for d_sig in 3..=15 {
             let m = CommitmentManifest::for_batch(1 << d_sig).unwrap();
@@ -1777,12 +1733,6 @@ mod tests {
             assert_eq!((l3.physical_vars, l3.polynomial_count()), (l2.physical_vars, l2.polynomial_count()));
             assert_eq!(l3.pad_vars(), 1);
         }
-        // H-exact: one more main-domain column, 13,952 elements per signature at 2^15;
-        // 14,560 physical at N = 1,024.
-        let exact = CommitmentManifest::for_relation(1 << 15, Relation::HExact).unwrap();
-        let per_signature = exact.total_logical_cells() as f64 / f64::from(1 << 15);
-        assert!((per_signature - 13_952.0).abs() < 1e-9, "{per_signature}");
-        assert_eq!(exact.catalog_row(), "mldsa-44-p16x-batch-32768-mult-final");
         let physical = |m: &CommitmentManifest| -> usize {
             m.groups()
                 .iter()
@@ -1791,7 +1741,7 @@ mod tests {
         };
         let k = CommitmentManifest::for_relation(1024, Relation::HExact).unwrap();
         assert_eq!(physical(&k) / 1024, 14_560);
-        assert_eq!(physical(&CommitmentManifest::for_batch(1024).unwrap()) / 1024, 13_536);
+        assert_eq!(physical(&CommitmentManifest::for_batch(1024).unwrap()) / 1024, 17_648);
     }
 
     #[test]
@@ -1803,7 +1753,7 @@ mod tests {
         assert_eq!(depths, [26, 22, 18, 14, 23]);
         assert_eq!(shape.lookups(0), 79_970_304);
         assert_eq!(shape.max_depth(), 26);
-        for (stack, columns) in (0..5).map(|s| (s, stack_columns(s, Relation::Hu))) {
+        for (stack, columns) in (0..5).map(|s| (s, stack_columns(s, Relation::HFips))) {
             assert_eq!(shape.stacks[stack].columns, columns.len());
             for column in columns {
                 assert!(column.is_lookup());
@@ -1816,7 +1766,7 @@ mod tests {
     fn manifest_matches_the_work_plan() {
         for records in [1, 256, 1000, 5000] {
             let manifest = CommitmentManifest::for_batch(records).unwrap();
-            let plan = WorkPlan::for_records(records, Relation::Hu).unwrap();
+            let plan = WorkPlan::for_records(records, Relation::HFips).unwrap();
             assert!(manifest.matches_plan(&plan), "N = {records}");
         }
         for &d_sig in Relation::HExact.catalog_d_sigs() {
@@ -1824,10 +1774,10 @@ mod tests {
             let manifest = CommitmentManifest::for_relation(records, Relation::HExact).unwrap();
             let plan = WorkPlan::for_records(records, Relation::HExact).unwrap();
             assert!(manifest.matches_plan(&plan), "H-exact N = {records}");
-            let hu = WorkPlan::for_records(records, Relation::Hu).unwrap();
-            assert!(!manifest.matches_plan(&hu), "H-exact against the H-u plan");
+            let fips = WorkPlan::for_records(records, Relation::HFips).unwrap();
+            assert!(!manifest.matches_plan(&fips), "H-exact against the H-FIPS plan");
         }
-        let other = WorkPlan::for_records(512, Relation::Hu).unwrap();
+        let other = WorkPlan::for_records(512, Relation::HFips).unwrap();
         assert!(!CommitmentManifest::for_batch(256)
             .unwrap()
             .matches_plan(&other));
@@ -1837,32 +1787,33 @@ mod tests {
     fn binding_bytes_are_pinned_and_separate_batches() {
         let manifest = CommitmentManifest::for_batch(200).unwrap();
         let bytes = manifest.binding_bytes();
-        let mut expected = vec![4, 0, 0x44, 0];
+        let mut expected = vec![4, 0, 0x44, 2];
         expected.extend_from_slice(&200_u64.to_le_bytes());
         expected.extend_from_slice(&256_u64.to_le_bytes());
         expected.extend_from_slice(&[2, 7]);
         assert_eq!(&bytes[..expected.len()], expected.as_slice());
-        // G_main16: role 0, round 1, family 1, 18 logical and physical vars, 4 polys: z_lo and
-        // u_lo looked up, v_lo and v_hi unchecked.
+        // G_main16: role 0, round 1, family 1, 18 logical and physical vars, 4 polys: bz_lo and
+        // l_lo looked up, v_lo and v_hi unchecked.
         let main16 = &bytes[expected.len()..];
         assert_eq!(&main16[..6], &[0, 1, 1, 18, 18, 4]);
         assert_eq!(&main16[6..10], &[0x90, 0x90, 0x10 | 16, 0x10 | 16]);
-        // G_main4: role 1, round 1, family 0, then z_hi (4), u_hi (6, H-u) and six bits.
+        // G_main4: role 1, round 1, family 0, then bz_hi, l_hi, six bits, a_z, s (bits) and
+        // delta, e (ternary).
         let main4 = &main16[10..];
-        assert_eq!(&main4[..14], &[1, 1, 0, 18, 18, 8, 4, 6, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(manifest.relation(), Relation::Hu);
-        assert_eq!(Relation::from_id(RELATION_HU), Some(Relation::Hu));
+        assert_eq!(&main4[..18], &[1, 1, 0, 18, 18, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x23, 0x23]);
+        assert_eq!(manifest.relation(), Relation::HFips);
         assert_eq!(Relation::from_id(RELATION_H_EXACT), Some(Relation::HExact));
         assert_eq!(Relation::from_id(RELATION_H_FIPS), Some(Relation::HFips));
+        assert_eq!(Relation::from_id(0), None);
         assert_eq!(Relation::from_id(3), None);
         assert_eq!(
-            CommitmentManifest::for_relation(200, Relation::Hu).unwrap(),
+            CommitmentManifest::for_relation(200, Relation::HFips).unwrap(),
             manifest
         );
         let row = manifest.catalog_row().len();
         assert_eq!(
             bytes.len(),
-            expected.len() + 7 * 6 + 53 + 2 + row + 3 * 17 + 3 + 1 + 5 * 7
+            expected.len() + 7 * 6 + 59 + 2 + row + 3 * 17 + 3 + 1 + 5 * 7
         );
         // Live count, padded count and the catalog row all enter the binding.
         let full = CommitmentManifest::for_batch(256).unwrap();
@@ -1886,7 +1837,7 @@ mod tests {
         assert_eq!(&xmain16[..10], &main16[..10]);
         assert_eq!(&xmain16[10..25], &[1, 1, 0, 18, 18, 9, 0, 6, 0, 0, 0, 0, 0, 0, 0]);
         let xrow = exact.catalog_row().len();
-        assert_eq!(xrow, row + 1);
+        assert_eq!(xrow, row);
         assert_eq!(
             xbytes.len(),
             expected.len() + 7 * 6 + 54 + 2 + xrow + 3 * 17 + 3 + 1 + 5 * 7
@@ -1910,7 +1861,7 @@ mod tests {
             assert_eq!(shape.lane_cells(), 256);
             assert_eq!(shape.row_lane(5), (5, 0));
             let (k, l) = (shape.k, shape.l);
-            let manifest = CommitmentManifest::for_set(set, 256, Relation::Hu).unwrap();
+            let manifest = CommitmentManifest::for_set(set, 256, Relation::HExact).unwrap();
             assert_eq!(manifest.set(), set);
             let got: Vec<usize> = manifest.groups().iter().map(GroupDescriptor::polynomial_count).collect();
             assert_eq!(got, counts, "{set}");
@@ -1921,7 +1872,7 @@ mod tests {
             // Every group agrees with the catalog layout and every column with its group.
             for group in manifest.groups() {
                 assert_eq!(group.logical_vars, group.role.logical_vars(set, 8));
-                assert_eq!(group.polynomial_count(), group.role.num_polynomials(set, Relation::Hu));
+                assert_eq!(group.polynomial_count(), group.role.num_polynomials(set, Relation::HExact));
                 for (position, &column) in group.columns.iter().enumerate() {
                     assert_eq!(manifest.locate(column), (group.role, position));
                     assert_eq!(column.group(), group.role);
@@ -1935,7 +1886,7 @@ mod tests {
             }
             // G_main16: Z_lo lanes, U_lo lanes, V_lo lanes, V_hi lanes.
             let main16 = &manifest.group(Group::Main16).columns;
-            assert_eq!(main16[0], Column::lane_digit(DigitValue::Zd, 0, 0));
+            assert_eq!(main16[0], Column::lane_digit(DigitValue::Zdx(set), 0, 0));
             assert_eq!(main16[l], Column::lane_digit(DigitValue::Ud, 0, 0));
             assert_eq!(main16[l + k - 1].name(), format!("u_lo[{}]", k - 1));
             assert_eq!(main16[l + k], Column::V_LO);
@@ -1948,13 +1899,13 @@ mod tests {
             assert_eq!(manifest.locate(Column::W1Bit(3, 2)).1, 2 * l + 2 * k + 3 * k + 2);
             assert_eq!(main4.len(), 2 * l + 2 * k + 4 * k);
             // Alphabets and codes: base-8 middle digits, Boolean slacks, a base-4 K_4.
-            let z_mid = Column::lane_digit(DigitValue::Zd, 1, 2);
+            let z_mid = Column::lane_digit(DigitValue::Zdx(set), 1, 2);
             let a_u = Column::lane_digit(DigitValue::Ud, 2, 1);
             let k4 = Column::lane_digit(DigitValue::K5, 4, 0);
             assert_eq!((z_mid.alphabet(), z_mid.alphabet_code()), (Alphabet::Balanced(8), 8));
             assert_eq!((a_u.alphabet(), a_u.alphabet_code()), (Alphabet::Bool, 0));
             assert_eq!((k4.alphabet(), k4.alphabet_code()), (Alphabet::Balanced(4), 4));
-            assert!(Column::lane_digit(DigitValue::Zd, 0, 4).is_lookup());
+            assert!(Column::lane_digit(DigitValue::Zdx(set), 0, 4).is_lookup());
             assert!(z_mid.is_leaf_digit() && k4.is_leaf_digit() && a_u.is_bool_digit());
             assert_eq!((z_mid.lane(), z_mid.in_lane(0).lane()), (2, 0));
             let leaves: Vec<String> = manifest.leaf_digits().iter().map(|c| c.name()).collect();
@@ -1962,18 +1913,18 @@ mod tests {
             assert_eq!(&leaves[l + k..], ["k_2", "k_3", "k_4"]);
             assert_eq!(manifest.bool_digits().len(), l + k);
             assert_eq!(manifest.group(Group::Proj).columns, value_columns(DigitValue::K5));
-            assert_eq!((manifest.z_value(), manifest.u_slot_value(), manifest.k_value()), (DigitValue::Zd, DigitValue::Ud, DigitValue::K5));
+            assert_eq!((manifest.z_value(), manifest.u_slot_value(), manifest.k_value()), (DigitValue::Zdx(set), DigitValue::Ud, DigitValue::K5));
             assert_eq!(manifest.proj_bytes(), 128 * 256 * k / 8);
             assert_eq!(manifest.proj_bound(), 1 << 39);
             // G_3: kappa^(3) and seven zero polynomials.
             let level3 = &manifest.group(Group::Level3);
             assert_eq!((level3.columns[0], level3.columns[7], level3.claimed_count()), (Column::carry(3, 0), Column::Zero(7), 1));
             // Committed cells per signature at 2^15: 256 per main polynomial.
-            let full = CommitmentManifest::for_set(set, 1 << 15, Relation::Hu).unwrap();
+            let full = CommitmentManifest::for_set(set, 1 << 15, Relation::HExact).unwrap();
             let main_cells = (counts[0] + counts[1]) * 256;
             assert_eq!(main_cells, if set == Set::S65 { 17_664 } else { 23_808 });
             assert_eq!(full.total_logical_cells(), cells << 15, "{set}");
-            assert_eq!(full.catalog_row(), format!("mldsa-{}-p16-batch-32768-mult-final", set.name()));
+            assert_eq!(full.catalog_row(), format!("mldsa-{}-p16x-batch-32768-mult-final", set.name()));
             // Lookup stacks: the main stack split 8, 2, 1 (8, 4, 2, 1); four carry lanes in four
             // slots, so no stack pads.
             assert_eq!(main_stack_sizes(set), stacks[..stacks.len() - 4]);
@@ -2001,9 +1952,9 @@ mod tests {
             assert_eq!(full.carry_stack(1), full.main_stacks());
             assert_eq!(full.stack_columns(full.proj_stack()), value_columns(DigitValue::K5)[..2]);
             // The binding bytes carry the set, the lane layout and the four-lane bridge shape.
-            let manifest = CommitmentManifest::for_set(set, 200, Relation::Hu).unwrap();
+            let manifest = CommitmentManifest::for_set(set, 200, Relation::HExact).unwrap();
             let bytes = manifest.binding_bytes();
-            assert_eq!(&bytes[..4], &[4, 0, set.id(), 0]);
+            assert_eq!(&bytes[..4], &[4, 0, set.id(), RELATION_H_EXACT]);
             let main16 = &bytes[4 + 16 + 2..];
             assert_eq!(&main16[..6], &[0, 1, 1, 16, 16, counts[0] as u8]);
             assert!(main16[6..6 + l + k].iter().all(|&c| c == LOOKUP_ALPHABET_CODE));
@@ -2014,8 +1965,8 @@ mod tests {
             let bridge = &bytes[4 + 16 + 2 + 7 * 6 + polys + 2 + row..][..3 * 17];
             assert_eq!(&bridge[34..42], &32_768_u64.to_le_bytes());
             assert_ne!(bytes, CommitmentManifest::for_batch(200).unwrap().binding_bytes());
-            assert!(manifest.matches_plan(&WorkPlan::for_set(set, 200, Relation::Hu).unwrap()));
-            assert!(!manifest.matches_plan(&WorkPlan::for_records(200, Relation::Hu).unwrap()));
+            assert!(manifest.matches_plan(&WorkPlan::for_set(set, 200, Relation::HExact).unwrap()));
+            assert!(!manifest.matches_plan(&WorkPlan::for_records(200, Relation::HExact).unwrap()));
             // H-FIPS: the magnitude L and three columns per row lane, the hint slack in G_2 and
             // in a fifth slot of the level-2 lookup stack.
             let fips = CommitmentManifest::for_set(set, 200, Relation::HFips).unwrap();
@@ -2027,19 +1978,12 @@ mod tests {
             assert_eq!(fips.bool_digits().len(), l + 2 * k);
             assert_eq!(fips.leaf_digits().len(), l + 3);
             assert_eq!(fips.catalog_row(), format!("mldsa-{}-p16f-batch-256-mult-final", set.name()));
-            // H-exact: H-u's columns, alphabets and Akita layout (only the slack weight of the
-            // z form differs), its own relation byte and catalog row name.
-            let exact = CommitmentManifest::for_set(set, 200, Relation::HExact).unwrap();
-            assert_eq!(exact.z_value(), DigitValue::Zdx(set));
-            for (a, b) in exact.groups().iter().zip(manifest.groups()) {
-                let codes = |g: &GroupDescriptor| g.columns.iter().map(|c| c.alphabet_code()).collect::<Vec<_>>();
-                assert_eq!((a.physical_vars, codes(a)), (b.physical_vars, codes(b)));
-            }
-            assert!(exact.matches_plan(&WorkPlan::for_set(set, 200, Relation::HExact).unwrap()));
-            assert_eq!(exact.catalog_row(), format!("mldsa-{}-p16x-batch-256-mult-final", set.name()));
-            let exact_bytes = exact.binding_bytes();
-            assert_eq!(&exact_bytes[..4], &[4, 0, set.id(), RELATION_H_EXACT]);
-            assert_eq!(exact_bytes.len(), bytes.len() + 1, "the row name gains the x");
+            // H-exact's own catalog row name and plan.
+            assert_eq!(manifest.catalog_row(), format!("mldsa-{}-p16x-batch-256-mult-final", set.name()));
+            assert!(!manifest.matches_plan(&WorkPlan::for_set(set, 200, Relation::HFips).unwrap()));
+            let fips_bytes = fips.binding_bytes();
+            assert_eq!(&fips_bytes[..4], &[4, 0, set.id(), RELATION_H_FIPS]);
+            assert_ne!(fips_bytes, bytes);
         }
         // ML-DSA-44 keeps one lane per column and its own stacks.
         let shape = SetShape::of(Set::S44);
@@ -2062,7 +2006,7 @@ mod tests {
         use crate::lookup::MULTIPLICITY_CAPACITY;
         let records = (1 << 14) + 1;
         for set in [Set::S44, Set::S65, Set::S87] {
-            for relation in [Relation::Hu, Relation::HExact, Relation::HFips] {
+            for relation in Relation::ALL {
                 if !relation.is_available(set) {
                     continue;
                 }
@@ -2089,18 +2033,18 @@ mod tests {
 
     #[test]
     fn lane_set_forms_cover_their_ranges() {
-        // z: [-2^19, 2^19), digits of zero (-2^15, -4, 1).
-        let z = DigitValue::Zd.layout();
-        assert_eq!(z.range(), (-(1 << 19), (1 << 19) - 1));
-        assert_eq!(z.decompose(0), vec![-(1 << 15), -4, 1]);
-        assert_eq!((z.weights(), z.constant()), (vec![1, 1 << 16, 1 << 19], -229_376));
+        // z of ML-DSA-65: exactly [-B_z, B_z] with B_z = 524,091, slack weight 523,895.
+        let z = DigitValue::Zdx(Set::S65).layout();
+        let b_z = 524_091;
+        assert_eq!(z.range(), (-b_z, b_z));
+        assert_eq!((z.weights(), z.constant()), (vec![1, 1 << 16, 523_895], (1 << 15) + (4 << 16) - b_z));
         // u: exactly [-523,777, 523,777], digits of zero (32,257, 3, 0).
         let u = DigitValue::Ud.layout();
         assert_eq!(u.range(), (-523_777, 523_777));
         assert_eq!(u.decompose(0), vec![32_257, 3, 0]);
         assert_eq!((u.weights(), u.constant()), (vec![1, 1 << 16, 523_267], -228_865));
         for (form, inside, outside) in [
-            (z, [-(1 << 19), -1, 0, (1 << 19) - 1], [-(1 << 19) - 1, 1 << 19]),
+            (z, [-b_z, -1, 0, b_z], [-b_z - 1, b_z + 1]),
             (u, [-523_777, -1, 0, 523_777], [-523_778, 523_778]),
         ] {
             for x in inside {
@@ -2139,7 +2083,7 @@ mod tests {
             }
         }
         let digest: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(digest, "fb66b352877d6b17fa8d2105ef1361816995311c8dbc46bf55ed1086b8abbc96");
+        assert_eq!(digest, "f9a87b92bcdab520c415d38983fff34b393bd3d1f72a6a76f10b7a3e0290e0ef");
     }
 
     #[test]
@@ -2154,47 +2098,19 @@ mod tests {
     }
 
     #[test]
-    fn gf2_ml_dsa_44_hu_1024_binding_bytes_match_frozen_vector() {
-        const FROZEN_HEX: &str = concat!(
-            "04004400000400000000000000040000000000000207",
-            "00010114140490901010",
-            "0101001414080406000000000000",
-            "0202010e0e06909090909090",
-            "0302010d0d0c000000000000909090909090",
-            "0402010c0d0c900808080808080808080808",
-            "05020111110490900808",
-            "06020010100750505050505050",
-            "22006d6c6473612d34342d7031362d62617463682d313032342d6d756c742d66696e616c",
-            "000008000000000000200000000000000e",
-            "000008000000000000200000000000000e",
-            "00c0000000000000001000000000000012",
-            "02011005",
-            "02140000800000",
-            "060e0000800000",
-            "060d0000800000",
-            "010c0000800000",
-            "02110000800000",
-        );
-        let manifest = CommitmentManifest::for_batch(1024).unwrap();
-        assert_eq!(manifest.hash_field(), HashField::Gf2);
-        let hex: String = manifest.binding_bytes().iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(hex, FROZEN_HEX);
-    }
-
-    #[test]
     fn fp_manifest_groups_columns_and_binding_bytes() {
-        let manifest = CommitmentManifest::for_batch_fp(1024).unwrap();
+        let manifest = CommitmentManifest::for_relation_fp(1024, Relation::HExact).unwrap();
         assert_eq!(manifest.hash_field(), HashField::Fp);
         assert_eq!(manifest.groups().len(), GROUP_COUNT_FP);
-        assert_eq!(manifest.catalog_row(), "mldsa-44-p16-fp-batch-1024-mult-final");
+        assert_eq!(manifest.catalog_row(), "mldsa-44-p16x-fp-batch-1024-mult-final");
         let counts: Vec<usize> = manifest
             .groups()
             .iter()
             .map(GroupDescriptor::polynomial_count)
             .collect();
-        assert_eq!(counts, [4, 8, 55, 55, 55, 55, 55, 55, 55, 4, 7]);
-        assert_eq!(manifest.total_polynomials(), 408);
-        assert_eq!(manifest.stage3_polynomials(), 401);
+        assert_eq!(counts, [4, 9, 55, 55, 55, 55, 55, 55, 55, 4, 7]);
+        assert_eq!(manifest.total_polynomials(), 409);
+        assert_eq!(manifest.stage3_polynomials(), 402);
 
         // Keccak columns: alphabet Bool, code 0, locate and group round-trip.
         for y in 0..5_u8 {
@@ -2236,7 +2152,7 @@ mod tests {
         // Lookup shape under Fp for ML-DSA-44: two stacks ([Z_lo | U_lo], [K_0 | K_1]).
         let lookup = manifest.lookup_shape();
         assert_eq!(lookup.stacks.len(), 2);
-        assert_eq!(manifest.stack_columns(0), [Column::Z_LO, Column::U_LO]);
+        assert_eq!(manifest.stack_columns(0), [Column::ZX_LO, Column::U_LO]);
         assert_eq!(manifest.stack_columns(1), [Column::K_0, Column::K_1]);
         assert_eq!((lookup.stacks[0].columns, lookup.stacks[0].vars), (2, 20));
         assert_eq!((lookup.stacks[1].columns, lookup.stacks[1].vars), (2, 17));
@@ -2245,7 +2161,7 @@ mod tests {
         let bytes = manifest.binding_bytes();
         assert_eq!(bytes[21], GROUP_COUNT_FP as u8);
         let row = manifest.catalog_row().len();
-        let expected_len = 22 + GROUP_COUNT_FP * 6 + 408 + 2 + row + 3 + 1 + 2 * 7;
+        let expected_len = 22 + GROUP_COUNT_FP * 6 + 409 + 2 + row + 3 + 1 + 2 * 7;
         assert_eq!(bytes.len(), expected_len);
         // Lookup trailer at the end: challenges 2, 1 table of width 16, 2 stacks.
         let trailer = &bytes[bytes.len() - (4 + 2 * 7)..];
@@ -2254,9 +2170,9 @@ mod tests {
         assert_eq!(&trailer[11..18], &[2, 17, 0, 0x00, 0x80, 0x00, 0x00]);
 
         // ML-DSA-87 under Fp: 70 polynomials per Keccak group (Q = 14).
-        let m87 = CommitmentManifest::for_set_fp(Set::S87, 1024, Relation::Hu).unwrap();
+        let m87 = CommitmentManifest::for_set_fp(Set::S87, 1024, Relation::HExact).unwrap();
         assert_eq!(m87.group(Group::KeccakA(0)).polynomial_count(), 70);
         assert_eq!(m87.group(Group::KeccakA(0)).logical_vars, 20);
-        assert_eq!(m87.catalog_row(), "mldsa-87-p16-fp-batch-1024-mult-final");
+        assert_eq!(m87.catalog_row(), "mldsa-87-p16x-fp-batch-1024-mult-final");
     }
 }

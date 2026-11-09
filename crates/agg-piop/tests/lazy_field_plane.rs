@@ -40,7 +40,7 @@ fn default_aggregate_builds_no_lazy_field_plane() {
             instance: &instance,
             records: &inputs,
             signatures: &signatures,
-            relation: Relation::Hu,
+            relation: Relation::HFips,
         };
 
         let before = akita_cpu_backend::diagnostics::lazy_field_plane_builds();

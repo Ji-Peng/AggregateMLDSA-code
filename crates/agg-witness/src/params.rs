@@ -189,18 +189,6 @@ pub trait ParamSet: Copy + Send + Sync + 'static {
         }
     };
 
-    /// Proven bound on |z| in relation H-u: bar B_z.
-    const BAR_B_Z: i64;
-    /// Proven bound on |u| in relation H-u: bar B_u = B_u.
-    const BAR_B_U: i64 = Self::B_U;
-    /// SelfTargetMSIS bound zeta' = max(bar B_z, bar B_u + 2^(d-1) * tau) for relation H-u.
-    const ZETA_PRIME: i64 =
-        if Self::BAR_B_Z > Self::BAR_B_U + (1 << (Self::D - 1)) * Self::TAU as i64 {
-            Self::BAR_B_Z
-        } else {
-            Self::BAR_B_U + (1 << (Self::D - 1)) * Self::TAU as i64
-        };
-
     /// Honest encoding range of the quotient v (two 16-bit halves): [-2^31, 2^31 - 1]. It is
     /// not proven: v carries no range check, and the projection bounds it.
     const V_HALF_RANGE: i64 = 1 << 31;
@@ -251,7 +239,7 @@ pub trait ParamSet: Copy + Send + Sync + 'static {
     const PROJ_BYTES: usize = 128 * Self::P_POSITIONS / 8;
 
     // -----------------------------------------------------------------------------------------
-    // H-u digit forms.
+    // Digit forms of u (relation H-exact) and of z.
     // -----------------------------------------------------------------------------------------
 
     /// Step of the top digit of u for step layout (63,079 for Set44; 0 for Set65/Set87).
@@ -260,12 +248,10 @@ pub trait ParamSet: Copy + Send + Sync + 'static {
     const U_TOP_BASE: u32;
     /// Slack for u in digit-slack form (523,267 for Set65/Set87; 0 for Set44).
     const U_SLACK: i64;
-    /// Reconstruction offset for u in relation H-u.
+    /// Reconstruction offset for u in relation H-exact.
     const U_OFFSET: i64;
     /// Weight of Boolean slack a_z for Set44 H-exact (130,915).
     const SLACK_Z: i64;
-    /// Reconstruction offset for z in relation H-u (-229,376 for Set65/Set87; 0 for Set44).
-    const Z_OFFSET: i64;
 
     // -----------------------------------------------------------------------------------------
     // Associated types and per-set vector/matrix storage.
@@ -471,7 +457,6 @@ impl ParamSet for Set44 {
     const ETA: i64 = 2;
     const OMEGA: usize = 80;
 
-    const BAR_B_Z: i64 = 1 << 17;
 
     const D_VEC: u32 = 2;
     const LANES_K: usize = 1;
@@ -489,7 +474,6 @@ impl ParamSet for Set44 {
     const U_SLACK: i64 = 0;
     const U_OFFSET: i64 = -190_465;
     const SLACK_Z: i64 = 130_915;
-    const Z_OFFSET: i64 = 0;
 
     type Signer = ml_dsa::MlDsa44;
     type VecK = [Poly; 4];
@@ -566,7 +550,6 @@ impl ParamSet for Set65 {
     const ETA: i64 = 4;
     const OMEGA: usize = 55;
 
-    const BAR_B_Z: i64 = 1 << 19;
 
     const D_VEC: u32 = 0;
     const LANES_K: usize = 6;
@@ -584,7 +567,6 @@ impl ParamSet for Set65 {
     const U_SLACK: i64 = 523_267;
     const U_OFFSET: i64 = -228_865;
     const SLACK_Z: i64 = 0;
-    const Z_OFFSET: i64 = -229_376;
 
     type Signer = ml_dsa::MlDsa65;
     type VecK = [Poly; 6];
@@ -661,7 +643,6 @@ impl ParamSet for Set87 {
     const ETA: i64 = 2;
     const OMEGA: usize = 75;
 
-    const BAR_B_Z: i64 = 1 << 19;
 
     const D_VEC: u32 = 0;
     const LANES_K: usize = 8;
@@ -679,7 +660,6 @@ impl ParamSet for Set87 {
     const U_SLACK: i64 = 523_267;
     const U_OFFSET: i64 = -228_865;
     const SLACK_Z: i64 = 0;
-    const Z_OFFSET: i64 = -229_376;
 
     type Signer = ml_dsa::MlDsa87;
     type VecK = [Poly; 8];
@@ -764,7 +744,6 @@ macro_rules! impl_simd_params {
             const STEP_U: i32 = <$set as ParamSet>::STEP_U as i32;
             const U_SLACK: i32 = <$set as ParamSet>::U_SLACK as i32;
             const U_OFFSET: i32 = <$set as ParamSet>::U_OFFSET as i32;
-            const Z_OFFSET: i32 = <$set as ParamSet>::Z_OFFSET as i32;
             const C_TILDE_BYTES: usize = <$set as ParamSet>::C_TILDE_BYTES;
             const PK_BYTES: usize = <$set as ParamSet>::PK_BYTES;
             const SIG_BYTES: usize = <$set as ParamSet>::SIG_BYTES;
@@ -797,7 +776,6 @@ macro_rules! simd_params_agree {
             assert!(<$w as S>::STEP_U == <$s as S>::STEP_U);
             assert!(<$w as S>::U_SLACK == <$s as S>::U_SLACK);
             assert!(<$w as S>::U_OFFSET == <$s as S>::U_OFFSET);
-            assert!(<$w as S>::Z_OFFSET == <$s as S>::Z_OFFSET);
             assert!(<$w as S>::C_TILDE_BYTES == <$s as S>::C_TILDE_BYTES);
             assert!(<$w as S>::PK_BYTES == <$s as S>::PK_BYTES);
             assert!(<$w as S>::SIG_BYTES == <$s as S>::SIG_BYTES);
@@ -807,7 +785,6 @@ macro_rules! simd_params_agree {
             assert!(<$w as S>::B_T as i64 == <$w as ParamSet>::B_T);
             assert!(<$w as S>::GAMMA1 as i64 == <$w as ParamSet>::GAMMA1);
             assert!(<$w as S>::U_OFFSET as i64 == <$w as ParamSet>::U_OFFSET);
-            assert!(<$w as S>::Z_OFFSET as i64 == <$w as ParamSet>::Z_OFFSET);
             assert!(<$w as S>::U_SLACK as i64 == <$w as ParamSet>::U_SLACK);
             assert!(<$w as S>::STEP_U as i64 == <$w as ParamSet>::STEP_U);
         };
@@ -894,21 +871,15 @@ pub const ZETA_MSIS: i64 = Set44::ZETA_MSIS;
 /// w1Encode bits per signature: k 256 6.
 pub const W1LEN: usize = Set44::W1LEN;
 
-/// Proven bound on |z| in relation H-u: bar B_z = 2^17 (z in [-2^17, 2^17 - 1]).
-pub const BAR_B_Z: i64 = Set44::BAR_B_Z;
-/// Proven bound on |u| in relation H-u: bar B_u = B_u = 190,465, exact and symmetric.
-pub const BAR_B_U: i64 = Set44::BAR_B_U;
-/// Step of the six-valued top digit of u in relation H-u.
+/// Step of the six-valued top digit of u in relation H-exact.
 pub const STEP_U: i64 = Set44::STEP_U;
-/// Base of the top digit H_u of u in relation H-u.
+/// Base of the top digit H_u of u in relation H-exact.
 pub const U_TOP_BASE: u32 = Set44::U_TOP_BASE;
 /// Weight of the Boolean slack a_z of z in relation H-exact.
 pub const SLACK_Z: i64 = Set44::SLACK_Z;
 /// Honest encoding range of the quotient v (two 16-bit halves): [-2^31, 2^31 - 1]; not proven,
 /// the projection bounds v.
 pub const V_HALF_RANGE: i64 = Set44::V_HALF_RANGE;
-/// SelfTargetMSIS bound zeta' = max(bar B_z, bar B_u + 2^(d-1) tau) for relation H-u.
-pub const ZETA_PRIME: i64 = Set44::ZETA_PRIME;
 
 /// PIOP field modulus p = 2^64 - 59 (Akita `Prime64Offset59`).
 pub const P_FIELD: u64 = 0xFFFF_FFFF_FFFF_FFC5;
@@ -1040,9 +1011,7 @@ mod tests {
         assert_eq!(W1LEN, 6144);
         let zeta = std::cmp::max(GAMMA1 - BETA, 2 * GAMMA2 + 1 + (1 << (D - 1)) * TAU as i64);
         assert_eq!(zeta, ZETA_MSIS);
-        assert_eq!(ZETA_PRIME, 350_209);
-        assert_eq!(ZETA_PRIME, ZETA_MSIS);
-        assert_eq!(BAR_B_U, 190_465);
+        assert_eq!(ZETA_MSIS, 350_209);
         assert_eq!(5 * STEP_U + (1 << 16), 2 * B_U + 1);
         assert_eq!(SLACK_Z + (1 << 17), 2 * B_Z + 1);
         assert_eq!(P_FIELD, u64::MAX - 58);
@@ -1057,9 +1026,6 @@ mod tests {
         assert_eq!(Set65::DELTA0_MAX, 2_810_944_804_208_641);
         assert_eq!(Set65::B_V, 335_418_249);
         assert_eq!(Set65::ZETA_MSIS, 724_481);
-        assert_eq!(Set65::ZETA_PRIME, 724_481);
-        assert_eq!(Set65::BAR_B_Z, 1 << 19);
-        assert_eq!(Set65::BAR_B_U, 523_777);
 
         // ML-DSA-87
         assert_eq!(Set87::B_Z, 524_167);
@@ -1068,13 +1034,10 @@ mod tests {
         assert_eq!(Set87::DELTA0_MAX, 3_935_893_323_276_289);
         assert_eq!(Set87::B_V, 469_653_636);
         assert_eq!(Set87::ZETA_MSIS, 769_537);
-        assert_eq!(Set87::ZETA_PRIME, 769_537);
-        assert_eq!(Set87::BAR_B_Z, 1 << 19);
-        assert_eq!(Set87::BAR_B_U, 523_777);
     }
 
     #[test]
-    fn hu_digit_forms_65_and_87() {
+    fn u_digit_forms_65_and_87() {
         // Step-slack exact tiling: U_SLACK + 2^19 = 2 * B_u + 1.
         assert_eq!(Set65::U_SLACK + (1 << 19), 2 * Set65::B_U + 1);
         assert_eq!(Set87::U_SLACK + (1 << 19), 2 * Set87::B_U + 1);
@@ -1086,14 +1049,6 @@ mod tests {
         assert_eq!(u_const, -228_865);
         assert_eq!(Set65::U_OFFSET, -228_865);
         assert_eq!(Set87::U_OFFSET, -228_865);
-
-        // z relaxed form:
-        // z = Z_lo + 2^16 * Z_mid + 2^19 * a_z - 229_376
-        // where Z_lo = z_lo - 2^15, Z_mid = z_mid - 4.
-        let z_const = 32_768i64 + 262_144 - (1 << 19);
-        assert_eq!(z_const, -229_376);
-        assert_eq!(Set65::Z_OFFSET, -229_376);
-        assert_eq!(Set87::Z_OFFSET, -229_376);
     }
 
     #[test]
@@ -1122,11 +1077,11 @@ mod tests {
         // Integer lift bound |Delta^Z| < p / 2
         let p_half = (P_FIELD / 2) as i128;
 
-        for (l, bar_bz, bu, mw, g2, tau, proj_log2) in [
+        for (l, bz, bu, mw, g2, tau, proj_log2) in [
             (
                 Set44::L,
-                Set44::BAR_B_Z,
-                Set44::BAR_B_U,
+                Set44::B_Z,
+                Set44::B_U,
                 Set44::M_W,
                 Set44::GAMMA2,
                 Set44::TAU,
@@ -1134,8 +1089,8 @@ mod tests {
             ),
             (
                 Set65::L,
-                Set65::BAR_B_Z,
-                Set65::BAR_B_U,
+                Set65::B_Z,
+                Set65::B_U,
                 Set65::M_W,
                 Set65::GAMMA2,
                 Set65::TAU,
@@ -1143,15 +1098,15 @@ mod tests {
             ),
             (
                 Set87::L,
-                Set87::BAR_B_Z,
-                Set87::BAR_B_U,
+                Set87::B_Z,
+                Set87::B_U,
                 Set87::M_W,
                 Set87::GAMMA2,
                 Set87::TAU,
                 Set87::PROJ_BOUND_LOG2,
             ),
         ] {
-            let az = (l * N) as i128 * ((Q - 1) / 2) as i128 * bar_bz as i128;
+            let az = (l * N) as i128 * ((Q - 1) / 2) as i128 * bz as i128;
             let bt = (1i128 << D) * tau as i128 * ((1i128 << T1_BITS) - 1);
             let d_z = az
                 + bt

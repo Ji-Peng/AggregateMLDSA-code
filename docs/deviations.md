@@ -48,13 +48,13 @@ Code: no layout implements S1+S2; relation H-FIPS (L10) takes its place. Why: H-
 no `r1` (the `w1'` bits carry it) and replaces the cubic UseHint check by zero-checks of
 degree at most 3.
 
-## W2. Padded rows of relations H-u, H-exact and H-FIPS (spec Section 4.2, Appendix A)
+## W2. Padded rows of relations H-exact and H-FIPS (spec Section 4.2, Appendix A)
 
 Spec: "for i >= N every value is zero", with the digits of zero at -b_k/2.
 
 Code: padded rows hold the canonical encoding of the all-zero witness (z = 0, w' = 0, h = 0).
-For z and v under H-u this is exactly the spec (digits -b_k/2, top signed digit 0); u = 0
-takes the step form (B_ulo = 1,228, H_u = 3; spec 4.2). For H-exact, z = 0 is encoded
+For v (and for z under the removed H-u) this is exactly the spec (digits -b_k/2, top signed
+digit 0); u = 0 takes the step form (B_ulo = 1,228, H_u = 3; spec 4.2). For H-exact, z = 0 is encoded
 through the bit-slack form (a_z = 0, B_zhi = 1, B_zlo = 65,457; spec 4.3). For H-FIPS,
 w' = 0 with h = 0 is the coefficient `hfips::Coeff::PADDED` and the hint slack is
 u_h = omega = 80. Why: sum delta^2 + u_h = omega then holds on every row, so no live
@@ -1117,6 +1117,37 @@ Soundness: docs/soundness.md Section 12 places the tied parts' stages in the seg
 `sd`, before `X`, with addresses that omit `X`; the fold coordinates' addresses omit the
 parts (Lemma 12.3 (ii) weakened); no decoder at `X`.
 
+## K26. Stage reshuffle: no main-domain instance in stage 1 (spec Sections 7.1, 7.3 to 7.5, 9.3, 10, 12.1; docs/soundness.md 3.1, 3.4, 10)
+
+Stage 1 tested the Booleanity `bool_b[t]` of the w1Encode bits and ML-DSA-44's range
+identity `range_w1` at `tau` on the main domain: its only main-domain group, of degree 4,
+whose terminal claims `b_t(r^(1))` cost stage 3 a separate `eq(r^(1))` reduction group.
+
+Code (`agg_piop::{stage1, stage2, stage3, claims}`):
+
+- `bool_b[t]` (every lane of every set) is a stage-3 zero-check at `r^(2)` in the main
+  `eq(r^(2))` group, whose lanes hold the bits for the ring identity and their reductions;
+  it takes the `gamma^(3)` positions of the removed reductions of `b_t` from `r^(1)`, so
+  `gamma^(3)` keeps its length.
+- `range_w1` (ML-DSA-44) is the last stage-2 instance, in the main `eq(r^(1))` group (with
+  `leaf6[U_hi]` under H-exact, with `F3` under H-FIPS); its terminals `b_t(r^(2))` are
+  `def_y1`'s. `gamma^(2)`: 10 under both relations of ML-DSA-44; 18 and 22 for 65 and 87.
+- Stage 1 keeps `bool_y1`, `level2`, `level3`, `bool_y2` on `D_1`, `D_2`: degree 3 for every
+  set, 19 coefficients (ML-DSA-44) or 13 (four-bit sets), terminal claims `y1`, `y2` only
+  (12 or 8). `transcript::STAGE_DEGREES` is `(3, 5, 3)` for every set.
+- Proof of work: stage-1 rounds grind `bit_length(3) = 2` bits (ML-DSA-44: 3 before), the
+  stage-1 batching site 5 (ML-DSA-44) or 4 (65, 87; 6 before) bits; every site keeps
+  `2^-128`. At `2^15` (ML-DSA-44): 4,178 bits, 523 bytes, 2,546 units of work (4,203, 526,
+  2,646 before); new plan digests in `docs/soundness.md` 10.
+- Wire: the stage-1 messages have 3 elements and its terminal 12 claims; PIOP wire version 4,
+  unreleased, kept. Every aggregate changes.
+
+Soundness: both moved identities test tables committed in round 1 at a point drawn by the
+preceding stage, the argument of `docs/soundness.md` 3.4 for the leaves, links and H-exact's
+Booleanity; no site is added. Cost (local direction, 8K, AVX2, PIOP branches run one after
+the other): stages 1 to 3 together 863 ms to 722 ms (stage 1 about 240 to 50 ms, stage 2
++75 to +115 ms, stage 3 about equal); the 32K effect is to be measured on xcni.
+
 ## A1. Mode-A driver: inputs, checks and caches (spec Sections 2, 10, 11, 13)
 
 Code (`agg_cli::mode_a::{Aggregator, AggregateVerifier}`):
@@ -1280,6 +1311,8 @@ seven claims of `G_m` at `pi_m`. No range check of the digits: Lemma 5 of LogUp 
 
 ## L8. Relation H-u replaces relaxed H; `u` by one six-valued digit (spec Sections 3, 4.3, 7.4, 10, 12; Appendix A; `docs/h-exact.md` step A)
 
+H-u itself was removed later (L11); its step form of `u` stays in H-exact.
+
 Spec (revision 4, wire version 2): the relaxed relation H with `(bar B_z, bar B_u) = (2^17,
 2^18)`, `u = U_lo + 2^16 U_hi + 2^15` with a base-8 `U_hi` on `leaf8` (degree 5), so
 `zeta' = 421,888`; Appendix A's H-exact `u` form `118,787 a_u + b_u - 190,465` needs two small
@@ -1372,3 +1405,22 @@ affine `r0` keeps the 16-bit `l_lo` lane on the kernel's linear fast path; the m
 reductions instead of new lanes; the stage-1 vector and the `tau` site stay as they are. No
 wire-version bump: H-u and H-exact proofs are byte-identical, and an H-FIPS proof differs in
 the relation byte and in counts the verifier derives from the manifest.
+
+## L11. Relation H-u removed; H-FIPS is the default (spec Sections 3.1, 10; Appendix A; `docs/h-exact.md`)
+
+Spec (before this change): H-u (relation byte 0) the default, H-exact (byte 1) and H-FIPS
+(byte 2) opt-in. Code: `manifest::Relation` has `HExact` (byte 1) and `HFips` (byte 2, the
+`#[default]`); byte 0 fails `Relation::from_id` and is rejected like any unknown relation
+byte. `agg --relation`, `AggregatorConfig::relation`, `AggregateVerifier::relation` and the
+`mode_b` bench (`AGG_RELATION`) default to H-FIPS. Removed with H-u: its `z` forms (the radix
+form `z + 2^17 = z_lo + 2^16 z_hi` of ML-DSA-44 and the relaxed digit-slack form
+`z + 2^19 = z_lo + 2^16 z_mid + 2^19 a_z` of ML-DSA-65 and ML-DSA-87), the SIMD digit kernel
+that wrote its columns unchecked, and the 26 ML-DSA-44 width-4 catalog rows (`G_main4` at
+`(13..25, 8)` and `mldsa-44-p16-batch-<N*>-mult-final`). Kept: the step form of `u` (L8),
+which H-exact uses, and the ML-DSA-65 and ML-DSA-87 rows `mldsa-<set>-p16-*`, which H-exact
+resolves to (equal layouts). No wire-version bump: H-exact and H-FIPS aggregates are
+byte-identical to those of the previous revision.
+
+Why: three relations made the results hard to follow. H-FIPS gives the strongest guarantee
+(the extracted `(c~, z, h)` is a FIPS 204 signature) at a small cost; H-exact stays as a
+reference relation that is slightly faster.

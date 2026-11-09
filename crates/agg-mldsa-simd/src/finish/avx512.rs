@@ -1,17 +1,14 @@
-//! Packed sparse products, CRT finishing, and H-u digits.
+//! Packed sparse products and CRT finishing.
 //!
 //! Rounding follows the CC0 pq-crystals Dilithium AVX2 rounding implementation.
 //! The sparse signed-window technique also appears in Hybrid-SHA-3's pspm.c.
-use super::{FinishError, FinishOut, FinishRow, HuCols};
+use super::{FinishError, FinishOut, FinishRow};
 use crate::{
     params::*,
-    poly::{Challenge, Poly32},
+    poly::Challenge,
 };
-use std::mem::MaybeUninit;
 use std::arch::x86_64::*;
 
-/// f32 value of (1/63079) * (1 + 2^-20).
-const HU_RECIP: f32 = 1.5853151e-5;
 type V = __m512i;
 #[inline]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
@@ -25,9 +22,6 @@ fn sub(a: V, b: V) -> V { _mm512_sub_epi32(a,b) }
 #[inline]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 fn mul(a: V, b: V) -> V { _mm512_mullo_epi32(a,b) }
-#[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
-fn and(a: V, b: V) -> V { _mm512_and_si512(a,b) }
 #[inline]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 fn sar<const K: u32>(a: V) -> V { _mm512_srai_epi32::<K>(a) }
@@ -45,21 +39,6 @@ fn load(a: &[i32; 16]) -> V {
 fn store(a: &mut [i32; 16], v: V) {
     // SAFETY: the fixed-size reference contains exactly one unaligned vector.
     unsafe { _mm512_storeu_si512(a.as_mut_ptr().cast(), v) }
-}
-#[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
-fn wide(a: &mut [MaybeUninit<i32>], v: V) {
-    let a: &mut [MaybeUninit<i32>; 16] = a.try_into().unwrap();
-    // SAFETY: all vector bytes lie in the destination chunk; no uninitialized value is read.
-    unsafe { _mm512_storeu_si512(a.as_mut_ptr().cast(), v) }
-}
-#[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
-fn narrow(aout: &mut [MaybeUninit<i8>], v: V) {
-    let aout: &mut [MaybeUninit<i8>; 16] = aout.try_into().unwrap();
-    let bytes = _mm512_cvtepi32_epi8(v);
-    // SAFETY: the destination chunk contains exactly sixteen writable bytes.
-    unsafe { _mm_storeu_si128(aout.as_mut_ptr().cast(),bytes) }
 }
 #[inline]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
@@ -324,57 +303,4 @@ unsafe fn finish_row_44(row: FinishRow<'_>, out: &mut FinishOut) -> Result<(), F
     else if bad_u != 0 { Err(FinishError::UBound) }
     else if bad_v != 0 { Err(FinishError::VBound) }
     else { Ok(()) }
-}
-#[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
-fn narrow64(a: &mut [MaybeUninit<i8>], v: __m512i) {
-    let a: &mut [MaybeUninit<i8>; 64] = a.try_into().unwrap();
-    // SAFETY: the destination chunk contains exactly 64 writable bytes.
-    unsafe { _mm512_storeu_si512(a.as_mut_ptr().cast(), v) }
-}
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
-pub(crate) unsafe fn hu_columns<P: ParamSet>(z: &Poly32, out: &FinishOut, cols: HuCols<'_>) {
-    if P::GAMMA2 == (Q - 1) / 88 {
-        // SAFETY: AVX-512 target features are enabled on this function.
-        unsafe { hu_columns_44(z, out, cols) };
-    } else {
-        super::scalar::hu_columns::<P>(z, out, cols);
-    }
-}
-
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
-unsafe fn hu_columns_44(z: &Poly32, out: &FinishOut, cols: HuCols<'_>) {
-    for col in &cols.wide { assert_eq!(col.len(),256); }
-    for col in &cols.narrow { assert_eq!(col.len(),256); }
-    for i in (0..256).step_by(16) {
-        let z = load(z[i..i+16].try_into().unwrap());
-        let u = load(out.u[i..i+16].try_into().unwrap());
-        let v = load(out.v[i..i+16].try_into().unwrap());
-        // z + 2^17 shifts the high digit by exactly 2 and leaves the low 16 bits unchanged.
-        wide(&mut cols.wide[0][i..i+16],sub(and(z,splat(65535)),splat(32768)));
-        narrow(&mut cols.narrow[0][i..i+16],sar::<16>(z));
-        // Valid u gives y in [0,380930]. The digit H counts the thresholds below y and
-        // saturates at 5. The float estimate y * (1/63079) * (1 + 2^-20) never rounds below
-        // the true quotient and stays under the next integer on this range.
-        let y = add(u,splat(B_U));
-        let hf = _mm512_cvttps_epi32(_mm512_mul_ps(_mm512_cvtepi32_ps(y),_mm512_set1_ps(HU_RECIP)));
-        let h = _mm512_min_epi32(hf,splat(5));
-        wide(&mut cols.wide[1][i..i+16],sub(sub(y,mul(h,splat(63079))),splat(32768)));
-        narrow(&mut cols.narrow[1][i..i+16],sub(h,splat(3)));
-        // The low 16 bits minus 2^15 and the arithmetic high half give the two v digits.
-        wide(&mut cols.wide[2][i..i+16],sub(and(v,splat(65535)),splat(32768)));
-        wide(&mut cols.wide[3][i..i+16],sar::<16>(v));
-    }
-    // Bits of the w1 bytes are split in the byte domain: shift 16-bit lanes, keep bit 0.
-    let one = _mm512_set1_epi8(1);
-    for i in (0..256).step_by(64) {
-        // SAFETY: w1 has 256 bytes, so the 64-byte load at i is in bounds.
-        let w = unsafe { _mm512_loadu_si512(out.w1.as_ptr().add(i).cast()) };
-        narrow64(&mut cols.narrow[2][i..i+64],and(w,one));
-        narrow64(&mut cols.narrow[3][i..i+64],and(_mm512_srli_epi16::<1>(w),one));
-        narrow64(&mut cols.narrow[4][i..i+64],and(_mm512_srli_epi16::<2>(w),one));
-        narrow64(&mut cols.narrow[5][i..i+64],and(_mm512_srli_epi16::<3>(w),one));
-        narrow64(&mut cols.narrow[6][i..i+64],and(_mm512_srli_epi16::<4>(w),one));
-        narrow64(&mut cols.narrow[7][i..i+64],and(_mm512_srli_epi16::<5>(w),one));
-    }
 }

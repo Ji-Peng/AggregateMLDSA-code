@@ -39,7 +39,8 @@ fn check_virtual_claims(
     });
     let composed = |value: DigitValue| compose_table(&value.layout(), &tables.digits(value));
     assert_eq!(main.z, mle_i64(&composed(manifest.z_value()), &points[0]));
-    assert_eq!(main.u, mle_i64(&composed(DigitValue::U), &points[0]));
+    // u from its committed form (H-exact's step form, H-FIPS's affine form).
+    assert_eq!(main.u, mle_i64(&agg_piop::virtual_polys::u_table(manifest, &batch.main), &points[0]));
     assert_eq!(main.v, mle_i64(&composed(DigitValue::V), &points[0]));
     let w1 = w1_table(&batch.main.bit_lanes(manifest));
     assert_eq!(main.w1, mle_i64(&w1, &points[0]));
@@ -104,7 +105,7 @@ fn commit_and_open(n_own: usize, n_shared: usize, seed: u64, suffix: bool) {
         claims.iter().map(|c| c.values.len()).sum::<usize>(),
         proof.len()
     );
-    assert_eq!(claims.iter().map(|c| c.values.len()).sum::<usize>(), 53);
+    assert_eq!(claims.iter().map(|c| c.values.len()).sum::<usize>(), 59);
     let values: Vec<Vec<OpeningField>> = claims.iter().map(|c| c.values.clone()).collect();
     check_virtual_claims(&batch, &points, &values);
 

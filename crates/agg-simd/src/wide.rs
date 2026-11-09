@@ -1010,7 +1010,7 @@ mod tests {
             }
         }
         // Strided cell loads against the scalar index map.
-        let cells: Vec<i32> = (0..4 * l as i32).map(|i| i * 0x0101_0101 - (1 << 30) * (i % 3)).collect();
+        let cells: Vec<i32> = (0..4 * l as i32).map(|i| i.wrapping_mul(0x0101_0101).wrapping_sub((1_i32 << 30).wrapping_mul(i % 3))).collect();
         let bytes: Vec<i8> = (0..4 * l).map(|i| (i as i32 * 37 - 128) as i8).collect();
         let (wide, narrow) = unsafe { (B::strided4_i32(cells.as_ptr()), B::strided4_i8(bytes.as_ptr())) };
         for a in 0..4 {

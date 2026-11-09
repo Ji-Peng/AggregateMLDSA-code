@@ -1,9 +1,8 @@
 //! Independent integer and witness oracles for packed finishing.
 use crate::common;
 use agg_mldsa_simd::{params::*, *};
-use agg_witness::{crt, derive, digits::{DigitLayout, StepLayout, ValueForm}, expand, gen, native};
+use agg_witness::{crt, derive, expand, gen, native};
 use common::{engines, SplitMix64};
-use std::mem::MaybeUninit;
 
 fn check_row(e: &Engine, az: &[i64;256], t: &[i32;256], h: &[u8;256]) {
     let xq = Poly32(az.map(|x| x.rem_euclid(Q as i64) as i32));
@@ -88,39 +87,6 @@ fn exhaustive_use_hint() {
             for start in (0..Q).step_by(256) {
                 let az=std::array::from_fn(|i|((start+i as i32).min(Q-1)) as i64);
                 check_row(&e,&az,&[0;256],&[hint;256]);
-            }
-        }
-    }
-}
-
-#[test]
-fn exhaustive_digits_and_v_samples() {
-    let zform=ValueForm::from(DigitLayout{name:"z",bases:&[65536,4],signed:true});
-    let uform=ValueForm::from(StepLayout{low:DigitLayout{name:"u",bases:&[65536],signed:false},step:63079,top_base:6,offset:B_U as i64});
-    let vform=ValueForm::from(DigitLayout{name:"v",bases:&[65536,65536],signed:true});
-    let mut rng=SplitMix64::new(919);
-    for e in engines() {
-        for start in (0..2*B_U+1).step_by(256) {
-            let z=Poly32(std::array::from_fn(|i|((start+i as i32)%(2*GAMMA1))-GAMMA1));
-            let mut out=FinishOut::zero();
-            out.u=Poly32(std::array::from_fn(|i|(start+i as i32-B_U).min(B_U)));
-            out.v=Poly32(std::array::from_fn(|i|if i<4 {[-B_V,-B_V+1,B_V-1,B_V][i]} else {(rng.next_u64()%(2*B_V as u64+1)) as i32-B_V}));
-            out.w1=std::array::from_fn(|i|(i%44) as u8);
-            let mut wide=[[MaybeUninit::<i32>::uninit();256];4];
-            let mut narrow=[[MaybeUninit::<i8>::uninit();256];8];
-            e.hu_columns(&z,&out,HuCols{wide:wide.each_mut().map(|c|c.as_mut_slice()),narrow:narrow.each_mut().map(|c|c.as_mut_slice())});
-            // SAFETY: hu_columns initializes every element of all twelve exact-size slices.
-            let wide=wide.map(|a|a.map(|v|unsafe{v.assume_init()}));
-            // SAFETY: same complete initialization guarantee for the narrow columns.
-            let narrow=narrow.map(|a|a.map(|v|unsafe{v.assume_init()}));
-            for i in 0..256 {
-                let mut d=[0;2]; zform.decompose_into(z[i] as i64,&mut d);
-                assert_eq!([wide[0][i] as i64,narrow[0][i] as i64],d);
-                uform.decompose_into(out.u[i] as i64,&mut d);
-                assert_eq!([wide[1][i] as i64,narrow[1][i] as i64],d);
-                vform.decompose_into(out.v[i] as i64,&mut d);
-                assert_eq!([wide[2][i] as i64,wide[3][i] as i64],d);
-                for b in 0..6 { assert_eq!(narrow[b+2][i],((out.w1[i]>>b)&1) as i8); }
             }
         }
     }

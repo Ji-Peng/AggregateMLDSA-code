@@ -308,14 +308,14 @@ mod tests {
             }
         }
         // Every padded size of the wire version has rows.
-        let plan = WorkPlan::for_records(1000, Relation::Hu).expect("plan");
+        let plan = WorkPlan::for_records(1000, Relation::HFips).expect("plan");
         assert_eq!(plan.precommitted.len(), crate::catalogs::GROUP_COUNT - 1);
         assert_eq!(
-            crate::catalogs::CATALOG_D_SIG,
+            crate::catalogs::CATALOG_D_SIG_H_FIPS,
             (MIN_D_SIG..=MAX_D_SIG).collect::<Vec<_>>().as_slice()
         );
         assert!(matches!(
-            WorkPlan::for_records(0, Relation::Hu),
+            WorkPlan::for_records(0, Relation::HFips),
             Err(PlanError::NoRecords)
         ));
         assert!(matches!(

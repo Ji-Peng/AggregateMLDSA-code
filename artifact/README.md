@@ -6,9 +6,10 @@ Slurm, root, or network access after `./run.sh fetch`.
 
 The package builds one source tree **once** and measures proving, verification,
 peak resident set size and aggregate byte composition across all three FIPS 204
-parameter sets (**ML-DSA-44**, **ML-DSA-65** and **ML-DSA-87**), all three
-relations (**H-u**, **H-exact** and **H-FIPS**) and three run-time ISA tiers
-(`ifma`, `avx512`, `avx2`) at batch sizes up to 32,768. It also runs the
+parameter sets (**ML-DSA-44**, **ML-DSA-65** and **ML-DSA-87**) under the
+relation **H-FIPS** and three run-time ISA tiers (`ifma`, `avx512`, `avx2`) at
+batch sizes up to 32,768. The reference relation **H-exact** is available as an
+opt-in (see [Relations](#relations)). It also runs the
 mode-B public-bits aggregate (`agg-bench --bench mode_b`), the control and
 scheduling ablations (including `AGG_LATE_JOIN=0` and `AGG_FLOCK_THREADS=0`),
 the traced timeline run (`AGG_STAGE_TRACE`, `AGG_SCHED_TRACE`,
@@ -35,6 +36,25 @@ order. Add `--smoke` for the smallest run and `--full` to use the full matrix
 instead of `quick`. Pass `--dry-run` (or `-n`) to `quick` or `full` to inspect
 the planned command lines without executing them.
 
+## Relations
+
+Every default run (`gates`, `quick`, `full`, `tables`, `all`) proves and
+verifies **H-FIPS**: the aggregate certifies that every extracted
+$(\tilde c, z, h)$ is a FIPS 204 signature. **H-exact** proves the FIPS 204
+bounds on $z$ and on the UseHint residual but not the hint itself. It is a
+reference relation, slightly faster than H-FIPS (9--13% on 16C32T at 32K in the
+reference measurements), and runs only on request:
+
+```sh
+./run.sh gates --relations h-fips,h-exact   # 1K gates of both relations
+./run.sh quick --relations h-fips,h-exact   # adds H-exact to the quick-ours groups
+./run.sh full  --relations h-fips,h-exact   # adds the relations groups (H-exact at 32K)
+```
+
+`--relations h-exact` runs only the groups that list H-exact. `./run.sh tables`
+needs no flag: `tab-relations.tex` holds H-exact against H-FIPS when the
+results contain H-exact cells, and a comment otherwise.
+
 ## Hardware and software
 
 - x86-64 Linux built for x86-64-v3: AVX2, BMI2, FMA, POPCNT and
@@ -47,9 +67,9 @@ the planned command lines without executing them.
   recommended for `full`. The 8C16T rows need eight cores.
 - RAM: 16 GiB for `quick` (up to 4K signatures), 32 GiB minimum for the 32K
   cells and 64 GiB recommended. On the reference machine, the 32K prover peaks
-  at 15.7 GiB for ML-DSA-44, 17.2 GiB for ML-DSA-65 and 23.2 GiB for
-  ML-DSA-87 (`VmHWM`). The script refuses a 32K cell when `MemAvailable` is
-  below 28 GiB and records the reason in `skipped.json`.
+  at about 16 GiB for ML-DSA-44, 17 GiB for ML-DSA-65 and 24 GiB for
+  ML-DSA-87 (`VmHWM`, estimate). The script refuses a 32K cell when
+  `MemAvailable` is below 28 GiB and records the reason in `skipped.json`.
 - Disk: about 20 GB during a full run (one cargo target directory for `agg`
   and `mode_b`, Aerie's target, the cloned sources and the results). `quick`
   needs about 10 GB.
@@ -69,10 +89,10 @@ the same pin for commands started inside this directory.
 | `check` | tool and feature probe | seconds |
 | `fetch` | two git clones and `cargo fetch` | 2--10 min, network |
 | `build` | one release build of `agg` and `mode_b`, Aerie's bench, `natver{,65,87}` | 5--20 min; the first build is the long one |
-| `gates` | per parameter set (`--params 44,65,87`) and relation (`--relations h-u,h-exact,h-fips`): 1K aggregates in every tier, verification, negative check; per set the H-u aggregate on one thread and natver; self-reports | about 5--10 min per relation (estimate) |
+| `gates` | per parameter set (`--params 44,65,87`) and relation (`--relations`, default `h-fips`): 1K aggregates in every tier, verification, negative check; per set the aggregate on one thread and natver; self-reports | about 5--10 min per relation (estimate) |
 | `quick --smoke` | touches every run kind (`ours`, `mode_b`, `ablations`, `fresh`, `aerie`, `native`) and all three parameter sets at 1K, 1+1 runs | about 5 min after the build (estimate) |
 | `quick` | 1K and 4K (ML-DSA-44) plus 1K (ML-DSA-65, -87), three tiers, 8C16T and 1T, mode B, traced ablations, fresh memory, Aerie (Falcon-512/1024) and native (44/65/87) at 1K | 20--40 min after the build (estimate) |
-| `full` | the complete evaluation matrix for ML-DSA-44, -65 and -87: 32K headline on 16C32T, 8C16T and 1T; relations (H-u, H-exact, H-FIPS); scaling; mode-B public bits; ablations (`AGG_LATE_JOIN=0`, `AGG_FLOCK_THREADS=0`, etc.) and traced timeline; fresh memory; Aerie and native (44/65/87) baselines, 1+5 warm runs | about 1.8--2 h (~110 min, estimate) after the build |
+| `full` | the complete evaluation matrix for ML-DSA-44, -65 and -87 under H-FIPS: 32K headline on 16C32T, 8C16T and 1T; scaling; mode-B public bits; ablations (`AGG_LATE_JOIN=0`, `AGG_FLOCK_THREADS=0`, etc.) and traced timeline; fresh memory; Aerie and native (44/65/87) baselines, 1+5 warm runs | about 1.7 h (~100 min, estimate) after the build; H-exact adds about 6 min (estimate) |
 
 ### Estimated full-run time breakdown
 
@@ -80,23 +100,24 @@ Derived from the paper's per-run times on one 16-core EPYC 9355 (Zen 5) node
 (all figures below are estimates):
 
 - **Headline 32K on 16C32T and 8C16T** (`headline`, `headline-65`,
-  `headline-87`, 3 tiers, 1 warmup + 5 runs): about **9 min** (estimate).
+  `headline-87`, 3 tiers, 1 warmup + 5 runs): about **10 min** (estimate).
 - **Headline 32K on 1T** (`headline-1t`, `headline-1t-65`, `headline-1t-87`,
-  3 tiers, 2 processes = 7 prover runs per tier at 29--53 s each): about
-  **43 min** (estimate; the longest part of `full`).
-- **Relations at 32K** (`relations`, `relations-65`, `relations-87`, H-u,
-  H-exact and H-FIPS across 3 tiers): about **18 min** (estimate).
+  3 tiers, 2 processes = 7 prover runs per tier at 30--60 s each): about
+  **48 min** (estimate; the longest part of `full`).
 - **Scaling** (`scaling` at $2^{10}\text{--}2^{15}$ for 44; `scaling-65` and
-  `scaling-87` at $2^{10}, 2^{13}, 2^{15}$): about **20 min** (estimate).
+  `scaling-87` at $2^{10}, 2^{13}, 2^{15}$): about **23 min** (estimate).
 - **Mode B, control ablations, traced timeline and fresh memory** (`mode-b`,
   `ablation` with 7 arms including `AGG_LATE_JOIN=0`, `timeline` with traces,
-  `prover-memory`, `verifier-memory` at 32K for 44): about **10 min**
+  `prover-memory`, `verifier-memory` at 32K for 44): about **11 min**
   (estimate).
 - **Aerie and native baselines** (`aerie`, `aerie-avx2`, `aerie-1024`,
   `aerie-1024-avx2` at 8K and 32K; `native`, `native-65`, `native-87` at 32K):
   about **10 min** (estimate).
+- **H-exact at 32K, opt-in** (`relations`, `relations-65`, `relations-87`
+  with `--relations h-fips,h-exact`, 3 tiers): about **6 min** (estimate).
 
-Total: **about 110 minutes (~1.8--2 hours, estimate)** after the build.
+Total: **about 100 minutes (~1.7 hours, estimate)** after the build, without
+the opt-in H-exact groups.
 
 ## What is measured
 
@@ -114,7 +135,7 @@ repeated here.
 
 - **Mode B (`kind = "mode_b"`, `agg-bench --bench mode_b`)**: publishes
   $\mathsf{w1Encode}(w_1')$ in the clear and proves no Keccak hash (ML-DSA-44,
-  803.1 B/sig at 32K). Built into `artifact/build/bin/mode_b` by `./run.sh build`
+  about 803 B/sig at 32K). Built into `artifact/build/bin/mode_b` by `./run.sh build`
   and run at $N=32{,}768$ with `--warmup 1 --reps 5`.
 - **Traced timeline (`tag = "timeline"`, `traced = true`)**: runs `defaults`
   and `flock-serial` (`AGG_FLOCK_THREADS=0`, Flock after the PIOP) with
@@ -156,30 +177,29 @@ registers and EVEX-only mnemonics are counted in `build.json`).
 ### Expected times
 
 The following medians were measured on an idle AMD EPYC 9355 node (Zen 5) at
-$N = 32{,}768$ under H-u, one warm-up and five runs (`tab:prove`,
-`tab:scaling`, `tab:bytes`, `tab:baselines`). Node-to-node spread is a few
-percent.
+$N = 32{,}768$ under H-FIPS on 16C32T, 8C16T and 1T, one warm-up and five runs (`tab:prove`,
+`tab:bytes`, `tab:baselines`). Node-to-node spread is a few percent; `./run.sh full`
+reproduces every cell.
 
-| Set | Tier | 16C32T prove | 8C16T prove | 1T prove | 16C32T verify (unc. / cached) | 1T verify (unc. / cached) | Aggregate (B/sig) |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 44 | `ifma` | 2.73 s | 4.14 s | 29.28 s | 106 / 97 ms | 864 / 665 ms | 1,612,250 B (49.2) |
-| 44 | `avx512` | 2.78 s | 4.15 s | 29.56 s | -- | -- | 1,612,250 B (49.2) |
-| 44 | `avx2` | 2.96 s | 4.51 s | 34.42 s | -- | -- | 1,612,250 B (49.2) |
-| 65 | `ifma` | 3.19 s | 4.68 s | 34.22 s | 172 / 125 ms | 1,819 / 1,215 ms | 2,142,860 B (65.4) |
-| 65 | `avx512` | 3.25 s | 4.81 s | 34.57 s | -- | -- | 2,142,860 B (65.4) |
-| 65 | `avx2` | 3.47 s | 5.24 s | 40.21 s | -- | -- | 2,142,860 B (65.4) |
-| 87 | `ifma` | 4.16 s | 6.07 s | 44.85 s | 222 / 152 ms | 2,515 / 1,641 ms | 2,710,100 B (82.7) |
-| 87 | `avx512` | 4.15 s | 6.08 s | 45.02 s | -- | -- | 2,710,100 B (82.7) |
-| 87 | `avx2` | 4.50 s | 6.71 s | 53.01 s | -- | -- | 2,710,100 B (82.7) |
+| Set | Tier | 16C32T prove | 8C16T prove | 1T prove | 16C32T verify (unc. / cached) | Aggregate (B/sig) |
+| --- | --- | --- | --- | --- | --- | --- |
+| 44 | `ifma` | 2.81 s | 4.23 s | 31.01 s | 63 / 55 ms | 1,612,294 B (49.2) |
+| 44 | `avx512` | 2.84 s | 4.26 s | 31.09 s | -- | 1,612,294 B (49.2) |
+| 44 | `avx2` | 3.10 s | 4.85 s | 37.80 s | -- | 1,612,294 B (49.2) |
+| 65 | `ifma` | 3.37 s | 4.90 s | 35.52 s | 81 / 69 ms | 2,143,395 B (65.4) |
+| 65 | `avx512` | 3.42 s | 4.92 s | 35.72 s | -- | 2,143,395 B (65.4) |
+| 65 | `avx2` | 3.71 s | 5.59 s | 43.56 s | -- | 2,143,395 B (65.4) |
+| 87 | `ifma` | 4.24 s | 6.70 s | 46.41 s | 110 / 87 ms | 2,710,812 B (82.7) |
+| 87 | `avx512` | 4.26 s | 6.63 s | 46.50 s | -- | 2,710,812 B (82.7) |
+| 87 | `avx2` | 4.69 s | 7.49 s | 56.81 s | -- | 2,710,812 B (82.7) |
 
-On 16C32T with IFMA, H-exact is within 1.8% of H-u across all three sets, and
-H-FIPS adds 13.2% (44), 20.1% (65) and 16.4% (87). In `tab:ablation` (ML-DSA-44,
-32K, 16C32T, IFMA), the untraced full aggregate takes 2.74 s (106 ms verify,
-49.2 B/sig), the traced serial-Flock run takes 3.08 s against 2.77 s for the
-traced default (+0.31 s), and the mode-B public-bits aggregate takes 2.29 s
-(163 ms verify, 26,317,556 B = 803.1 B/sig). Absolute times on another
-microarchitecture differ; the tier order and the byte identity are the portable
-parts of the result.
+On 16C32T with IFMA, the opt-in reference relation H-exact proves 9.9% (44),
+13.3% (65) and 11.2% (87) faster than H-FIPS. In `tab:ablation` (ML-DSA-44,
+32K, 16C32T), running Flock after the PIOP (`AGG_FLOCK_THREADS=0`) costs
+0.35 s against the default, and the mode-B public-bits aggregate takes 2.25 s
+and 803.1 B/sig. Absolute times on another microarchitecture
+differ; the tier order and the byte identity are the portable parts of the
+result.
 
 Warm cells follow the paper protocol: one process per cell with
 `--warmup 1 --reps N`, split into `processes` chunks so that the tiers
@@ -248,8 +268,9 @@ carry it):
   - `tab-baselines.tex` (`\label{tab:baselines}`): native AVX2 verification
     (44, 65, 87), Aerie (Falcon-512, Falcon-1024) and ours (44, 65, 87) on
     16C32T and 1T.
-  - `tab-relations.tex` (`\label{tab:relations}`): H-u, H-exact and H-FIPS
-    prover times, overheads, verify times and aggregate bytes for 44, 65 and 87.
+  - `tab-relations.tex` (`\label{tab:relations}`): with the opt-in H-exact
+    runs, H-FIPS and H-exact prover times, the change of H-exact against
+    H-FIPS, verify times and aggregate bytes for 44, 65 and 87.
   - `numbers.tex`: `\newcommand` macros for in-text figures.
 
 ## Known variance sources
@@ -281,7 +302,8 @@ carry it):
   `./run.sh gates --write-expected` only after confirming that the change is
   intended. Maintainers pin the submission revision with `./run.sh freeze`,
   which builds the binary, rewrites `expected/hashes.json` for every set and
-  relation and sets the in-repo commit of `sources.lock` to `HEAD`.
+  relation (H-FIPS and H-exact) and sets the in-repo commit of `sources.lock`
+  to `HEAD`.
 - `gates` fails on a self-report: a dispatcher selected a kernel above
   `AGG_ISA`. The failing crate and flag are printed.
 - `./run.sh gates --reference FILE` compares an external reference aggregate.
@@ -307,3 +329,7 @@ cell both ways if timing claims matter. Use native runs for the `Reproduced`
 badge and Docker for `Functional`.
 
 Nix packaging (a flake with both Rust toolchains) is future work.
+
+## License
+
+Our code is under the MIT licence (`../LICENSE`); vendored dependencies keep their upstream licences (`sources.lock`).

@@ -1194,7 +1194,7 @@ pub struct AggregatorConfig {
     /// Prove a batch of more than one segment as one span over all segments when the parts
     /// are whole segments (module docs; default on).
     pub span: bool,
-    /// The relation to prove (default H-u). The Keccak side
+    /// The relation to prove (default H-FIPS). The Keccak side
     /// does not depend on it.
     pub relation: Relation,
     /// The parameter set of the records (default ML-DSA-44; bound in the instance record
@@ -1202,7 +1202,7 @@ pub struct AggregatorConfig {
     pub set: Set,
     /// The field the commitment hash `c~ = H(mu || w1Encode(w1'))` is proven in (default
     /// `Gf2`: Flock tied to the PIOP by the parity bridge). `Fp` proves the Keccak chain
-    /// inside the PIOP (ML-DSA-44, H-u); the Flock fields above are then unused.
+    /// inside the PIOP (ML-DSA-44, H-exact); the Flock fields above are then unused.
     pub hash_field: HashField,
 }
 
@@ -1212,7 +1212,7 @@ impl Default for AggregatorConfig {
             part_log2: DEFAULT_PART_LOG2,
             profile: FLOCK_PROFILE,
             span: true,
-            relation: Relation::Hu,
+            relation: Relation::HFips,
             set: Set::S44,
             hash_field: HashField::Gf2,
         }
@@ -1256,7 +1256,7 @@ pub enum AggregateError {
     Relation(Set, Relation),
     /// The all-prime-field aggregate (`HashField::Fp`) for a parameter set other than ML-DSA-44.
     HashFieldSet(Set),
-    /// The all-prime-field aggregate (`HashField::Fp`) under a relation other than H-u.
+    /// The all-prime-field aggregate (`HashField::Fp`) under a relation other than H-exact.
     HashFieldRelation(Relation),
 }
 
@@ -1283,7 +1283,7 @@ impl std::fmt::Display for AggregateError {
                 set.name()
             ),
             Self::HashFieldRelation(relation) => {
-                write!(f, "the F_p hash field is available under H-u only, not {relation}")
+                write!(f, "the F_p hash field is available under H-exact only, not {relation}")
             }
         }
     }
@@ -1922,7 +1922,7 @@ impl Aggregator {
         })
     }
 
-    /// [`Self::aggregate_with`] under `HashField::Fp` (ML-DSA-44, H-u): the instance and the
+    /// [`Self::aggregate_with`] under `HashField::Fp` (ML-DSA-44, H-exact): the instance and the
     /// main tables as for the default, then the PIOP commits and zero-checks the Keccak chain
     /// itself, so there are no sponge records, Flock parts or Flock thread pool.
     fn aggregate_44_fp(
@@ -1946,7 +1946,7 @@ impl Aggregator {
         if self.config.set != Set::S44 {
             return Err(AggregateError::HashFieldSet(self.config.set));
         }
-        if relation != Relation::Hu {
+        if relation != Relation::HExact {
             return Err(AggregateError::HashFieldRelation(relation));
         }
         if n == 0 || n > 1 << 15 {
@@ -2295,7 +2295,7 @@ impl AggregateVerifier {
         Self {
             gate: gate_of(set),
             require: None,
-            relation: Relation::Hu,
+            relation: Relation::HFips,
             set,
             hash_field: HashField::Gf2,
         }
@@ -2322,7 +2322,7 @@ impl AggregateVerifier {
         self.set
     }
 
-    /// Verify under `relation` (default H-u). The relation is the verifier's choice: an
+    /// Verify under `relation` (default H-FIPS). The relation is the verifier's choice: an
     /// aggregate whose header names another relation is rejected.
     #[must_use]
     pub const fn relation(mut self, relation: Relation) -> Self {
@@ -2771,13 +2771,13 @@ mod tests {
         let gate = sponge_gate();
         let hex = |d: [u8; 32]| d.iter().map(|b| format!("{b:02x}")).collect::<String>();
         for (d_sig, profile, span, want) in [
-            (3, FlockProfile::Slim, true, "9757c063ae3b3a704330367ea2552dcfd41c9f20841abccce47a9a720cf69437"),
-            (10, FlockProfile::Slim, true, "0aa41fd0c4c2a9bd0df0b63d86e57787cb31c6d7cedec0ac9edd626cd2fb3eea"),
-            (13, FlockProfile::Slim, true, "aa72651e90b32c908db52ec832790d72e685c4493c7fd3e80bebe60cd506b5c9"),
-            (15, FlockProfile::Fast, true, "deb090a48d8057c6aed064b95bf6fb8a1499207935005fc0d98b40ab5de3864c"),
-            (15, FlockProfile::Slim, true, "ef9710959f30286f422e170d9112bca67e7526e17382660675061256ef3e3303"),
-            (15, FlockProfile::Slim, false, "fe42263b92bff80e6c367e2b44d7673d274f454841e1784332f5971a03e136c8"),
-            (15, FlockProfile::Slim8, true, "0ba687fbd3b201e24c3776d9ee689dfcfb81ea841de12aa7cbbb3157199ccad8"),
+            (3, FlockProfile::Slim, true, "979d6e78ca49e082607c9912fbd1c0f49ed0a33ca03e0052cf4155848fe0ae31"),
+            (10, FlockProfile::Slim, true, "0a0afe3dd4fa65a6265d2d234b57ca868f793a62ec8d3d3c9949f9af81b2ceac"),
+            (13, FlockProfile::Slim, true, "ecbce3b30764d9c0d5f19e5504568c799d0ac8086d02ed10904d12e9a84879b8"),
+            (15, FlockProfile::Fast, true, "1469c9f7b92f4a22dda5942757531c7a61682f0355a81d5d5159702462b822e5"),
+            (15, FlockProfile::Slim, true, "bcb8ae3e6614861ec518c680603dca5e391faaf27d4fa6699eefb117f8ecb65e"),
+            (15, FlockProfile::Slim, false, "60381b6cf0b713e6d8f3c230c019a5a544436f76dee101cf67fdf0e257ea5014"),
+            (15, FlockProfile::Slim8, true, "4b9a149549f2998fec83bea28478bfc7c4bed26d17f4b8788b44c87c1e52c5be"),
         ] {
             let n = 1 << d_sig;
             let geometry = Geometry::new(n).unwrap();
@@ -2808,24 +2808,24 @@ mod tests {
         use agg_witness::params::Set;
         let hex = |d: [u8; 32]| d.iter().map(|b| format!("{b:02x}")).collect::<String>();
         let cases: [(Set, u32, FlockProfile, bool, &str); 12] = [
-            (Set::S65, 3, FlockProfile::Slim, true, "09d0b47510834ab04d6b9eafc1b9afd61ff3ce538ea292b6ccc74f8384eaa3a1"),
-            (Set::S65, 10, FlockProfile::Fast, true, "482fb6d4668fcf08df8e3ebd90ba49536a647f7249f2d00eacd4fa29086137a5"),
-            (Set::S65, 13, FlockProfile::Slim, true, "6b31340ea7b8be4c7cdd2c8364f59a6b5c0c803bc557640cfba877f26dac1712"),
-            (Set::S65, 15, FlockProfile::Fast, true, "fa3b618068aab74000424181bc16a5ad9bc686f27856af2b86834ecacc000a4e"),
-            (Set::S65, 15, FlockProfile::Fast, false, "1298836050bd5679cb2fdda08aaad4e89503c96bbba35f5bfda99b06325b34fb"),
-            (Set::S65, 15, FlockProfile::Slim8, true, "1c4a6b3718ad4cd0e2cb768dbf604a1acd1d3b6355fe591bd3ab74f4b5fe2e94"),
-            (Set::S87, 3, FlockProfile::Slim, true, "f82fcfead3bf6d2bdbd26cc8a3f23ba4f178726626efa5204500e48573584754"),
-            (Set::S87, 10, FlockProfile::Fast, true, "470e31983acbea1b02fe0a1ce92792eb4d58a8c22398d9a5d9b684f119a22660"),
-            (Set::S87, 13, FlockProfile::Slim, true, "66dba96201af36606e5cc0715ff7addd2a1fb0b63d089cd6cbd540af3dfd2949"),
-            (Set::S87, 15, FlockProfile::Fast, true, "ffe87bdf123c773fd206afc67c59c3b81c00b1e8e70d837bc7f90fef9a3dccad"),
-            (Set::S87, 15, FlockProfile::Fast, false, "0052e6e8cad1587549889c3d0c81fffeb9b4b577ccf3bddaac25043c8eff1ed7"),
-            (Set::S87, 15, FlockProfile::Slim8, true, "2fcb99afb477f65e296189d5918cc79532fbfcee4e1a3f9c54b22f9cc774dfcb"),
+            (Set::S65, 3, FlockProfile::Slim, true, "6309d454feca12cc6f244e499624fa48edfb0a1b3bddabeb35539e77d80f5b91"),
+            (Set::S65, 10, FlockProfile::Fast, true, "a5a388955001c96487d9038a570431a3e35677e9615d0f0cbbf920879d9fd3df"),
+            (Set::S65, 13, FlockProfile::Slim, true, "151e0419bd3d14b947c996517ba6cc55dc2524edabf8645c4553037e0ec3926d"),
+            (Set::S65, 15, FlockProfile::Fast, true, "ae422e66e60e70b0a2d5177cf87e0549c94bc7dec6e35b17362602ee02667e28"),
+            (Set::S65, 15, FlockProfile::Fast, false, "46ff1dc3a80f722b1f8c26a934d5332a25aeb7ae1df6c7253b27f294a6ae10b1"),
+            (Set::S65, 15, FlockProfile::Slim8, true, "c9c00426e8f2744dda565698214045b2f3cac9d7c42bd73e5d72f0a4598fd486"),
+            (Set::S87, 3, FlockProfile::Slim, true, "bca108475dc25fc552d0f905b77cc21d9febb374d73306999f3e38379730b2b9"),
+            (Set::S87, 10, FlockProfile::Fast, true, "7ccad5ae358471e3ac4e3b915f0ec7a7091c0c78b6217dba8fa7a13e45e75455"),
+            (Set::S87, 13, FlockProfile::Slim, true, "edadcdd89add9d87abebaa698f9f688f1930273ddbdade9b0503a76811c97f65"),
+            (Set::S87, 15, FlockProfile::Fast, true, "0b3624f744fd290a23fd153eea6371b7eb5b2968c0f3a70d043369e964620e46"),
+            (Set::S87, 15, FlockProfile::Fast, false, "a8e14a857e31b68752cc9c16b28cb84b3cb0e28e2e9a54bd90038f8b95460303"),
+            (Set::S87, 15, FlockProfile::Slim8, true, "e76d3c072770416d01bb4f0f73d8a34f87805fc4ccf5ee6a5a2014ad4af499e4"),
         ];
         for (set, d_sig, profile, span, want) in cases {
             let gate = sponge_gate_for(set);
             let n = 1 << d_sig;
             let keccak = keccak_plan(&gate, &Geometry::new(n).unwrap(), DEFAULT_PART_LOG2, span, profile);
-            let manifest = CommitmentManifest::for_set(set, n, Relation::Hu).unwrap();
+            let manifest = CommitmentManifest::for_set(set, n, Relation::HExact).unwrap();
             let plan = PowPlan::new(&manifest, profile, &keccak);
             assert_eq!(hex(plan.digest()), want, "{set} 2^{d_sig} {profile:?} span {span}");
         }

@@ -1,14 +1,5 @@
 {
   "commit": "092a41786fe5f188f97e01704017a00f67bb3e30",
   "records": "keygen-batch --params P --count 1024 --seed 42; sign-batch --params P --count 1024 --seed 43",
-  "aggregates": {
-    "44": {
-      "1024": {
-        "h-u": {
-          "bytes": 145117,
-          "sha256": "2297be1ce7f68bda3c0a00bf607feceadf8bd331b72702b9164a1886928da173"
-        }
-      }
-    }
-  }
+  "aggregates": {}
 }

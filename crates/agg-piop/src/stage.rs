@@ -64,7 +64,7 @@ pub enum WeightId {
 pub enum LaneId {
     /// A committed polynomial.
     Column(Column),
-    /// `P_Z = Z (Z + 1)` of a leaf-checked digit (virtual; `Z_hi`, `U_hi`).
+    /// `P_Z = Z (Z + 1)` of a leaf-checked digit (virtual; `U_hi`, `K_2`, `K_3`).
     DigitSquare(Column),
     /// `y^(1)_t` on `D_1` (virtual).
     Parity1(u8),

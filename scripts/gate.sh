@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Correctness gate for the unified build: for every set, the 1K aggregates under H-u,
-# H-exact and H-FIPS must verify and a tampered one must be rejected; a small batch must
-# verify under H-u and H-FIPS (3 records for ML-DSA-44; 20 for ML-DSA-65 and ML-DSA-87,
+# Correctness gate for the unified build: for every set, the 1K aggregates under H-FIPS
+# (the default) and H-exact must verify and a tampered one must be rejected; a small batch must
+# verify under H-FIPS and H-exact (3 records for ML-DSA-44; 20 for ML-DSA-65 and ML-DSA-87,
 # whose lane-set batches hold at least 17 records). Reports bytes per signature. Proof-byte
 # identity against the pinned digests is checked separately (artifact/run.sh gates, keyed by
 # set and relation).
@@ -28,7 +28,7 @@ for p in ${GATE_PARAMS:-44 65 87}; do
         "$A" keygen-batch --params "$p" --count 1024 --seed 7 --out "$O/keys1k$tag.bin" > /dev/null
         "$A" sign-batch --params "$p" --keys "$O/keys1k$tag.bin" --count 1024 --seed 7 --out "$rec" > /dev/null
     fi
-    for rel in h-u h-exact h-fips; do
+    for rel in h-fips h-exact; do
         out="$O/agg1k$tag.$rel.bin"
         "$A" aggregate --params "$p" --records "$rec" --out "$out" --relation "$rel"
         "$A" verify --params "$p" --records "$rec" --aggregate "$out" --relation "$rel" > /dev/null
@@ -48,7 +48,7 @@ PY
         # A batch of three records (d_main = 13: stage 3's level groups on the full domain).
         "$A" keygen-batch --count 4 --seed 11 --out "$O/keys4.bin" > /dev/null
         "$A" sign-batch --keys "$O/keys4.bin" --count 3 --seed 11 --out "$O/rec3.bin" > /dev/null
-        for rel in h-u h-fips; do
+        for rel in h-fips h-exact; do
             "$A" aggregate --records "$O/rec3.bin" --out "$O/agg3.$rel.bin" --relation "$rel" > /dev/null
             "$A" verify --records "$O/rec3.bin" --aggregate "$O/agg3.$rel.bin" --relation "$rel" > /dev/null
             echo "GATE verify $rel N=3 $(stat -c %s "$O/agg3.$rel.bin") B"
@@ -57,7 +57,7 @@ PY
         # The smallest lane-set batch class (17 to 32 records: d_main = 13).
         "$A" keygen-batch --params "$p" --count 4 --seed 11 --out "$O/keys4$tag.bin" > /dev/null
         "$A" sign-batch --params "$p" --keys "$O/keys4$tag.bin" --count 20 --seed 11 --out "$O/rec20$tag.bin" > /dev/null
-        for rel in h-u h-fips; do
+        for rel in h-fips h-exact; do
             "$A" aggregate --params "$p" --records "$O/rec20$tag.bin" --out "$O/agg20$tag.$rel.bin" --relation "$rel" > /dev/null
             "$A" verify --params "$p" --records "$O/rec20$tag.bin" --aggregate "$O/agg20$tag.$rel.bin" --relation "$rel" > /dev/null
             echo "GATE ML-DSA-$p verify $rel N=20 $(stat -c %s "$O/agg20$tag.$rel.bin") B"

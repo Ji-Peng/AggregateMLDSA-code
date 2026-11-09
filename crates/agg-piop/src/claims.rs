@@ -189,18 +189,15 @@ impl Kappa1Claims {
     }
 }
 
-/// The stage-1 terminal claims (18 for ML-DSA-44 under `Gf2`; `2 w + w k` with polynomial
-/// lanes; under `Fp`, the `w k` bit claims followed by the non-public Keccak lane claims):
-/// `y^(1)_t(r^(1)_1)`, `y^(2)_t(r^(1)_2)`, `b_t^(rho)(r^(1))` (bit-major, [`bit_columns`]),
-/// and `keccak`.
+/// The stage-1 terminal claims (12 for ML-DSA-44 under `Gf2`; `2 w` with `w` bits of
+/// `w_1'`; under `Fp`, the non-public Keccak lane claims alone): `y^(1)_t(r^(1)_1)`,
+/// `y^(2)_t(r^(1)_2)` and `keccak`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage1Claims {
     /// `y^(1)_t(r^(1)_1)` (empty under `HashField::Fp`).
     pub y1: Vec<E>,
     /// `y^(2)_t(r^(1)_2)` (empty under `HashField::Fp`).
     pub y2: Vec<E>,
-    /// `b_t^(rho)(r^(1))` in the order of [`bit_columns`].
-    pub b: Vec<E>,
     /// Terminal evaluations of every non-public Keccak lane of stage 1 (`Column`, `Rot`,
     /// `Prev`, `PrevIota`, `Blk`) in `spec.lane_ids()` order (empty under `HashField::Gf2`).
     pub keccak: Vec<E>,
@@ -208,7 +205,7 @@ pub struct Stage1Claims {
 
 impl Stage1Claims {
     /// Wire length of ML-DSA-44 under `HashField::Gf2`.
-    pub const LEN: usize = 3 * W1_BITS;
+    pub const LEN: usize = 2 * W1_BITS;
 
     /// Parity claims per level (`w` under `Gf2`, `0` under `Fp`).
     #[must_use]
@@ -238,16 +235,15 @@ impl Stage1Claims {
     /// Wire length of the manifest's parameter set and hash field.
     #[must_use]
     pub fn len(manifest: &CommitmentManifest) -> usize {
-        2 * Self::y_len(manifest) + bit_columns(manifest).len() + Self::keccak_len(manifest)
+        2 * Self::y_len(manifest) + Self::keccak_len(manifest)
     }
 
     /// Wire order.
     #[must_use]
     pub fn to_vec(&self) -> Vec<E> {
-        let mut out = Vec::with_capacity(self.y1.len() + self.y2.len() + self.b.len() + self.keccak.len());
+        let mut out = Vec::with_capacity(self.y1.len() + self.y2.len() + self.keccak.len());
         out.extend_from_slice(&self.y1);
         out.extend_from_slice(&self.y2);
-        out.extend_from_slice(&self.b);
         out.extend_from_slice(&self.keccak);
         out
     }
@@ -255,38 +251,33 @@ impl Stage1Claims {
     /// Parse the wire order of ML-DSA-44 under `HashField::Gf2`.
     #[must_use]
     pub fn from_slice(values: &[E]) -> Option<Self> {
-        Self::from_slice_shape(values, W1_BITS, W1_BITS, 0)
+        Self::from_slice_shape(values, W1_BITS, 0)
     }
 
     /// Parse the wire order of the manifest's parameter set and hash field.
     #[must_use]
     pub fn from_slice_for(manifest: &CommitmentManifest, values: &[E]) -> Option<Self> {
-        Self::from_slice_shape(
-            values,
-            Self::y_len(manifest),
-            bit_columns(manifest).len(),
-            Self::keccak_len(manifest),
-        )
+        Self::from_slice_shape(values, Self::y_len(manifest), Self::keccak_len(manifest))
     }
 
-    fn from_slice_shape(values: &[E], bits: usize, bit_lanes: usize, keccak_lanes: usize) -> Option<Self> {
-        if values.len() != 2 * bits + bit_lanes + keccak_lanes {
+    fn from_slice_shape(values: &[E], bits: usize, keccak_lanes: usize) -> Option<Self> {
+        if values.len() != 2 * bits + keccak_lanes {
             return None;
         }
         let mut offset = 0;
         Some(Self {
             y1: take(values, &mut offset, bits),
             y2: take(values, &mut offset, bits),
-            b: take(values, &mut offset, bit_lanes),
             keccak: take(values, &mut offset, keccak_lanes),
         })
     }
 }
 
-/// The stage-2 terminal claims: `b_t^(rho)(r^(2))` ([`bit_columns`], empty under
-/// `HashField::Fp`), `P_Z(r^(2))` for each leaf-checked digit, H-FIPS's `delta(r^(2))` and
-/// `e(r^(2))` (`stage2::FIPS_TERMINALS`), and the non-public Keccak lane claims (empty under
-/// `HashField::Gf2`).
+/// The stage-2 terminal claims: `b_t^(rho)(r^(2))` ([`bit_columns`]; under `HashField::Fp`
+/// only with the range identity of ML-DSA-44, which reads the bits), `P_Z(r^(2))` for each
+/// leaf-checked digit (9 under H-exact: 6 bits, 3 squares); under H-FIPS 10 claims (6 bits,
+/// 2 squares for `K_2, K_3`, plus `delta(r^(2))` and `e(r^(2))`, `stage2::FIPS_TERMINALS`),
+/// then the non-public Keccak lane claims (empty under `HashField::Gf2`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage2Claims {
     /// `b_t^(rho)(r^(2))` (empty under `HashField::Fp`).
@@ -301,11 +292,13 @@ pub struct Stage2Claims {
 }
 
 impl Stage2Claims {
-    /// Bit claims (`w k` under `Gf2`, `0` under `Fp`).
+    /// Bit claims (`w k` under `Gf2`; under `Fp`, the bits of ML-DSA-44 that stage 2's range
+    /// identity reads, and none for the four-bit sets).
     #[must_use]
     pub fn b_len(manifest: &CommitmentManifest) -> usize {
         match manifest.hash_field() {
             HashField::Gf2 => bit_columns(manifest).len(),
+            HashField::Fp if crate::stage2::has_range_w1(manifest) => bit_columns(manifest).len(),
             HashField::Fp => 0,
         }
     }
@@ -379,10 +372,10 @@ impl Stage2Claims {
 }
 
 /// The stage-3 terminal claims: every polynomial of `G_main16, G_main4, G_1, G_2, G_3, G_k` at
-/// `r^(3)` restricted to its group, in manifest order (group by group): 35 under H-u, 36
-/// under H-exact (40 under H-FIPS). Under `HashField::Fp` the groups are `G_main16, G_main4`,
-/// the seven Keccak groups (at the `d_K` suffix) and `G_k`: 401 under H-u. `G_m` is opened at
-/// the lookup's table point instead ([`MultiplicityClaims`]).
+/// `r^(3)` restricted to its group, in manifest order (group by group): 36 under H-exact,
+/// 40 under H-FIPS. Under `HashField::Fp` the groups are `G_main16, G_main4`, the seven
+/// Keccak groups (at the `d_K` suffix) and `G_k`: 402 under H-exact. `G_m` is opened at the
+/// lookup's table point instead ([`MultiplicityClaims`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage3Claims(pub Vec<E>);
 
@@ -468,51 +461,53 @@ mod tests {
         let manifest = CommitmentManifest::for_batch(8).unwrap();
         let exact = CommitmentManifest::for_relation(8, crate::manifest::Relation::HExact).unwrap();
         assert_eq!((Stage2Claims::len(&manifest), Stage2Claims::len(&exact)), (10, 9));
-        assert_eq!((Stage3Claims::len(&manifest), Stage3Claims::len(&exact)), (35, 36));
+        assert_eq!((Stage3Claims::len(&manifest), Stage3Claims::len(&exact)), (40, 36));
         for m in [&manifest, &exact] {
             let s2 = Stage2Claims::from_slice(m, &point(&mut rng, Stage2Claims::len(m))).unwrap();
             assert_eq!(Stage2Claims::from_slice(m, &s2.to_vec()), Some(s2.clone()));
         }
         assert!(Stage2Claims::from_slice(&exact, &point(&mut rng, 8)).is_none());
-        let s3 = Stage3Claims::from_slice(&manifest, &point(&mut rng, 35)).unwrap();
-        assert_eq!(Stage3Claims::group_offset(&manifest, GroupRole::Level2), 18);
-        // G_3 has one claim (its zero polynomials have none), then G_k's four.
-        assert_eq!(s3.group(&manifest, GroupRole::Level3), &s3.0[30..31]);
-        assert_eq!(s3.group(&manifest, GroupRole::Proj), &s3.0[31..]);
-        assert_eq!(s3.column(&manifest, Column::K_2), s3.0[33]);
-        assert_eq!(s3.column(&manifest, Column::K_3), s3.0[34]);
-        assert_eq!(s3.column(&manifest, Column::Parity2(1)), s3.0[19]);
-        assert_eq!(s3.column(&manifest, Column::W1Bit(0, 0)), s3.0[6]);
-        assert!(Stage3Claims::from_slice(&manifest, &s3.0[..34]).is_none());
-        // H-exact: a_z is the last main-domain claim, every later group moves by one.
+        // H-exact: 4 + 9 main-domain claims (a_z last), 6 + 12 bridge claims, one claim of G_3
+        // (its zero polynomials have none), then G_k's four.
         let x3 = Stage3Claims::from_slice(&exact, &point(&mut rng, 36)).unwrap();
         assert_eq!(Stage3Claims::group_offset(&exact, GroupRole::Level2), 19);
         assert_eq!(x3.column(&exact, Column::A_Z), x3.0[12]);
         assert_eq!(x3.column(&exact, Column::W1Bit(0, 0)), x3.0[6]);
+        assert_eq!(x3.group(&exact, GroupRole::Level3), &x3.0[31..32]);
+        assert_eq!(x3.group(&exact, GroupRole::Proj), &x3.0[32..]);
+        assert_eq!(x3.column(&exact, Column::K_2), x3.0[34]);
+        assert_eq!(x3.column(&exact, Column::K_3), x3.0[35]);
+        assert_eq!(x3.column(&exact, Column::Parity2(1)), x3.0[20]);
         assert!(Stage3Claims::from_slice(&exact, &x3.0[..34]).is_none());
+        // H-FIPS: 4 + 12 main-domain claims, G_2 with the hint slack u_h last.
+        let s3 = Stage3Claims::from_slice(&manifest, &point(&mut rng, 40)).unwrap();
+        assert_eq!(Stage3Claims::group_offset(&manifest, GroupRole::Level2), 22);
+        assert_eq!(s3.column(&manifest, Column::HINT_SLACK), s3.0[34]);
+        assert_eq!(s3.group(&manifest, GroupRole::Level3), &s3.0[35..36]);
+        assert_eq!(s3.column(&manifest, Column::K_3), s3.0[39]);
+        assert!(Stage3Claims::from_slice(&manifest, &s3.0[..39]).is_none());
         let digits = MultiplicityClaims([3, -2, 0, 1, 0, 0, 7].map(E::from_i64));
         assert_eq!(digits.compose(), E::from_i64(3 - 32 + 4096 + 7 * (1 << 24)));
         assert_eq!(carry_value(E::from_i64(-(1 << 15))), E::from_i64(0));
 
-        // Under HashField::Fp: y1 and y2 are empty in Stage1Claims, b is empty in Stage2Claims,
-        // and keccak holds the non-public Keccak lane claims in spec.lane_ids() order.
-        let fp = CommitmentManifest::for_batch_fp(8).unwrap();
+        // Under HashField::Fp: Stage1Claims holds the non-public Keccak lane claims alone (in
+        // spec.lane_ids() order); Stage2Claims keeps the six bits that the range identity reads.
+        let fp = CommitmentManifest::for_relation_fp(8, crate::manifest::Relation::HExact).unwrap();
         assert_eq!(Kappa1Claims::len(&fp), 0);
         assert_eq!(Stage1Claims::y_len(&fp), 0);
         assert_eq!(Stage1Claims::keccak_len(&fp), 740);
-        assert_eq!(Stage1Claims::len(&fp), 6 + 740);
+        assert_eq!(Stage1Claims::len(&fp), 740);
         let fp_s1 = Stage1Claims::from_slice_for(&fp, &point(&mut rng, Stage1Claims::len(&fp))).unwrap();
         assert!(fp_s1.y1.is_empty() && fp_s1.y2.is_empty());
-        assert_eq!(fp_s1.b.len(), 6);
         assert_eq!(fp_s1.keccak.len(), 740);
         assert_eq!(Stage1Claims::from_slice_for(&fp, &fp_s1.to_vec()), Some(fp_s1));
 
-        assert_eq!(Stage2Claims::b_len(&fp), 0);
+        assert_eq!(Stage2Claims::b_len(&fp), 6);
         assert_eq!(Stage2Claims::keccak_len(&fp), 516);
-        assert_eq!(Stage2Claims::len(&fp), 4 + 516);
+        assert_eq!(Stage2Claims::len(&fp), 6 + 3 + 516);
         let fp_s2 = Stage2Claims::from_slice_for(&fp, &point(&mut rng, Stage2Claims::len(&fp))).unwrap();
-        assert!(fp_s2.b.is_empty() && fp_s2.fips.is_empty());
-        assert_eq!(fp_s2.squares.len(), 4);
+        assert!(fp_s2.fips.is_empty());
+        assert_eq!((fp_s2.b.len(), fp_s2.squares.len()), (6, 3));
         assert_eq!(fp_s2.keccak.len(), 516);
         assert_eq!(Stage2Claims::from_slice_for(&fp, &fp_s2.to_vec()), Some(fp_s2));
 
@@ -522,7 +517,7 @@ mod tests {
         use agg_witness::params::Set;
         for (set, relation) in [Set::S44, Set::S65, Set::S87]
             .into_iter()
-            .flat_map(|s| [Relation::Hu, Relation::HExact, Relation::HFips].map(|r| (s, r)))
+            .flat_map(|s| Relation::ALL.map(|r| (s, r)))
         {
             let Ok(m) = CommitmentManifest::for_set_fp(set, 256, relation) else {
                 continue;

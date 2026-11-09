@@ -576,7 +576,7 @@ mod tests {
     }
 
     fn sample_proof(records: usize, rng: &mut SplitMix64) -> AggregateProof {
-        sample_proof_of(Relation::Hu, records, rng)
+        sample_proof_of(Relation::HFips, records, rng)
     }
 
     fn sample_proof_of(relation: Relation, records: usize, rng: &mut SplitMix64) -> AggregateProof {
@@ -645,9 +645,9 @@ mod tests {
             let segments = proof.flock_proofs.len();
             let join = &bytes[bytes.len() - tail - 9 * segments..bytes.len() - tail];
             assert_eq!(join, [5, 0, 0, 0, 3, 3, 3, 3, 3].repeat(segments));
-            // Relation H-u: stage degrees 4, 5, 3 (12 elements per round); the shared
-            // projection claim after the stage-2 terminal.
-            assert_eq!(proof.piop_bytes(), 16 * (13 + 18 + 6 + 10 + 1 + 35 + 12 * proof.stage1.rounds.len()));
+            // Relation H-FIPS: 11 elements per round; the shared projection claim after the
+            // stage-2 terminal.
+            assert_eq!(proof.piop_bytes(), 16 * (13 + 12 + 6 + 10 + 1 + 40 + 11 * proof.stage1.rounds.len()));
             let shape = CommitmentManifest::for_batch(records).unwrap().lookup_shape();
             assert_eq!(size.lookup, 16 * (shape.proof_elements() + 7));
             assert_eq!(AggregateProof::from_bytes(&bytes[..bytes.len() - 1]), Err(WireError::Truncated));
@@ -664,13 +664,12 @@ mod tests {
             }
             // The nonce stream has the plan's exact length.
             assert_eq!(size.work, work_bytes(&CommitmentManifest::for_batch(records).unwrap()));
-            assert!(size.work >= 227);
-            // Relation byte: 0 (H-u), 1 (H-exact), 2 (H-FIPS); 3 and above are unknown. The
-            // parser reads the relation from the header (H-u and H-exact proofs have equally
-            // many stage claims, 10 + 35 = 9 + 36, so a rewritten flag may still parse; the
+            assert!(size.work >= 226);
+            // Relation byte: 1 (H-exact), 2 (H-FIPS); 0 and 3 and above are unknown. The parser
+            // reads the relation from the header (a rewritten flag may still parse; the
             // verifier compares it with the relation it expects).
-            assert_eq!(bytes[2], 0);
-            for (flag, relation) in [(1_u8, Relation::HExact), (2, Relation::HFips)] {
+            assert_eq!(bytes[2], 2);
+            for (flag, relation) in [(1_u8, Relation::HExact)] {
                 let mut rewritten = bytes.clone();
                 rewritten[2] = flag;
                 if let Ok(parsed) = AggregateProof::from_bytes(&rewritten) {
@@ -678,7 +677,7 @@ mod tests {
                     assert_ne!(parsed, proof);
                 }
             }
-            for flag in [3_u8, 0xFF] {
+            for flag in [0_u8, 3, 0xFF] {
                 let mut flags = bytes.clone();
                 flags[2] = flag;
                 assert_eq!(AggregateProof::from_bytes(&flags), Err(WireError::Flags(flag)));
@@ -724,15 +723,15 @@ mod tests {
             assert_eq!(parsed.relation, Relation::HExact);
             assert_eq!(parsed.stage2.claims.squares.len(), 3);
             assert_eq!(parsed.stage3.claims.0.len(), 36);
-            // H-exact: 13 + 18 + 6 + 9 + 1 + 36 claims and 12 elements per round.
+            // H-exact: 13 + 12 + 6 + 9 + 1 + 36 claims and 11 elements per round.
             let rounds = proof.stage1.rounds.len();
-            assert_eq!(proof.piop_bytes(), 16 * (13 + 18 + 6 + 9 + 1 + 36 + 12 * rounds));
+            assert_eq!(proof.piop_bytes(), 16 * (13 + 12 + 6 + 9 + 1 + 36 + 11 * rounds));
             assert_eq!(proof.size().total(), bytes.len());
             // A truncated proof is rejected.
             assert_eq!(AggregateProof::from_bytes(&bytes[..bytes.len() - 200]), Err(WireError::Truncated));
         }
-        // At 2^15 the stage messages and claims take 6,128 bytes (25 rounds), as under H-u.
-        assert_eq!(16 * (13 + 18 + 6 + 9 + 1 + 36 + 12 * 25), 6_128);
+        // At 2^15 the stage messages and claims take 5,632 bytes (25 rounds).
+        assert_eq!(16 * (13 + 12 + 6 + 9 + 1 + 36 + 11 * 25), 5_632);
     }
 
     #[test]
@@ -748,14 +747,14 @@ mod tests {
             assert_eq!(parsed.stage2.claims.squares.len(), 2);
             assert_eq!(parsed.stage2.claims.fips.len(), 2);
             assert_eq!(parsed.stage3.claims.0.len(), 40);
-            // H-FIPS: 13 + 18 + 6 + 10 + 1 + 40 claims and 12 elements per round.
+            // H-FIPS: 13 + 12 + 6 + 10 + 1 + 40 claims and 11 elements per round.
             let rounds = proof.stage1.rounds.len();
-            assert_eq!(proof.piop_bytes(), 16 * (13 + 18 + 6 + 10 + 1 + 40 + 12 * rounds));
+            assert_eq!(proof.piop_bytes(), 16 * (13 + 12 + 6 + 10 + 1 + 40 + 11 * rounds));
             assert_eq!(proof.size().total(), bytes.len());
             assert_eq!(AggregateProof::from_bytes(&bytes[..bytes.len() - 200]), Err(WireError::Truncated));
         }
-        // At 2^15 the stage messages and claims take 6,208 bytes (25 rounds).
-        assert_eq!(16 * (13 + 18 + 6 + 10 + 1 + 40 + 12 * 25), 6_208);
+        // At 2^15 the stage messages and claims take 5,712 bytes (25 rounds).
+        assert_eq!(16 * (13 + 12 + 6 + 10 + 1 + 40 + 11 * 25), 5_712);
     }
 
     #[test]
@@ -763,16 +762,16 @@ mod tests {
         let mut rng = SplitMix64::new(80);
         for (set, nibble, width) in [(Set::S65, 0x10_u8, 48), (Set::S87, 0x20, 64)] {
             for records in [17, 100, 1000] {
-                let proof = sample_proof_in(set, Relation::Hu, records, &mut rng);
+                let proof = sample_proof_in(set, Relation::HExact, records, &mut rng);
                 let bytes = proof.to_bytes();
-                assert_eq!(bytes[2], nibble, "{set:?}");
+                assert_eq!(bytes[2], nibble | 1, "{set:?}");
                 let parsed = AggregateProof::from_bytes(&bytes).unwrap();
                 assert_eq!(parsed, proof);
                 assert_eq!((parsed.set, parsed.c_tilde[0].len()), (set, width));
                 let size = proof.size();
                 assert_eq!(size.total(), bytes.len());
                 assert_eq!(size.c_tilde, width * records);
-                let manifest = CommitmentManifest::for_set(set, records, Relation::Hu).unwrap();
+                let manifest = CommitmentManifest::for_set(set, records, Relation::HExact).unwrap();
                 assert_eq!(size.work, work_bytes(&manifest));
                 assert_eq!(proof.stage1.rounds[0].len(), 3);
                 // A rewritten set nibble changes every shape that follows, so the parse fails
@@ -782,24 +781,24 @@ mod tests {
                         continue;
                     }
                     let mut rewritten = bytes.clone();
-                    rewritten[2] = other;
+                    rewritten[2] = other | 1;
                     if let Ok(parsed) = AggregateProof::from_bytes(&rewritten) {
                         assert_ne!(parsed, proof);
                     }
                 }
                 // Unknown set nibbles and unknown relations are refused.
-                for bad in [0x30_u8, 0xF0, nibble | 3, nibble | 0xF] {
+                for bad in [0x31_u8, 0xF1, nibble, nibble | 3, nibble | 0xF] {
                     let mut flags = bytes.clone();
                     flags[2] = bad;
                     assert_eq!(AggregateProof::from_bytes(&flags), Err(WireError::Flags(bad)));
                 }
                 assert_eq!(AggregateProof::from_bytes(&bytes[..bytes.len() - 1]), Err(WireError::Truncated));
-                // H-exact: the relation in the low nibble, the shapes of H-u.
-                let exact = sample_proof_in(set, Relation::HExact, records, &mut rng);
-                let exact_bytes = exact.to_bytes();
-                assert_eq!(exact_bytes[2], nibble | 1);
-                assert_eq!(exact_bytes.len(), bytes.len());
-                assert_eq!(AggregateProof::from_bytes(&exact_bytes).unwrap(), exact);
+                // H-FIPS: the relation in the low nibble.
+                let fips = sample_proof_in(set, Relation::HFips, records, &mut rng);
+                let fips_bytes = fips.to_bytes();
+                assert_eq!(fips_bytes[2], nibble | 2);
+                assert_eq!(fips.size().total(), fips_bytes.len());
+                assert_eq!(AggregateProof::from_bytes(&fips_bytes).unwrap(), fips);
                 // Below 17 records the header is refused.
                 let mut small = bytes.clone();
                 small[3..11].copy_from_slice(&16_u64.to_le_bytes());

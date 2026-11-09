@@ -1,6 +1,6 @@
 //! The fold-support hypothesis of the Akita soundness bound, discharged: every sparse fold
-//! challenge of every row of both generated catalogs (the 26 grouped width-4 rows of
-//! relations H-u and H-exact, the width-4 scalar rows of `G_main4` and the width-16 scalar
+//! challenge of every row of both generated catalogs (the grouped width-4 rows of relations
+//! H-exact and H-FIPS, the width-4 scalar rows of `G_main4` and the width-16 scalar
 //! rows of `G_main16`, `G_1`, `G_2`, `G_3`) is drawn from a family whose accepted support,
 //! after the sampler's rejection, is at least `2^128`.
 //!
@@ -499,17 +499,15 @@ fn certified_floors_and_policies() {
 fn every_fold_challenge_family_has_128_bits_of_accepted_support() {
     let w4 = AggFp64SignedWidth4::catalog().expect("width-4 catalog");
     let w16 = AggFp64SignedWidth16::catalog().expect("width-16 catalog");
-    // Width 4, per relation (H-u, H-exact): 13 grouped rows and 13 scalar rows of G_main4
-    // (8 or 9 polynomials), 52 rows; width 16: 13 scalar rows each of G_main16, G_1, G_2,
-    // G_3, with equal layouts sharing one row (the same for both relations).
+    // Width 4, per set and relation: 13 grouped rows and the scalar rows of G_main4; width
+    // 16: the scalar rows of G_main16, G_1, G_2, G_3, with equal layouts sharing one row.
     let (c4, m4, g4) = audit_catalog("width4", rows_of(w4.catalog()), w4.catalog().len());
     let (c16, m16, g16) = audit_catalog("width16", rows_of(w16.catalog()), w16.catalog().len());
     assert!(m4 >= 128.0 && m16 >= 128.0);
-    // The 83 grouped rows (seven root groups: 39 for ML-DSA-44 across H-u, H-exact, H-FIPS;
-    // 22 for ML-DSA-65 and 22 for ML-DSA-87 under H-u and H-FIPS, where d_sig 3..5 share
-    // physical groups and H-exact shares the H-u rows) are in the width-4 catalog (the family
-    // of the final group G_m).
-    assert_eq!((g4, g16), (83, 0));
+    // The 70 grouped rows (seven root groups: 26 for ML-DSA-44 across H-exact and H-FIPS;
+    // 22 for ML-DSA-65 and 22 for ML-DSA-87 across H-exact and H-FIPS, where d_sig 3..5 share
+    // physical groups) are in the width-4 catalog (the family of the final group G_m).
+    assert_eq!((g4, g16), (70, 0));
     // The families that occur.
     let families = |c: &Census| -> Vec<(usize, usize, usize, Option<usize>)> {
         let mut v: Vec<_> = c.keys().map(|&(_, d, a, b, r)| (d, a, b, r)).collect();
@@ -528,21 +526,6 @@ fn grouped_rows_by_batch_size() {
     // (d_sig, draws, minimum accepted support in bits, rounded down
     // to 4 decimals) of the grouped row of N* = 2^d_sig, per relation (the seven-group
     // layout).
-    let expected_h_u: [(usize, usize, f64); 13] = [
-        (3, 12, 128.0881),
-        (4, 12, 128.0881),
-        (5, 12, 128.0881),
-        (6, 12, 128.0881),
-        (7, 12, 128.0881),
-        (8, 12, 128.0881),
-        (9, 12, 128.0881),
-        (10, 12, 128.0881),
-        (11, 13, 128.5633),
-        (12, 13, 128.0881),
-        (13, 13, 128.0881),
-        (14, 13, 128.0881),
-        (15, 13, 128.0881),
-    ];
     let expected_h_exact: [(usize, usize, f64); 13] = [
         (3, 12, 128.0881),
         (4, 12, 128.0881),
@@ -562,7 +545,6 @@ fn grouped_rows_by_batch_size() {
     let (mut got, mut want) = (Vec::new(), Vec::new());
     for relation in Relation::ALL {
         let expected: &[(usize, usize, f64)] = match relation {
-            Relation::Hu => &expected_h_u,
             Relation::HExact => &expected_h_exact,
             Relation::HFips => &EXPECTED_H_FIPS,
         };
@@ -605,8 +587,8 @@ fn grouped_rows_by_batch_size() {
         }
     }
     let lanes = [
-        (Set::S65, Relation::Hu, &EXPECTED_65),
-        (Set::S87, Relation::Hu, &EXPECTED_87),
+        (Set::S65, Relation::HExact, &EXPECTED_65),
+        (Set::S87, Relation::HExact, &EXPECTED_87),
         (Set::S65, Relation::HFips, &EXPECTED_65_H_FIPS),
         (Set::S87, Relation::HFips, &EXPECTED_87_H_FIPS),
     ];
@@ -635,8 +617,8 @@ fn grouped_rows_by_batch_size() {
     assert_eq!(got, want);
 }
 
-/// (d_sig, draws, minimum accepted support in bits) of the ML-DSA-65 grouped rows
-/// (`mldsa-65-p16-batch-<N*>-mult-final`).
+/// (d_sig, draws, minimum accepted support in bits) of the ML-DSA-65 H-exact grouped rows
+/// (`mldsa-65-p16x-batch-<N*>-mult-final`).
 const EXPECTED_65: [(usize, usize, f64); 13] = [
     (3, 12, 128.0881),
     (4, 12, 128.0881),
@@ -653,8 +635,8 @@ const EXPECTED_65: [(usize, usize, f64); 13] = [
     (15, 13, 128.0881),
 ];
 
-/// (d_sig, draws, minimum accepted support in bits) of the ML-DSA-87 grouped rows
-/// (`mldsa-87-p16-batch-<N*>-mult-final`).
+/// (d_sig, draws, minimum accepted support in bits) of the ML-DSA-87 H-exact grouped rows
+/// (`mldsa-87-p16x-batch-<N*>-mult-final`).
 const EXPECTED_87: [(usize, usize, f64); 13] = [
     (3, 12, 128.0881),
     (4, 12, 128.0881),

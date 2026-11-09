@@ -35,8 +35,8 @@ spec Section 6):
 
 | Value | Decomposition | Proven range | Columns per position | Range mechanism |
 | --- | --- | --- | ---: | --- |
-| `z` | `z + 2^17 = z_lo + 2^16 z_hi` | `z_lo in [0, 2^16)`, `z_hi in [0, 4)`, so `z in [-2^17, 2^17)` | 2 | lookup; `leaf4` + `link` |
-| `u` | `u + 190,465 = u_lo + 63,079 u_hi` (relation H-u, deviation L8) | `u_lo in [0, 2^16)`, `u_hi in [0, 6)`, so `u in [-190,465, 190,465]` exactly | 2 | lookup; `leaf6` + `link` |
+| `z` | `z + 2^17 = z_lo + 2^16 z_hi` (former relation H-u, removed) | `z_lo in [0, 2^16)`, `z_hi in [0, 4)`, so `z in [-2^17, 2^17)` | 2 | lookup; `leaf4` + `link` |
+| `u` | `u + 190,465 = u_lo + 63,079 u_hi` (relation H-exact, deviation L8) | `u_lo in [0, 2^16)`, `u_hi in [0, 6)`, so `u in [-190,465, 190,465]` exactly | 2 | lookup; `leaf6` + `link` |
 | `v` | `v + 2^31 = v_lo + 2^16 v_hi` (honest encoding) | none; `|v|_c <= 2^38` through `k` | 2 | none (committed, not looked up) |
 | `k = <Psi_o, v_i>` | `k + 2^37 = k_0 + 2^16 k_1 + 2^32 k_2 + 2^35 k_3` | `k_0, k_1 in [0, 2^16)`, `k_2, k_3 in [0, 8)`, so `k in [-2^37, 2^37)` | 4 per (row, signature), on `D_k` | two lookups; two `leaf8` + links |
 | `b_0..b_5` | bits | Boolean, `w_1' < 44` | 6 | unchanged (`bool_b`, `range_w1`) |
@@ -57,6 +57,9 @@ step form (4.2), `u = U_lo + 63,079 U_hi + 31,540`; `k = K_0 + 2^16 K_1 + 2^32 K
 `Z_lo = V_lo = -2^15`, `U_lo = -31,540` (`u_lo = 1,228`, `u_hi = 3`), `Z_hi = U_hi = V_hi = 0`;
 padded carries are `K = -2^15`, and so are the padding slots of the carry stacks (looked-up
 value 0); padded records project to `k = 0`, digits `(K_0, K_1, K_2, K_3) = (-2^15, -2^15, -4, 0)`.
+The radix form of `z` (`Z_lo`, `Z_hi`, `leaf4`) belongs to the removed relation H-u, which
+this layout was first built for; the code commits `z` in H-exact's form below, under both
+H-FIPS (the default) and H-exact.
 
 Relation H-exact (`docs/h-exact.md` step B, deviation L9) keeps this lookup unchanged: `z`
 is `z + 130,993 = B_zlo + 2^16 B_zhi + 130,915 a_z` with `B_zlo` looked up in the slot of
@@ -66,7 +69,7 @@ same; only the honest multiplicities move (padded cells look up 65,457 instead o
 Relation H-FIPS (`docs/h-exact.md` Section 10.7, deviation L10) puts `l_lo` (`L_lo - 2^15`)
 in the slot of `u_lo` and the hint slack `u_h` (stored `u_h - 2^15`) in the free slot 6 of the
 level-2 stack, which then has 7 columns in its 8 slots: the slot count, the depths, `L` and the
-sites are those of H-u, and the stack-2 reduction (7.7) reads `u_h` as its seventh column.
+sites are those of H-exact, and the stack-2 reduction (7.7) reads `u_h` as its seventh column.
 
 Two design rules, both forced by soundness:
 
@@ -202,10 +205,11 @@ one challenge or `368/|K|` with two at `2^15`, in place of `26/|K|`; the total s
 below `2^-116`). The root check is exact; the merge at `mu_s` costs `1/|K|` per session
 because one false claim suffices to carry on.
 
-Ledger at `N = 2^15` (round by round, spec 12.1): stage sum-checks `12 d_main` (degrees
-4, 5, 3, set by `range_w1` in stage 1 and `leaf8[K_2]`, `leaf8[K_3]` in stage 2), the
-zero-check point `tau` `d_main`, the three stage batching vectors 3: `328/|K|`; plus GKR
-`1,026/|K|`: `1,354/|K| = 2^-117.6` for every field term except the LogUp one.
+Ledger at `N = 2^15` (round by round, spec 12.1): stage sum-checks `11 d_main` (degrees
+3, 5, 3, set by the bridge Booleanity in stage 1 and `leaf8[K_2]`, `leaf8[K_3]` in stage 2;
+before deviation K26 `range_w1` gave stage 1 degree 4), the zero-check point `tau` `d_main`,
+the three stage batching vectors 3: `303/|K|`; plus GKR `1,026/|K|`: `1,329/|K| = 2^-117.6`
+for every field term except the LogUp one.
 
 **The LogUp term is the critical one** (`2^-101` at `2^15` with one challenge, above every
 other term). Decision: two independent challenges. Section 2.1 records the bounded search;
@@ -260,8 +264,9 @@ in session `D - 1` instead of storing it (Section 4.6 item 1). Both change only 
 (Remark 10.41). Except with the terms above: every looked-up cell is an entry of `T_16`,
 so `Z_lo + 2^15, U_lo + 2^15, K_0 + 2^15, K_1 + 2^15, kappa in [0, 2^16)` as integers;
 `leaf4`/`link`, `leaf6`/`link` and `leaf8`/`link` give `Z_hi in [-2, 1]`, `U_hi in [-3, 2]`, `K_2, K_3 in [-4, 3]`;
-by (4.1) and spec (4.2), `z in [-2^17, 2^17)`, `u in [-190,465, 190,465]` (relation H-u,
-`zeta' = zeta = 350,209`) and `k in [-2^37, 2^37)`, so `|v|_c <= 2^38` by the projection
+by (4.1) and spec (4.2), `|z| <= 130,993` (H-exact and H-FIPS; `z in [-2^17, 2^17)` under
+the removed H-u), `u in [-190,465, 190,465]` (H-exact; H-FIPS bounds `L` instead,
+`docs/h-exact.md` 10) and `k in [-2^37, 2^37)`, so `|v|_c <= 2^38` by the projection
 (spec Section 6, Lemma P; `V_lo`, `V_hi` are not looked up), enough for (6.1); every
 carry is an integer in `[0, 2^16)`, enough for (9.2) (`docs/bridge.md` Section 4).
 `m` is unconstrained and need not be constrained.

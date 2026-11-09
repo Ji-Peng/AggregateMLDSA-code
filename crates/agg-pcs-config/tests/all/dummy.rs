@@ -29,15 +29,13 @@ impl Rng {
 
 /// The honest alphabet of each group's polynomials:
 /// `0` marks a Boolean column, `1` a zero polynomial, `b > 1` a balanced base-`b` digit, so a 16-bit lookup column
-/// is base `2^16`, a multiplicity digit base 16. `G_main4` is `Z_hi` (base 4), `U_hi`
-/// (base 6) and six bits under H-u, and `B_zhi` (bit), `D_u` (base 6), six bits and `a_z`
-/// (bit) under H-exact.
+/// is base `2^16`, a multiplicity digit base 16. `G_main4` is `B_zhi` (bit), `D_u` (base 6),
+/// six bits and `a_z` (bit) under H-exact.
 pub fn bases(group: Group, relation: Relation) -> Vec<i64> {
     let wide = 1 << 16;
     match group {
         Group::Main16 => vec![wide; 4],
         Group::Main => match relation {
-            Relation::Hu => [4, 6, 0, 0, 0, 0, 0, 0].to_vec(),
             Relation::HExact => [0, 6, 0, 0, 0, 0, 0, 0, 0].to_vec(),
             // bz_hi, L_hi, six bits, a_z, the sign bit (Booleans); delta, e in [-1, 1]
             // (dummy values from the base-4 alphabet, inside the width-4 admission range).

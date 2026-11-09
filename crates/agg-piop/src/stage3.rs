@@ -4,10 +4,10 @@
 //! the two sides of the projection identity of `v` (`projection`).
 //!
 //! `gamma^(3)` order ([`Gammas`], with `o = 1 + links + bools`): `ring` (0), one `link` per
-//! leaf-checked digit (H-u: `link[Z_hi]` 1, `link[U_hi]` 2, `link[K_2]` 3, `link[K_3]` 4;
-//! H-exact: `link[U_hi]` 1, `link[K_2]` 2, `link[K_3]` 3), one `bool` per Boolean value digit (H-exact: `bool[bz_hi]`
-//! 4, `bool[a_z]` 5; claim 0), then the reductions: `b_t` from `r^(1)`
-//! (`o..o+6`), `b_t` from `r^(2)`, `y^(2)_t` from `tau_2`, `y^(2)_t` from `r^(1)_2`, `K^(2)_t`
+//! leaf-checked digit (H-exact: `link[U_hi]` 1, `link[K_2]` 2, `link[K_3]` 3), one `bool` per Boolean value digit (H-exact: `bool[bz_hi]`
+//! 4, `bool[a_z]` 5; claim 0), the Booleanity zero-checks `bool_b[t]` of the w1Encode bits
+//! at `r^(2)` (`o..o+6`, claim 0; in the `eq(r^(2))` group, whose lanes hold the bits for the
+//! ring identity and their reductions anyway), then the reductions: `b_t` from `r^(2)`, `y^(2)_t` from `tau_2`, `y^(2)_t` from `r^(1)_2`, `K^(2)_t`
 //! from `tau_2`, `K^(3)` from `tau_3`, `K^(1)_t` from `r^(1)_1`, the lookup stacks
 //! `j = 0..5`: `sum_x eq(pi_j, x) sum_c w_{j,c} f_c(x) = g_j(pi_j, pi_top) + 2^15 sum_{c >= cols}
 //! w_{j,c}` with `w_{j,c} = eq(pi_top, c)` (`StackShape::column_claim`), one part per column
@@ -15,14 +15,13 @@
 //! on the main domain (the weight lane `W`, no equality factor) and `sum_y eq(r', y) (K_0 +
 //! 2^16 K_1 + 2^32 K_2 + 2^35 K_3 + 2^34 + 2^31 + 2^15)(y)` on `D_k` at the `D_k` suffix
 //! `r'` of `r^(2)`, both
-//! with the claim `c` sent after stage 2, so that `k` is bound to `v`. For ML-DSA-44, H-u has
-//! 49 coefficients and H-exact 50.
+//! with the claim `c` sent after stage 2, so that `k` is bound to `v`. For ML-DSA-44, H-exact
+//! has 50 coefficients.
 //!
 //! The ring instance is one instance with two summands on two groups: `w_A z` (weight
 //! lane, no equality factor) and `-eq(r^(2), x)(2 gamma_2 w_1' + u + q v)` (equality
-//! group of `r^(2)`), both affine in the committed columns: `z = Z_lo + 2^16 Z_hi + 2^15`
-//! (H-u) or `z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225` (H-exact), `u = U_lo + 63,079
-//! U_hi + 31,540`, `v = V_lo + 2^16 V_hi + 2^15`.
+//! group of `r^(2)`), both affine in the committed columns: `z = S_zlo + 2^16 B_zhi + 130,915
+//! a_z - 98,225`, `u = U_lo + 63,079 U_hi + 31,540` (H-exact), `v = V_lo + 2^16 V_hi + 2^15`.
 //!
 //! Relation H-FIPS: `link[K_2]`, `link[K_3]`, `bool` for `bz_hi`, `l_hi`, `a_z`, then
 //! four H-FIPS checks after the bools ([`Gammas::fips_check`]): `F_s = s (s - 1)`,
@@ -36,15 +35,14 @@
 //! reads the affine `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e` with
 //! `L = l_lo + 29,696 l_hi + 2^15`. H-FIPS has 56 coefficients (ML-DSA-44).
 //!
-//! Polynomial lanes (ML-DSA-65, ML-DSA-87; relations H-u and H-exact, which differ only in
-//! the constants of the affine `z`): the main domain has no row
+//! Polynomial lanes (ML-DSA-65, ML-DSA-87; relation H-exact): the main domain has no row
 //! coordinate, so the ring identity is `k` instances `ring[rho]` (`0..k`), each with the
 //! claimed sum `T~_rho(r^(2))` and the summand `-eq(r^(2), x)(2 gamma_2 w_1' + u + q v)^(rho)`;
 //! their `A z` parts are one unbatched part per lane `s` of `z`, `w_A^(s) z^(s)`, whose weight
 //! combines the rows by the coefficients `gamma_rho` of the instances (`lane_public`).
 //! Then `l + k + 3` links (`Z_mid^(s)`, `U_mid^(rho)`, `K_2`, `K_3`, `K_4`), `l + k` Booleanity
-//! checks (`a_z^(s)`, `a_u^(rho)`), the reductions of the `4 k` bit polynomials from `r^(1)`
-//! and from `r^(2)`, the level reductions over four bits, the stacks of the set (7 or 8), and
+//! checks (`a_z^(s)`, `a_u^(rho)`), the Booleanity of the `4 k` bit polynomials and their
+//! reductions from `r^(2)`, the level reductions over four bits, the stacks of the set (7 or 8), and
 //! the projection identity, whose `v` side has one weight `W^(rho)` per lane of `v`
 //! (`projection::lane_weight_tables`): 105 coefficients for ML-DSA-65, 132 for ML-DSA-87.
 //! Relation H-FIPS with lanes: the links lose `U_mid^(rho)` (the magnitude `L` of row `rho`
@@ -54,16 +52,17 @@
 //! `omega` of the set), and the reductions of stage 2's `delta^(rho)(r^(2))`, `e^(rho)(r^(2))`:
 //! 136 coefficients for ML-DSA-65, 173 for ML-DSA-87.
 //!
-//! Under `HashField::Fp` the bridge is gone: no `b_t` claim at `r^(2)`, no level reductions
-//! and only the lookup stacks of the manifest (`[Z_lo | U_lo]` and `[K_0 | K_1]` for
-//! ML-DSA-44). After the projection identity come the Keccak claims of stages 1 and 2
-//! (`keccak_fp::weights`): one coefficient per claim, folded into one rank-one weight per
-//! (committed Keccak polynomial, point) on the Keccak domain and one per (bit lane, point)
-//! on the main domain, whose record factor `eq(r_i, i)` both domains share. The claimed sums
-//! are the claims minus their public round-constant and padding parts. Every Keccak claim
-//! thus reaches `r^(3)`, where the opening proves every committed Keccak polynomial at the
-//! `d_K` suffix: 1,271 coefficients and 401 opening claims (385 Keccak) for ML-DSA-44 under
-//! H-u.
+//! Under `HashField::Fp` the bridge is gone: no level reductions and only the lookup stacks
+//! of the manifest (`[Z_lo | U_lo]` and `[K_0 | K_1]` for ML-DSA-44). The bits keep their
+//! Booleanity zero-checks at `r^(2)`; their reductions from `r^(2)` remain where stage 2
+//! claims them (ML-DSA-44, whose range identity reads the bits there). After the projection
+//! identity come the Keccak claims of stages 1 and 2 (`keccak_fp::weights`): one coefficient
+//! per claim, folded into one rank-one weight per (committed Keccak polynomial, point) on the
+//! Keccak domain and one per (bit lane, point) on the main domain, whose record factor
+//! `eq(r_i, i)` both domains share. The claimed sums are the claims minus their public
+//! round-constant and padding parts. Every Keccak claim thus reaches `r^(3)`, where the
+//! opening proves every committed Keccak polynomial at the `d_K` suffix: 1,278 coefficients
+//! and 402 opening claims (385 Keccak) for ML-DSA-44 under H-exact.
 
 use agg_witness::params::{N, Q};
 use jolt_field::{One, Ring, Zero};
@@ -106,9 +105,9 @@ pub const FIPS_CHECKS: usize = 4;
 pub const FIPS_REDUCTIONS: usize = 2;
 
 /// The `gamma^(3)` layout of one parameter set and relation: `rings` ring instances (one,
-/// or one per row `rho` with polynomial lanes), `links` leaf-checked digits (4 under H-u, 3
-/// under H-exact, 2 under H-FIPS; `l + k + 3` with lanes), `bools` Boolean value digits (0
-/// under H-u, 2 under H-exact, 3 under H-FIPS; `l + k` with lanes: `a_z^(s)`, `a_u^(rho)`),
+/// or one per row `rho` with polynomial lanes), `links` leaf-checked digits (3 under
+/// H-exact, 2 under H-FIPS; `l + k + 3` with lanes), `bools` Boolean value digits (2 under
+/// H-exact, 3 under H-FIPS; `l + k` with lanes: `a_z^(s)`, `a_u^(rho)`),
 /// the H-FIPS checks and reductions, `bits` bits of `w_1'` in `bit_lanes` polynomials, and
 /// `stacks` lookup stacks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,8 +128,10 @@ pub struct Gammas {
     pub bit_lanes: usize,
     /// Lookup stacks.
     pub stacks: usize,
-    /// The bridge of `HashField::Gf2`: the bit reductions from `r^(2)` and the level
-    /// reductions exist only with it.
+    /// Bit polynomials with a stage-2 claim at `r^(2)`, reduced here (`bit_lanes` under
+    /// `HashField::Gf2`, where `def_y1` claims every bit; `Stage2Claims::b_len` in general).
+    pub b_r2_lanes: usize,
+    /// The bridge of `HashField::Gf2`: the level reductions exist only with it.
     pub bridge: bool,
     /// Keccak claims of stages 1 and 2 reduced to `r^(3)` (`HashField::Fp`; zero otherwise).
     pub keccak: usize,
@@ -150,6 +151,7 @@ impl Gammas {
             bits: shape.w1_bits,
             bit_lanes: shape.w1_bits * shape.lanes_k,
             stacks: manifest.lookup_shape().stacks.len(),
+            b_r2_lanes: Stage2Claims::b_len(manifest),
             bridge: manifest.hash_field() == HashField::Gf2,
             keccak: Stage1Claims::keccak_len(manifest) + Stage2Claims::keccak_len(manifest),
         }
@@ -171,20 +173,16 @@ impl Gammas {
         }
     }
 
-    /// First reduction index `o = rings + links + bools (+ 4 H-FIPS checks)`.
+    /// Index `o = rings + links + bools (+ 4 H-FIPS checks)` of the bit Booleanity checks, which
+    /// the reductions follow.
     const fn first_reduction(self) -> usize {
         self.rings + self.links + self.bools + self.fips_checks()
     }
 
-    /// The reductions of the level parities and carries start after the bit reductions (from
-    /// `r^(1)` and `r^(2)` with the bridge, from `r^(1)` alone without it: the bits then
-    /// carry no stage-2 claim).
+    /// The reductions of the level parities and carries start after the bit Booleanity checks
+    /// and the bit reductions from `r^(2)`.
     const fn level_reductions(self) -> usize {
-        if self.bridge {
-            self.first_reduction() + 2 * self.bit_lanes
-        } else {
-            self.first_reduction() + self.bit_lanes
-        }
+        self.first_reduction() + self.bit_lanes + self.b_r2_lanes
     }
 
     /// The level reductions of the bridge (`y^(2)_t` twice, `K^(2)_t`, `K^(3)`, `K^(1)_t`).
@@ -196,7 +194,7 @@ impl Gammas {
         }
     }
 
-    /// Batching coefficients: for ML-DSA-44 49 under H-u, 50 under H-exact, 56 under H-FIPS;
+    /// Batching coefficients: for ML-DSA-44 50 under H-exact, 56 under H-FIPS;
     /// 105 for ML-DSA-65 and 132 for ML-DSA-87 (136 and 173 under H-FIPS). Under
     /// `HashField::Fp` the Keccak reductions follow the projection identity.
     #[must_use]
@@ -279,14 +277,14 @@ impl Gammas {
         self.rings + self.links + k
     }
 
-    /// Gamma index of the reduction of bit polynomial `i` (`claims::bit_columns` order)
-    /// from `r^(1)`.
+    /// Gamma index of the Booleanity zero-check of bit polynomial `i` (`claims::bit_columns`
+    /// order) at `r^(2)`.
     #[must_use]
-    pub const fn b_r1(self, i: usize) -> usize {
+    pub const fn bool_b(self, i: usize) -> usize {
         self.first_reduction() + i
     }
 
-    /// Gamma index of the reduction of bit polynomial `i` from `r^(2)` (with the bridge only).
+    /// Gamma index of the reduction of bit polynomial `i` from `r^(2)` (`i < b_r2_lanes`).
     #[must_use]
     pub const fn b_r2(self, i: usize) -> usize {
         self.first_reduction() + self.bit_lanes + i
@@ -340,9 +338,8 @@ pub fn gamma_count(manifest: &CommitmentManifest) -> usize {
 pub struct Stage3Proof {
     /// Compressed degree-3 messages (3 elements each).
     pub rounds: Vec<Vec<E>>,
-    /// The opening claims at `r^(3)` and its suffixes (for ML-DSA-44: 35 under H-u, 36 under
-    /// H-exact, 40 under H-FIPS, 401 under H-u with `HashField::Fp`; `Stage3Claims::len` in
-    /// general).
+    /// The opening claims at `r^(3)` and its suffixes (for ML-DSA-44: 36 under H-exact, 40
+    /// under H-FIPS, 402 under H-exact with `HashField::Fp`; `Stage3Claims::len` in general).
     pub claims: Stage3Claims,
 }
 
@@ -424,7 +421,7 @@ pub fn spec_with(manifest: &CommitmentManifest, weights: &[Vec<E>], keccak: Opti
 
     // Main domain, eq(r^(2)): the ring's committed part (u, v, w_1') per row, the links,
     // the Booleanity zero-checks and the bit reductions from r^(2). The higher digits of z
-    // (Z_hi under H-u; bz_hi, a_z under H-exact; Z_mid, a_z per lane) ride along for the
+    // (bz_hi, a_z for ML-DSA-44; Z_mid, a_z per lane) ride along for the
     // links or the zero-checks; H-FIPS reads l_lo, l_hi in the slots of U_lo, U_hi and adds
     // s, delta, e. Lane order: (U_lo, V_lo, V_hi) per row lane, the second digits of z
     // and u, their further digits, the bits.
@@ -549,13 +546,17 @@ pub fn spec_with(manifest: &CommitmentManifest, weights: &[Vec<E>], keccak: Opti
             instances.push(InstanceSpec::new(gammas.fips_terminal_reduction(k), vec![Term::Product(vec![position(column)])]));
         }
     }
-    if gammas.bridge {
-        instances.extend(
-            bits.iter()
-                .enumerate()
-                .map(|(i, &column)| InstanceSpec::new(gammas.b_r2(i), vec![Term::Product(vec![position(column)])])),
-        );
-    }
+    instances.extend(
+        bits.iter()
+            .enumerate()
+            .map(|(i, &column)| InstanceSpec::new(gammas.bool_b(i), vec![Term::Bool(position(column))])),
+    );
+    instances.extend(
+        bits.iter()
+            .take(gammas.b_r2_lanes)
+            .enumerate()
+            .map(|(i, &column)| InstanceSpec::new(gammas.b_r2(i), vec![Term::Product(vec![position(column)])])),
+    );
     groups.push(GroupSpec {
         domain: GroupRole::Main,
         eq: EqPoint::R2,
@@ -595,8 +596,8 @@ pub fn spec_with(manifest: &CommitmentManifest, weights: &[Vec<E>], keccak: Opti
         });
     }
 
-    // Main domain, no equality factor: w_A times z (z = Z_lo + 2^16 Z_hi + 2^15 under H-u,
-    // z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225 under H-exact), one group per lane of z.
+    // Main domain, no equality factor: w_A times z (z = S_zlo + 2^16 B_zhi + 130,915 a_z -
+    // 98,225 for ML-DSA-44), one group per lane of z.
     // With polynomial lanes the weight w_A^(s) already carries the row coefficients
     // gamma_rho of the instances ring[rho], so the part is unbatched.
     for s in 0..lanes_l {
@@ -618,15 +619,6 @@ pub fn spec_with(manifest: &CommitmentManifest, weights: &[Vec<E>], keccak: Opti
             }],
         });
     }
-
-    // Main domain, eq(r^(1)): bit reductions from r^(1).
-    let bit_ids = column_lanes(&bits);
-    groups.push(GroupSpec {
-        domain: GroupRole::Main,
-        eq: EqPoint::R1,
-        instances: reductions(&bit_ids, |i| gammas.b_r1(i)),
-        lanes: bit_ids,
-    });
 
     if gammas.bridge {
         bridge_groups(manifest, gammas, &mut groups);
@@ -782,10 +774,11 @@ fn projection_groups(
     });
 }
 
-/// The claimed sums in gamma order (the Booleanity zero-checks claim zero); `t_at_r2[rho]`
-/// is `T~_rho(r^(2))` (one value, `T(r^(2))`, for ML-DSA-44), `stacks[j]` stack `j`'s
-/// column claim ([`stack_reductions`]) and `keccak` the claimed sums of the Keccak
-/// reductions ([`KeccakReductions::claimed_sums`]; empty under `HashField::Gf2`).
+/// The claimed sums in gamma order (the Booleanity zero-checks claim zero, the bits' among
+/// them); `t_at_r2[rho]` is `T~_rho(r^(2))` (one value, `T(r^(2))`, for ML-DSA-44),
+/// `stacks[j]` stack `j`'s column claim ([`stack_reductions`]) and `keccak` the claimed sums
+/// of the Keccak reductions ([`KeccakReductions::claimed_sums`]; empty under
+/// `HashField::Gf2`).
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn claimed_sums(
@@ -815,13 +808,10 @@ pub fn claimed_sums(
             claims[gammas.fips_terminal_reduction(k)] = value;
         }
     }
-    for i in 0..gammas.bit_lanes {
-        claims[gammas.b_r1(i)] = stage1.b[i];
+    for i in 0..gammas.b_r2_lanes {
+        claims[gammas.b_r2(i)] = stage2.b[i];
     }
     if gammas.bridge {
-        for i in 0..gammas.bit_lanes {
-            claims[gammas.b_r2(i)] = stage2.b[i];
-        }
         for t in 0..gammas.bits {
             claims[gammas.y2_tau(t)] = prestage.y2[t];
             claims[gammas.y2_r1(t)] = stage1.y2[t];
@@ -1158,11 +1148,12 @@ mod tests {
     }
 
     #[test]
-    fn stage_three_has_forty_nine_instances_in_spec_order() {
-        let spec = check_spec(&CommitmentManifest::for_batch(8).unwrap(), 49);
-        let gammas = Gammas::new(&CommitmentManifest::for_batch(8).unwrap());
-        assert_eq!((gammas.kappa1_r1(5), gammas.kappa3_tau(), gammas.stack(4)), (41, 35, 46));
-        assert_eq!((gammas.link(2), gammas.link(3), gammas.proj_v(), gammas.proj_k()), (3, 4, 47, 48));
+    fn stage_three_projection_identity_in_spec_order() {
+        let manifest = CommitmentManifest::for_relation(8, crate::manifest::Relation::HExact).unwrap();
+        let spec = check_spec(&manifest, 50);
+        let gammas = Gammas::new(&manifest);
+        assert_eq!((gammas.kappa1_r1(5), gammas.kappa3_tau(), gammas.stack(4)), (42, 36, 47));
+        assert_eq!((gammas.link(1), gammas.link(2), gammas.proj_v(), gammas.proj_k()), (2, 3, 48, 49));
         // The projection identity: W (V_lo + 2^16 V_hi + 2^15) on the main domain without an
         // equality factor; K_0 + 2^16 K_1 + 2^32 K_2 + 2^35 K_3 + 2^34 + 2^31 + 2^15 and the
         // links of K_2, K_3 on the projection domain at r^(2).
@@ -1176,10 +1167,10 @@ mod tests {
         assert_eq!(
             k_side.instances.iter().map(|i| (i.gamma, i.terms.clone())).collect::<Vec<_>>(),
             vec![
-                (3, vec![Term::Link(2)]),
-                (4, vec![Term::Link(3)]),
+                (2, vec![Term::Link(2)]),
+                (3, vec![Term::Link(3)]),
                 (
-                    48,
+                    49,
                     vec![Term::Affine {
                         weight: None,
                         lanes: vec![(0, 1), (1, 1 << 16), (2, 1 << 32), (3, 1 << 35)],
@@ -1217,7 +1208,7 @@ mod tests {
         let spec = check_spec(&manifest, 50);
         let gammas = Gammas::new(&manifest);
         assert_eq!((gammas.links, gammas.bools), (3, 2));
-        assert_eq!((gammas.bool(0), gammas.bool(1), gammas.b_r1(0)), (4, 5, 6));
+        assert_eq!((gammas.bool(0), gammas.bool(1), gammas.bool_b(0)), (4, 5, 6));
         assert_eq!((gammas.kappa3_tau(), gammas.stack(4)), (36, 47));
         // H-exact: link[u_hi] at 1 (link[k_2], link[k_3] at 2, 3 are on the projection
         // domain), bool[bz_hi] at 4, bool[a_z] at 5, all in the eq(r^(2)) group; the w_A group reads
@@ -1262,7 +1253,7 @@ mod tests {
         // ring 0, link[k_2, k_3] 1, 2, bool[bz_hi, l_hi, a_z] 3..5, F_s, F_delta, F_w1, F_omega 6..9,
         // reductions from 10, the delta and e reductions 47, 48, the stacks 49..53, the
         // projection 54, 55.
-        assert_eq!((gammas.fips_check(0), gammas.fips_check(3), gammas.b_r1(0)), (6, 9, 10));
+        assert_eq!((gammas.fips_check(0), gammas.fips_check(3), gammas.bool_b(0)), (6, 9, 10));
         assert_eq!((gammas.fips_reduction(0), gammas.fips_reduction(1)), (47, 48));
         assert_eq!((gammas.stack(0), gammas.stack(4)), (49, 53));
         assert_eq!((gammas.proj_v(), gammas.proj_k()), (54, 55));
@@ -1384,13 +1375,13 @@ mod tests {
 
     /// ML-DSA-65 and ML-DSA-87: `k` ring instances whose `A z` parts are the `l` unbatched
     /// weight groups, `l + k + 3` links, `l + k` Booleanity checks, `4 k` bit polynomials
-    /// reduced from `r^(1)` and `r^(2)`, one `W^(rho)` group per lane of `v`, and every
+    /// checked Boolean and reduced at `r^(2)`, one `W^(rho)` group per lane of `v`, and every
     /// committed polynomial read at `r^(3)`.
     #[test]
     fn lane_sets_have_one_ring_instance_per_row() {
         use agg_witness::params::Set;
         for (set, k, l, stacks, count) in [(Set::S65, 6, 5, 7, 105), (Set::S87, 8, 7, 8, 132)] {
-            let manifest = CommitmentManifest::for_set(set, 256, crate::manifest::Relation::Hu).unwrap();
+            let manifest = CommitmentManifest::for_set(set, 256, crate::manifest::Relation::HExact).unwrap();
             let gammas = Gammas::new(&manifest);
             assert_eq!(
                 (gammas.rings, gammas.links, gammas.bools, gammas.bits, gammas.bit_lanes, gammas.stacks),
@@ -1456,42 +1447,44 @@ mod tests {
         }
     }
 
-    /// `HashField::Fp`, ML-DSA-44, H-u: the bridge reductions go (no `b_t` claim at `r^(2)`,
-    /// no `D_1`, `D_2`, `D_3`), two lookup stacks remain, and the 1,256 Keccak claims of stages
-    /// 1 and 2 follow the projection identity as one folded range; every committed
-    /// polynomial but the multiplicity digits is read at `r^(3)`, the Keccak ones through the
-    /// reduction groups. The `HashField::Gf2` layout keeps its 49 coefficients.
+    /// `HashField::Fp`, ML-DSA-44, H-exact: the bridge reductions go (no `D_1`, `D_2`, `D_3`),
+    /// the bits keep their Booleanity checks and reductions at `r^(2)`, two lookup stacks
+    /// remain, and the 1,256 Keccak claims of stages 1 and 2 follow the projection identity as
+    /// one folded range; every committed polynomial but the multiplicity digits is read at
+    /// `r^(3)`, the Keccak ones through the reduction groups. The `HashField::Gf2` layout keeps
+    /// its 50 coefficients.
     #[test]
     fn fp_stage_three_drops_the_bridge_and_reduces_every_keccak_claim() {
-        let gf2 = Gammas::new(&CommitmentManifest::for_batch(8).unwrap());
-        assert_eq!((gf2.count(), gf2.keccak_claims(), gf2.bridge), (49, 49..49, true));
-        let manifest = CommitmentManifest::for_batch_fp(8).unwrap();
+        let gf2 = Gammas::new(&CommitmentManifest::for_relation(8, crate::manifest::Relation::HExact).unwrap());
+        assert_eq!((gf2.count(), gf2.keccak_claims(), gf2.bridge), (50, 50..50, true));
+        let manifest = CommitmentManifest::for_relation_fp(8, crate::manifest::Relation::HExact).unwrap();
         let gammas = Gammas::new(&manifest);
         assert_eq!(
-            (gammas.rings, gammas.links, gammas.bools, gammas.bit_lanes, gammas.stacks, gammas.bridge),
-            (1, 4, 0, 6, 2, false)
+            (gammas.rings, gammas.links, gammas.bools, gammas.bit_lanes, gammas.b_r2_lanes, gammas.stacks, gammas.bridge),
+            (1, 3, 2, 6, 6, 2, false)
         );
-        // ring 0, links 1..4, b_t from r^(1) 5..10, stacks 11, 12, projection 13, 14, then the
-        // 740 stage-1 and 516 stage-2 Keccak claims.
-        assert_eq!((gammas.b_r1(0), gammas.stack(0), gammas.proj_v(), gammas.proj_k()), (5, 11, 13, 14));
+        // ring 0, links 1..3, bools 4, 5, bool_b 6..11, b_t from r^(2) 12..17, stacks 18, 19,
+        // projection 20, 21, then the 740 stage-1 and 516 stage-2 Keccak claims.
+        assert_eq!((gammas.bool_b(0), gammas.b_r2(0)), (6, 12));
+        assert_eq!((gammas.stack(0), gammas.proj_v(), gammas.proj_k()), (18, 20, 21));
         assert_eq!(gammas.keccak, 740 + 516);
-        assert_eq!(gammas.keccak_claims(), 15..1271);
-        assert_eq!(gamma_count(&manifest), 1271);
+        assert_eq!(gammas.keccak_claims(), 22..1278);
+        assert_eq!(gamma_count(&manifest), 1278);
         let mut rng = SplitMix64::new(12);
         let weights: Vec<Vec<E>> = (0..gammas.stacks)
             .map(|j| point(&mut rng, manifest.stack_columns(j).len()))
             .collect();
         let spec = spec(&manifest, &weights);
         spec.validate().unwrap();
-        assert_eq!((spec.gamma_count, spec.folded.clone()), (1271, 15..1271));
+        assert_eq!((spec.gamma_count, spec.folded.clone()), (1278, 22..1278));
         let keccak_groups = spec.groups.iter().filter(|g| g.domain == GroupRole::KeccakA(0)).count();
         let absorb_groups = spec
             .groups
             .iter()
             .filter(|g| matches!(g.lanes[0], LaneId::Weight(WeightId::KeccakAbsorb { .. })))
             .count();
-        // Lattice: eq(r^(2)), w_A, eq(r^(1)) bits, the v side, the k side, two stacks.
-        assert_eq!((spec.groups.len(), keccak_groups, absorb_groups), (7 + 695 + 12, 695, 12));
+        // Lattice: eq(r^(2)), w_A, the v side, the k side, two stacks.
+        assert_eq!((spec.groups.len(), keccak_groups, absorb_groups), (6 + 695 + 12, 695, 12));
         let mut counts = vec![0; gammas.count()];
         for group in &spec.groups {
             assert!(!matches!(group.domain, GroupRole::Level1 | GroupRole::Level2 | GroupRole::Level3));
@@ -1520,10 +1513,10 @@ mod tests {
                 keccak_polys += usize::from(column.domain() == GroupRole::KeccakA(0));
             }
         }
-        // The opening claims: the 12 lattice polynomials of G_main16 and G_main4, the four of
+        // The opening claims: the 13 lattice polynomials of G_main16 and G_main4, the four of
         // G_k and the 385 Keccak polynomials.
         let lattice = Stage3Claims::len(&manifest) - keccak_polys;
-        assert_eq!((keccak_polys, lattice, Stage3Claims::len(&manifest)), (385, 16, 401));
+        assert_eq!((keccak_polys, lattice, Stage3Claims::len(&manifest)), (385, 17, 402));
         // The claimed sums: the Keccak sums at their range, the bridge entries absent.
         let keccak: Vec<E> = point(&mut rng, gammas.keccak);
         let claims = claimed_sums(
@@ -1539,7 +1532,7 @@ mod tests {
         );
         assert_eq!(&claims[gammas.keccak_claims()], keccak.as_slice());
         eprintln!(
-            "fp stage 3 (ML-DSA-44, H-u, N = 8): gamma^(3) {}, Keccak claims {}, groups {}, opening claims {} ({} Keccak, {} lattice)",
+            "fp stage 3 (ML-DSA-44, H-exact, N = 8): gamma^(3) {}, Keccak claims {}, groups {}, opening claims {} ({} Keccak, {} lattice)",
             gammas.count(),
             gammas.keccak,
             spec.groups.len(),
@@ -1559,7 +1552,7 @@ mod tests {
         let gammas = Gammas::new(manifest);
         assert_eq!(gammas.count(), count);
         assert_eq!(spec.gamma_count, count);
-        assert_eq!(spec.groups.len(), 9 + STACKS);
+        assert_eq!(spec.groups.len(), 8 + STACKS);
         // The ring instance spans two groups and each stack reduction one part per column;
         // every other gamma index appears once.
         let mut counts = vec![0; count];

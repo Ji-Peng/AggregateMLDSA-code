@@ -55,7 +55,7 @@ Per live record, with z from sigDecode (integers in [-gamma1 + 1, gamma1]):
 | Geometry | 1 <= N <= 2^15; N* = max(next_pow2(N), 8) | | `GeometryError` |
 
 Digit constants and ranges (checked by enumeration in `digits` tests, as `spec_checks.py`
-item 8). The H-u step form of u with one 16-bit low digit,
+item 8). The step form of u (relation H-exact) with one 16-bit low digit,
 u = U_lo + 63,079 U_hi + 31,540, covers exactly [-190,465, 190,465] because
 5 * 63,079 + 2^16 = 2 B_u + 1 and 63,079 <= 2^16 (exhaustive test
 `u_step_form_is_exact_at_the_slack_boundaries`; +-190,466 have no in-alphabet digits). The
@@ -68,7 +68,7 @@ balanced alphabet for b in {2, 4, 6, 8, 16} (Q_2(P) = P, Q_6(P) = P (P - 2)(P - 
 
 (4.1) digits are the mixed-radix digits of X + eps B/2 shifted by -b_k/2 (base-k alphabets
 are [-k/2, k/2 - 1]); slack forms take a = [x + offset >= 2^j], b = x + offset - w a; the
-H-u step form takes H_u = min(floor((u + B_u) / 63,079), 5), B_ulo = u + B_u - 63,079 H_u;
+step form of u (H-exact) takes H_u = min(floor((u + B_u) / 63,079), 5), B_ulo = u + B_u - 63,079 H_u;
 the bit-slack form takes a_z = [z + B_z >= 2^17], then B_zhi and B_zlo from the rest. Outside
 the proven range the top digit absorbs the excess and leaves its alphabet.
 
@@ -111,4 +111,4 @@ the ignored test `edge_search`.
 
 ## ML-DSA-65 and ML-DSA-87 witnesses
 
-The witness uses exact `(k, l)` dimensions `(6, 5)` and `(8, 7)` respectively, with per-polynomial lanes, four w1 bits per coefficient, and 48-byte or 64-byte c~ respectively. Under H-u both use the digit-slack forms of `docs/spec.md` ("ML-DSA-65 and ML-DSA-87 parameters"): `z + 2^19 = z_lo + 2^16 z_mid + 2^19 a_z` and `u + 523,777 = u_lo + 2^16 u_mid + 523,267 a_u`. H-exact changes only the z form, `z + B_z = z_lo + 2^16 z_mid + (2 B_z + 1 - 2^19) a_z` with `B_z` = 524,091 (65) and 524,167 (87). H-FIPS keeps H-exact's z and writes the hint magnitude as `L = L_lo + 2^16 L_mid + 130,816 a_L`, exactly `[0, gamma2 - 1]` (`digits::L_BIT_SLACK`), with the per-coefficient `(s, delta, e)` of `docs/h-exact.md` 11.2. The `ParamSet` constants and digit encoders in `crates/agg-witness/src/params.rs` and `digits.rs` define these layouts.
+The witness uses exact `(k, l)` dimensions `(6, 5)` and `(8, 7)` respectively, with per-polynomial lanes, four w1 bits per coefficient, and 48-byte or 64-byte c~ respectively. Under H-exact both use the digit-slack forms of `docs/spec.md` ("ML-DSA-65 and ML-DSA-87 parameters"): `z + B_z = z_lo + 2^16 z_mid + (2 B_z + 1 - 2^19) a_z` with `B_z` = 524,091 (65) and 524,167 (87), and `u + 523,777 = u_lo + 2^16 u_mid + 523,267 a_u`. (The removed relation H-u had the relaxed `z + 2^19 = z_lo + 2^16 z_mid + 2^19 a_z` with the same columns.) H-FIPS keeps H-exact's z and writes the hint magnitude as `L = L_lo + 2^16 L_mid + 130,816 a_L`, exactly `[0, gamma2 - 1]` (`digits::L_BIT_SLACK`), with the per-coefficient `(s, delta, e)` of `docs/h-exact.md` 11.2. The `ParamSet` constants and digit encoders in `crates/agg-witness/src/params.rs` and `digits.rs` define these layouts.

@@ -1,5 +1,5 @@
-//! Integer CRT finishing, sparse negacyclic products, and H-u digits.
-use super::{FinishError, FinishOut, FinishRow, FinishRow2P, FinishRowExact, HuCols};
+//! Integer CRT finishing and sparse negacyclic products.
+use super::{FinishError, FinishOut, FinishRow, FinishRow2P, FinishRowExact};
 use crate::ntt::scalar::mont;
 use crate::{
     params::*,
@@ -280,67 +280,6 @@ pub(crate) fn finish_row_exact<P: ParamSet>(
         k_coeffs[i] = k as i64;
     }
     finish_row_from_k::<P>(row.xq, &k_coeffs, row.t, row.h, out)
-}
-
-pub(crate) fn hu_columns<P: ParamSet>(z: &Poly32, out: &FinishOut, cols: HuCols<'_>) {
-    for col in &cols.wide {
-        assert_eq!(col.len(), 256);
-    }
-    for col in &cols.narrow {
-        assert_eq!(col.len(), 256);
-    }
-    if P::GAMMA2 == (Q - 1) / 88 {
-        for i in 0..256 {
-            let y = z[i] + GAMMA1;
-            cols.wide[0][i].write((y & 65535) - 32768);
-            cols.narrow[0][i].write(((y >> 16) - 2) as i8);
-            let y = out.u[i] + B_U;
-            let h = [63079, 126158, 189237, 252316, 315395]
-                .iter()
-                .filter(|&&t| y >= t)
-                .count() as i32;
-            cols.wide[1][i].write(y - 63079 * h - 32768);
-            cols.narrow[1][i].write((h - 3) as i8);
-            let y = (out.v[i] as u32).wrapping_add(1 << 31);
-            cols.wide[2][i].write((y & 65535) as i32 - 32768);
-            cols.wide[3][i].write((y >> 16) as i32 - 32768);
-            for t in 0..6 {
-                cols.narrow[t + 2][i].write(((out.w1[i] >> t) & 1) as i8);
-            }
-        }
-    } else {
-        for i in 0..256 {
-            // z: relaxed digit-slack form
-            let yz = (z[i] as i64) + (1 << 19);
-            let a_z = i8::from(yz >= (1 << 19));
-            let rest_z = yz & ((1 << 19) - 1);
-            let z_mid = ((rest_z >> 16) as i8) - 4;
-            let z_lo = ((rest_z & 0xFFFF) as i32) - 32768;
-            cols.wide[0][i].write(z_lo);
-            cols.narrow[0][i].write(z_mid);
-            cols.narrow[1][i].write(a_z);
-
-            // u: exact digit-slack form
-            let yu = (out.u[i] as i64) + 523_777;
-            let a_u = i8::from(yu >= 524_288);
-            let rest_u = yu - 523_267 * i64::from(a_u);
-            let u_mid = (((rest_u >> 16) & 7) as i8) - 4;
-            let u_lo = ((rest_u & 0xFFFF) as i32) - 32768;
-            cols.wide[1][i].write(u_lo);
-            cols.narrow[2][i].write(u_mid);
-            cols.narrow[3][i].write(a_u);
-
-            // v: wide[2] low 16 bits, wide[3] high 16 bits
-            let yv = (out.v[i] as u32).wrapping_add(1 << 31);
-            cols.wide[2][i].write((yv & 65535) as i32 - 32768);
-            cols.wide[3][i].write((yv >> 16) as i32 - 32768);
-
-            // w1: 4 bits
-            for t in 0..4 {
-                cols.narrow[t + 4][i].write(((out.w1[i] >> t) & 1) as i8);
-            }
-        }
-    }
 }
 
 #[cfg(test)]

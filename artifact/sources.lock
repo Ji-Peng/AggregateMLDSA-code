@@ -2,19 +2,16 @@
 #
 # `fetch` clones the two external trees under `artifact/vendor/`, verifies the
 # full commit below, and checks that Cargo.lock names the same revisions for
-# the crates cargo resolves. The archive URL of this repository is a
-# placeholder until the anonymous artifact is deposited.
+# the crates cargo resolves.
 
 [[source]]
 name = "ours"
-url = "PLACEHOLDER (anonymous repository URL to be filled at submission)"
-archive_url = "PLACEHOLDER (anonymous archive URL and DOI to be filled at submission)"
-commit = "c1c7590ef7a4bbeff08c47b5015eb1f796b46bf9"
-license = "MIT OR Apache-2.0"
+commit = "c6142b83bcd92038d4de90a55177ddb20535be34"
+license = "MIT"
 role = "prover, verifier"
 in_repo = true
 path = "."
-note = "The artifact lives in this tree; `commit` is the main revision the artifact is based on."
+note = "This repository itself. `commit` stamps the binaries when the tree has no git history (an archive download)."
 
 [[source]]
 name = "aerie"

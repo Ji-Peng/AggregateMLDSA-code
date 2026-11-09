@@ -2,7 +2,6 @@
 use crate::common;
 use agg_mldsa_simd::*;
 use common::*;
-use std::mem::MaybeUninit;
 
 fn canonical(e: &Engine, p: Prime, mut a: Poly32) -> Poly32 {
     e.order_to_fips(&mut a);
@@ -306,39 +305,6 @@ fn every_api_matches_scalar() {
             assert_eq!(result, engine.finish_row(row, &mut b));
             if result.is_ok() {
                 assert_eq!(a, b);
-                let mut aw = [[MaybeUninit::uninit(); 256]; 4];
-                let mut bw = aw;
-                let mut an = [[MaybeUninit::uninit(); 256]; 8];
-                let mut bn = an;
-                scalar.hu_columns(
-                    &z[0],
-                    &a,
-                    HuCols {
-                        wide: aw.each_mut().map(|x| x.as_mut_slice()),
-                        narrow: an.each_mut().map(|x| x.as_mut_slice()),
-                    },
-                );
-                engine.hu_columns(
-                    &z[0],
-                    &b,
-                    HuCols {
-                        wide: bw.each_mut().map(|x| x.as_mut_slice()),
-                        narrow: bn.each_mut().map(|x| x.as_mut_slice()),
-                    },
-                );
-                // SAFETY: both calls initialize every element of their length-256 column slices.
-                unsafe {
-                    for c in 0..4 {
-                        for i in 0..256 {
-                            assert_eq!(aw[c][i].assume_init(), bw[c][i].assume_init());
-                        }
-                    }
-                    for c in 0..8 {
-                        for i in 0..256 {
-                            assert_eq!(an[c][i].assume_init(), bn[c][i].assume_init());
-                        }
-                    }
-                }
             }
         }
 
@@ -469,40 +435,6 @@ fn every_api_matches_scalar() {
             assert_eq!(res_ex_s, res_ex_e);
             if res_ex_s.is_ok() {
                 assert_eq!(out_ex_s, out_ex_e);
-            }
-
-            // 5. hu_columns for Set65
-            let mut aw65_s = [[MaybeUninit::uninit(); 256]; 4];
-            let mut aw65_e = aw65_s;
-            let mut an65_s = [[MaybeUninit::uninit(); 256]; 8];
-            let mut an65_e = an65_s;
-            scalar65.hu_columns(
-                &z65_s[0],
-                &out65_s,
-                HuCols {
-                    wide: aw65_s.each_mut().map(|x| x.as_mut_slice()),
-                    narrow: an65_s.each_mut().map(|x| x.as_mut_slice()),
-                },
-            );
-            engine65.hu_columns(
-                &z65_e[0],
-                &out65_e,
-                HuCols {
-                    wide: aw65_e.each_mut().map(|x| x.as_mut_slice()),
-                    narrow: an65_e.each_mut().map(|x| x.as_mut_slice()),
-                },
-            );
-            unsafe {
-                for c in 0..4 {
-                    for i in 0..256 {
-                        assert_eq!(aw65_s[c][i].assume_init(), aw65_e[c][i].assume_init());
-                    }
-                }
-                for c in 0..8 {
-                    for i in 0..256 {
-                        assert_eq!(an65_s[c][i].assume_init(), an65_e[c][i].assume_init());
-                    }
-                }
             }
         }
     }

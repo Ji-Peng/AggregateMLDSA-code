@@ -137,7 +137,7 @@ fn no_piop_or_akita_challenge_depends_on_the_flock_proofs() {
             instance: &instance,
             records: &inputs,
             signatures: &signatures,
-            relation: Relation::Hu,
+            relation: Relation::HFips,
         };
         let run_with = |threads: &str, late_join: &str, side: &FixedProofs| -> ProverOutput {
             std::env::set_var("AGG_FLOCK_THREADS", threads);
@@ -200,7 +200,7 @@ fn no_piop_or_akita_challenge_depends_on_the_flock_proofs() {
             .map(|r| (r.pk.as_slice(), r.msg.as_slice()))
             .collect();
         let check = |proof: &agg_piop::wire::AggregateProof| {
-            verify(&public, &proof.to_bytes(), &bridge, &AnyProof, FlockProfile::None, Relation::Hu, None)
+            verify(&public, &proof.to_bytes(), &bridge, &AnyProof, FlockProfile::None, Relation::HFips, None)
         };
         check(&a.proof).expect("verify the forked proof");
         check(&b.proof).expect("verify the other proof");
@@ -211,7 +211,7 @@ fn no_piop_or_akita_challenge_depends_on_the_flock_proofs() {
         tampered.flock_proofs[0][1] ^= 1;
         check(&tampered).expect("one byte changed, not bound by the transcript");
         let strict = |proof: &agg_piop::wire::AggregateProof| {
-            verify(&public, &proof.to_bytes(), &bridge, &ExactProof(vec![1, 2, 3]), FlockProfile::None, Relation::Hu, None)
+            verify(&public, &proof.to_bytes(), &bridge, &ExactProof(vec![1, 2, 3]), FlockProfile::None, Relation::HFips, None)
         };
         strict(&a.proof).expect("verify the forked proof against its own item");
         assert!(matches!(strict(&moved), Err(VerifyError::Keccak(0))), "items moved");
@@ -241,7 +241,7 @@ fn no_piop_or_akita_challenge_depends_on_the_flock_proofs() {
         // proof whose share item was replaced before the join: the replayed challenges from
         // `X` on differ from the prover's, so the lookup, a stage or a work nonce fails.
         let check_shares = |proof: &agg_piop::wire::AggregateProof| {
-            verify(&public, &proof.to_bytes(), &bridge, &AnyShares, FlockProfile::None, Relation::Hu, None)
+            verify(&public, &proof.to_bytes(), &bridge, &AnyShares, FlockProfile::None, Relation::HFips, None)
         };
         check_shares(&a.proof).expect("verify the proof without shares");
         check_shares(&shared.proof).expect("verify the proof with a share item");

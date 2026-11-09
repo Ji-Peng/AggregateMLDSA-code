@@ -11,7 +11,7 @@ use agg_piop::claims::{PreStageClaims, Stage1Claims};
 use agg_piop::keccak_fp::specs::{stage1_groups, stage2_groups};
 use agg_piop::keccak_fp::virtuals::{zero_message_c_tilde, KeccakProverTables};
 use agg_piop::kernel::{Lane, Source, Term};
-use agg_piop::manifest::{Column, CommitmentManifest, DigitValue, GroupRole, GROUP_COUNT_FP};
+use agg_piop::manifest::{Column, CommitmentManifest, DigitValue, GroupRole, Relation, GROUP_COUNT_FP};
 use agg_piop::pcs::{group_points_fp, verifier_for, TableCommitter};
 use agg_piop::source_tables::SourceTables;
 use agg_piop::stage::{
@@ -81,9 +81,9 @@ fn check_main_virtual_claims(
 }
 
 fn commit_and_open_fp(n_own: usize, n_shared: usize, seed: u64, check_helper_parity: bool) {
-    let batch = Batch::build(common::records(seed, n_own, n_shared), seed);
+    let batch = Batch::build_as(Relation::HExact, common::records(seed, n_own, n_shared), seed);
     let n_records = batch.records.len();
-    let manifest = CommitmentManifest::for_batch_fp(n_records).expect("fp manifest");
+    let manifest = CommitmentManifest::for_relation_fp(n_records, Relation::HExact).expect("fp manifest");
     let n_star = manifest.padded_records();
 
     let k_layout = KeccakLayout::for_set(Set::S44);
@@ -323,7 +323,7 @@ fn count_nonzero_terms(groups: &[GroupSpec], prover_tables: &KeccakProverTables)
 
 #[test]
 fn keccak_specs_count_and_degree() {
-    let manifest = CommitmentManifest::for_batch_fp(8).expect("fp manifest");
+    let manifest = CommitmentManifest::for_relation_fp(8, Relation::HExact).expect("fp manifest");
     let keccak_domain = Column::KeccakA { x: 0, y: 0, q: 0 }.domain();
 
     let gamma0_s1 = 7;
@@ -410,9 +410,9 @@ fn keccak_specs_vanish_on_the_boolean_domain() {
     let zero_ct = zero_message_c_tilde(&k_layout);
 
     for (n_own, n_shared, seed) in [(6, 2, 0xA11_u64), (4, 1, 0xB22_u64)] {
-        let batch = Batch::build(common::records(seed, n_own, n_shared), seed);
+        let batch = Batch::build_as(Relation::HExact, common::records(seed, n_own, n_shared), seed);
         let n_records = batch.records.len();
-        let manifest = CommitmentManifest::for_batch_fp(n_records).expect("fp manifest");
+        let manifest = CommitmentManifest::for_relation_fp(n_records, Relation::HExact).expect("fp manifest");
         let n_star = manifest.padded_records();
         let (s1_groups, _) = stage1_groups(&manifest, 0);
         let (s2_groups, _) = stage2_groups(&manifest, 0);
@@ -483,10 +483,10 @@ fn stages_branch_transcript(manifest: &CommitmentManifest) -> (Transcript, Point
 fn keccak_stage12_groups_prove_and_replay() {
     on_large_stack(|| {
         let seed = 0x512_u64;
-        let batch = Batch::build(common::records(seed, 6, 2), seed);
+        let batch = Batch::build_as(Relation::HExact, common::records(seed, 6, 2), seed);
         let n_records = batch.records.len();
         assert_eq!(n_records, 8);
-        let manifest = CommitmentManifest::for_batch_fp(n_records).expect("fp manifest");
+        let manifest = CommitmentManifest::for_relation_fp(n_records, Relation::HExact).expect("fp manifest");
         let n_star = manifest.padded_records();
         assert_eq!(n_star, 8);
 
@@ -518,7 +518,7 @@ fn keccak_stage12_groups_prove_and_replay() {
         }
         let s1_spec = StageSpec {
             stage: 1,
-            degree: stage1::DEGREE,
+            degree: stage1::degree(&manifest),
             gamma_count: s1_gamma_count,
             groups: s1_groups,
             folded: 0..0,
@@ -591,7 +591,6 @@ fn keccak_stage12_groups_prove_and_replay() {
         let dummy_s1_wire = Stage1Claims {
             y1: Vec::new(),
             y2: Vec::new(),
-            b: vec![OpeningField::zero(); W1_BITS],
             keccak: s1_keccak_claims.clone(),
         }
         .to_vec();
@@ -809,8 +808,8 @@ fn keccak_stage12_groups_prove_and_replay() {
 
         // 3. Padded batch (N = 6, N* = 8): exercises the zero_message_c_tilde padding path in
         // resolve_keccak through stage1::{prove, verify}.
-        let pad_batch = Batch::build(common::records(0x516, 4, 2), 0x516);
-        let pad_manifest = CommitmentManifest::for_batch_fp(pad_batch.records.len()).expect("fp manifest");
+        let pad_batch = Batch::build_as(Relation::HExact, common::records(0x516, 4, 2), 0x516);
+        let pad_manifest = CommitmentManifest::for_relation_fp(pad_batch.records.len(), Relation::HExact).expect("fp manifest");
         assert_eq!((pad_manifest.records(), pad_manifest.padded_records()), (6, 8));
         let pad_inputs = keccak_inputs_from_batch(&pad_batch);
         let pad_ktables = KeccakTables::build(&k_layout, &pad_inputs, 8);
@@ -938,8 +937,8 @@ fn keccak_stage3_reductions_round_trip() {
 
     on_large_stack(|| {
         let seed = 0x513_u64;
-        let batch = Batch::build(common::records(seed, 6, 2), seed);
-        let manifest = CommitmentManifest::for_batch_fp(batch.records.len()).expect("fp manifest");
+        let batch = Batch::build_as(Relation::HExact, common::records(seed, 6, 2), seed);
+        let manifest = CommitmentManifest::for_relation_fp(batch.records.len(), Relation::HExact).expect("fp manifest");
         let n_star = manifest.padded_records();
         assert_eq!(n_star, 8);
         let k_layout = KeccakLayout::for_set(Set::S44);
@@ -1123,14 +1122,14 @@ fn keccak_stage3_reductions_round_trip() {
     });
 }
 
-/// The all-prime-field aggregate end to end (ML-DSA-44, H-u, `N = 8`): the prover commits
+/// The all-prime-field aggregate end to end ((ML-DSA-44, H-exact, `N = 8`)): the prover commits
 /// the lattice and Keccak groups in round 1, `G_k` and `G_m` in round 2, runs the lookup and
 /// the three stages with the Keccak instances, and opens all eleven groups once; the
 /// verifier accepts the proof bytes from the public records alone. A witness with one `A'`
 /// bit flipped, proven without the prover's self-checks, is rejected by a stage.
 fn round_trip(n_records: usize) {
     use agg_piop::binding::FlockProfile;
-    use agg_piop::manifest::{HashField, Relation};
+    use agg_piop::manifest::HashField;
     use agg_piop::prover::{prove_with_tables, FpKeccakSide, ProveHooks, ProverInputs, SeededMatrices};
     use agg_piop::verifier::{verify, FpKeccakVerifier, VerifyError};
     use agg_piop::wire::{AggregateProof, WireError, HASH_FIELD_FP_FLAG};
@@ -1138,10 +1137,10 @@ fn round_trip(n_records: usize) {
 
     on_large_stack(move || {
         let seed = 0x518_u64;
-        let batch = Batch::build(common::records(seed, n_records, 0), seed);
+        let batch = Batch::build_as(Relation::HExact, common::records(seed, n_records, 0), seed);
         let n = batch.records.len();
         assert_eq!(n, n_records);
-        let manifest = CommitmentManifest::for_batch_fp(n).expect("fp manifest");
+        let manifest = CommitmentManifest::for_relation_fp(n, Relation::HExact).expect("fp manifest");
         let inputs: Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> = batch
             .records
             .iter()
@@ -1155,7 +1154,7 @@ fn round_trip(n_records: usize) {
             instance: &batch.instance,
             records: &inputs,
             signatures: &signatures,
-            relation: Relation::Hu,
+            relation: Relation::HExact,
         };
         let prove = |hooks: &ProveHooks<'_>| {
             prove_with_tables(
@@ -1170,7 +1169,7 @@ fn round_trip(n_records: usize) {
         };
         let public: Vec<(&[u8], &[u8])> = batch.records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice())).collect();
         let verify_bytes = |bytes: &[u8]| {
-            verify(&public, bytes, &SeededMatrices, &FpKeccakVerifier, FlockProfile::FpKeccak, Relation::Hu, None)
+            verify(&public, bytes, &SeededMatrices, &FpKeccakVerifier, FlockProfile::FpKeccak, Relation::HExact, None)
         };
 
         let start = std::time::Instant::now();
@@ -1185,7 +1184,7 @@ fn round_trip(n_records: usize) {
         assert!(proof.flock_shares.is_empty() && proof.flock_proofs.is_empty());
         assert_eq!(
             (proof.stage1.claims.keccak.len(), proof.stage2.claims.keccak.len(), proof.stage3.claims.0.len()),
-            (740, 516, 401)
+            (740, 516, 402)
         );
         assert_eq!(output.points.1.len(), manifest.d_stage());
 

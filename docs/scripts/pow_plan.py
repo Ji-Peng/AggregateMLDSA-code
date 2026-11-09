@@ -6,9 +6,8 @@ Run (isolated mode, standard library only):
     python3 -I docs/scripts/pow_plan.py              # summary tables (committed in the doc)
     python3 -I docs/scripts/pow_plan.py --details 15 # every site of N* = 2^15, default config
     python3 -I docs/scripts/pow_plan.py --relation h-exact  # relation H-exact (docs/h-exact.md)
-    python3 -I docs/scripts/pow_plan.py --relation h-fips   # relation H-FIPS (docs/h-exact.md)
-    python3 -I docs/scripts/pow_plan.py --set 65            # ML-DSA-65
-    python3 -I docs/scripts/pow_plan.py --set 65 --relation h-fips
+    python3 -I docs/scripts/pow_plan.py --set 65            # ML-DSA-65, relation H-FIPS
+    python3 -I docs/scripts/pow_plan.py --set 65 --relation h-exact
     python3 -I docs/scripts/pow_plan.py --set 87 --details 15
 
 What it computes, with exact integer arithmetic:
@@ -44,20 +43,20 @@ TARGET = 128
 SLACK = 7  # nonce width = g + 7 (Aerie, Akita)
 M_TABLE = 2**16  # |T_16|
 CHALLENGES = 2  # LOOKUP_CHALLENGES
-# Relation H-u (default, docs/h-exact.md): stage 2 holds leaf4[Z_hi] (degree 3),
-# leaf6[U_hi] (degree 4) and leaf8[K_2], leaf8[K_3] of the projection digits of v (degree 5),
-# so its rounds have degree 5 (10 coefficients, g = 4); stage 3 49 coefficients (g = 6): the
-# ring, four links, 37 reductions, the projection group and the k reduction, five stack
-# reductions.
-# Relation H-exact: stage 2 holds leaf6[U_hi], leaf8[K_2], leaf8[K_3] (9 coefficients,
-# g = 4), stage 3 three links and two Booleanity zero-checks (50 coefficients, g = 6); the
-# degrees are the same.
-# Relation H-FIPS: stage 2 holds def_y1, leaf8[K_2], leaf8[K_3] and F3 (9 coefficients,
-# g = 4), stage 3 56 coefficients (g = 6); every difficulty, total and plan digest equals H-exact's
-# (the relation is bound by the manifest bytes of event 0, not by the plan encoding).
-STAGE_DEGREES = (4, 5, 3)
-RELATION_GAMMAS = {"h-u": (26, 10, 49), "h-exact": (26, 9, 50), "h-fips": (26, 9, 56)}
-STAGE_GAMMAS = RELATION_GAMMAS["h-u"]
+# Stage 1 holds only the bridge instances on D_1 and D_2 (19 coefficients, g = 5; degree 3).
+# Relation H-FIPS (the default, docs/h-exact.md): stage 2 holds def_y1, leaf8[K_2], leaf8[K_3]
+# of the projection digits of v, F3 and range_w1 (10 coefficients, g = 4; its rounds have
+# degree 5), stage 3 56 coefficients (g = 6; the six bit Booleanity checks replace the six
+# reductions of b_t from r^(1)).
+# Relation H-exact (an optional reference relation): stage 2 holds leaf6[U_hi], leaf8[K_2],
+# leaf8[K_3] and range_w1 (10 coefficients, g = 4), stage 3 the ring, three links, eight
+# Booleanity zero-checks, 31 reductions, the projection group and the k reduction and five
+# stack reductions (50 coefficients, g = 6); the degrees are the same. Every difficulty, total and
+# plan digest of H-FIPS equals H-exact's (the relation is bound by the manifest bytes of
+# event 0, not by the plan encoding).
+STAGE_DEGREES = (3, 5, 3)
+RELATION_GAMMAS = {"h-exact": (19, 10, 50), "h-fips": (19, 10, 56)}
+STAGE_GAMMAS = RELATION_GAMMAS["h-fips"]
 SPONGE_K_LOG = 19
 MIN_DENSE_M = 22
 RECT_MIN_ROWS_LOG = 11
@@ -74,7 +73,7 @@ P_PAD_BITS = 10  # log2 of the padded positions P_pad of one record on the bridg
 # binary decomposition of l + k (44: one stack [Z_lo | U_lo] of two columns); the level-1 and
 # level-2 carry stacks have one column per w1 bit (6 in 8 slots for 44, 4 for 65/87); the
 # projection domain D_k has 128 rows per record and block (87: two row blocks).
-# Stage 1 has degree 4 with the six-bit range identity of 44 and 3 otherwise; the batching
+# Stage 1 has degree 3 in every set (bridge instances only); the batching
 # vectors count the instances of crates/agg-piop/src/stage{1,2,3}.rs gamma_count (65 and 87:
 # one Booleanity check per bit and lane, k ring instances, l + k links and Booleanity
 # checks). The bridge constants of 65/87 (four chain lanes, 256 records per level-1 block,
@@ -83,19 +82,19 @@ P_PAD_BITS = 10  # log2 of the padded positions P_pad of one record on the bridg
 # site's public claim has 3 or 4 word coordinates beyond the nu_s rows.
 SETS = {
     "44": {"d_pos": 10, "main_stacks": (2,), "carry_slots": 8, "d1_shift": 9, "dk_rows": 7,
-           "degrees": (4, 5, 3), "gammas": None, "lane_vars": 3, "block_log": 9, "p_pad_bits": 10, "public_vars": 3},
+           "degrees": (3, 5, 3), "gammas": None, "lane_vars": 3, "block_log": 9, "p_pad_bits": 10, "public_vars": 3},
     "65": {"d_pos": 8, "main_stacks": (8, 2, 1), "carry_slots": 4, "d1_shift": 8, "dk_rows": 7,
-           "degrees": (3, 5, 3), "gammas": (37, 18, 105), "lane_vars": 2, "block_log": 8, "p_pad_bits": 11, "public_vars": 3},
+           "degrees": (3, 5, 3), "gammas": (13, 18, 105), "lane_vars": 2, "block_log": 8, "p_pad_bits": 11, "public_vars": 3},
     "87": {"d_pos": 8, "main_stacks": (8, 4, 2, 1), "carry_slots": 4, "d1_shift": 8, "dk_rows": 8,
-           "degrees": (3, 5, 3), "gammas": (45, 22, 132), "lane_vars": 2, "block_log": 8, "p_pad_bits": 11, "public_vars": 4},
+           "degrees": (3, 5, 3), "gammas": (13, 22, 132), "lane_vars": 2, "block_log": 8, "p_pad_bits": 11, "public_vars": 4},
 }
 SET = SETS["44"]
 # H-FIPS of ML-DSA-65 and ML-DSA-87: stage 2 trades leaf8[U_mid] for F_e per row lane (same length),
 # stage 3 gains 5 k + 1 coefficients (Booleanity of l_mid, F_s, F_delta, F_w1 per row, F_omega, the
 # reductions of delta and e; minus link[U_mid]). The hint slack u_h is a fifth column of the
-# level-2 carry stack, padded from 4 to 8 slots. H-exact keeps H-u's columns and counts.
-LANE_FIPS = {"65": {"gammas": (37, 18, 136), "carry2_slots": 8},
-             "87": {"gammas": (45, 22, 173), "carry2_slots": 8}}
+# level-2 carry stack, padded from 4 to 8 slots. H-exact takes the counts of SETS.
+LANE_FIPS = {"65": {"gammas": (13, 18, 136), "carry2_slots": 8},
+             "87": {"gammas": (13, 22, 173), "carry2_slots": 8}}
 CARRY2_SLOTS = None  # level-2 carry-stack slots when they differ from SET["carry_slots"]
 PROFILE_ID = {"fast": 1, "slim": 4, "slim8": 5, "modeB": 3}
 # Level-0 Ligerito rate exponent r (rho = 2^-r) per profile; eta = 0.02 at level 0 in every
@@ -501,7 +500,7 @@ def with_gammas(gammas: tuple, f):
 
 
 def self_check() -> None:
-    # Relation H-u: stage 2 has degree 4, and bit_length(4) = bit_length(5).
+    # bit_length(4) = bit_length(5): a degree-4 and a degree-5 round grind the same bits.
     assert grind_bits(4, K) == grind_bits(5, K) == 3
     # Aerie's grind_bits(L) = bit_length(L) for |K| sites (crates/aerie-falcon/src/protocol/grinding.rs).
     for nu, want in ((1, 1), (3, 2), (8, 4), (16, 5), (25, 5), (44, 6)):
@@ -531,25 +530,24 @@ def self_check() -> None:
     assert [list_size(r) for r in (1, 2, 3)] == [35, 50, 70]
     # sponge rows (agg_keccak::prover::capacity_log).
     assert capacity_log(1 << 15) == 15 and capacity_log(1 << 10) == 11 and capacity_log(8) == 4
-    # Relation H-exact (docs/h-exact.md): the stage-2 batching site has 9 coefficients
-    # (leaf6[U_hi], leaf8[K_2], leaf8[K_3]) and H-u's 10, both g = 4; gamma^(3) keeps g = 6 (49, 50, 56 < 64).
-    # So every difficulty, total and digest equals H-u's; the totals and the Slim/span-on and
-    # mode-B digests at 2^15.
+    # Relation H-exact (docs/h-exact.md): the stage-2 batching site has 10 coefficients
+    # (def_y1, leaf6[U_hi], leaf8[K_2], leaf8[K_3], range_w1), g = 4; gamma^(3) has g = 6 (50, 56 < 64). The
+    # totals and the Slim/span-on and mode-B digests at 2^15.
     assert grind_bits(7, K) == 3 and grind_bits(8, K) == grind_bits(9, K) == 4
     assert grind_bits(48, K) == grind_bits(49, K) == grind_bits(55, K) == 6
     exact = RELATION_GAMMAS["h-exact"]
-    for d_sig, bits, work in ((3, 1818, 1350), (10, 2926, 1964), (13, 3664, 2342), (15, 4203, 2646)):
+    for d_sig, bits, work in ((3, 1805, 1298), (10, 2906, 1884), (13, 3641, 2250), (15, 4178, 2546)):
         s = with_gammas(exact, lambda: summarize(piop_sites(geometry(d_sig))))
         assert (s["bits"], s["work"]) == (bits, work), (d_sig, s)
     g15 = geometry(15)
     digest = with_gammas(exact, lambda: plan_digest(g15, piop_sites(g15), [], "modeB", 0, 0))
-    assert digest.startswith("1634c0b8"), digest
+    assert digest.startswith("329f2783"), digest
     digest = with_gammas(exact, lambda: plan_digest(
         g15, piop_sites(g15), tie_parts(g15, "slim", True, 1 << 15), "slim", g15["segments"], g15["d_seg"]))
-    assert digest.startswith("ef971095"), digest
-    # Relations H-u and H-FIPS: the same difficulties at every site, so the plans equal
-    # H-exact's at every size.
-    for gammas in (RELATION_GAMMAS["h-u"], RELATION_GAMMAS["h-fips"]):
+    assert digest.startswith("bcb8ae3e"), digest
+    # Relation H-FIPS: the same difficulties at every site, so its plans equal H-exact's at
+    # every size.
+    for gammas in (RELATION_GAMMAS["h-fips"],):
         for d_sig in (3, 10, 13, 15):
             geo = geometry(d_sig)
             a = with_gammas(gammas, lambda: summarize(piop_sites(geo)))
@@ -575,43 +573,43 @@ def configure(set_name: str, relation: str) -> None:
 def self_check_sets() -> None:
     """The per-set plans of ML-DSA-65 and ML-DSA-87 (pinned in crates/agg-piop/src/pow.rs)."""
     try:
-        configure("65", "h-u")
+        configure("65", "h-exact")
         g = geometry(15)
         assert (g["d_main"], g["d"], g["D"]) == (23, (20, 15, 14), 26), g
         assert sorted(set(g["trees"]), reverse=True) == [26, 24, 23, 22, 17, 16, 14], g["trees"]
-        assert [grind_bits(n, K) for n in STAGE_GAMMAS] == [6, 5, 7]
+        assert [grind_bits(n, K) for n in STAGE_GAMMAS] == [4, 5, 7]
         assert chain_rounds(13, 0) == 19 + 5 + 2
-        configure("87", "h-u")
+        configure("87", "h-exact")
         g = geometry(15)
         assert (g["d_main"], g["d"], g["D"]) == (23, (20, 15, 14), 26), g
         assert sorted(set(g["trees"]), reverse=True) == [26, 25, 24, 23, 22, 17, 16, 14], g["trees"]
-        assert [grind_bits(n, K) for n in STAGE_GAMMAS] == [6, 5, 8]
+        assert [grind_bits(n, K) for n in STAGE_GAMMAS] == [4, 5, 8]
         # H-FIPS (pinned in crates/agg-piop/src/pow.rs, docs/h-exact.md): the same sites as
-        # H-u; only gamma^(3) of 65 and one lookup batching site grind one more bit.
-        for name, want in (("65", {3: (190, 1763), 10: (311, 2868), 15: (451, 4145)}),
-                           ("87", {3: (190, 1764), 10: (311, 2874), 15: (451, 4149)})):
+        # H-exact; only gamma^(3) of 65 and one lookup batching site grind one more bit.
+        for name, want in (("65", {3: (190, 1761), 10: (311, 2866), 15: (451, 4143)}),
+                           ("87", {3: (190, 1762), 10: (311, 2872), 15: (451, 4147)})):
             for d_sig, (n_sites, n_bits) in want.items():
-                configure(name, "h-u")
-                hu = piop_sites(geometry(d_sig))
+                configure(name, "h-exact")
+                hx = piop_sites(geometry(d_sig))
                 configure(name, "h-fips")
                 hf = piop_sites(geometry(d_sig))
                 total = summarize(hf)["bits"]
                 assert (len(hf), total) == (n_sites, n_bits), (name, d_sig, len(hf), total)
-                assert len(hu) == len(hf)
-                for a, b in zip(hf, hu):
+                assert len(hx) == len(hf)
+                for a, b in zip(hf, hx):
                     assert a[:3] == b[:3], (a, b)
                     ga, gb = site_bits(a[0], a[4], a[5]), site_bits(b[0], b[4], b[5])
                     if ga != gb:  # the lookup's X site keeps g = 0 although L grows
                         assert a[0] in ("stage.gamma", "lookup.gamma") and ga == gb + 1, (a, b)
     finally:
-        configure("44", "h-u")
+        configure("44", "h-fips")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--details", type=int, metavar="D_SIG", help="print every site of N* = 2^D_SIG")
-    parser.add_argument("--relation", choices=sorted(RELATION_GAMMAS), default="h-u",
-                        help="the relation whose stage batching vectors to use (default h-u)")
+    parser.add_argument("--relation", choices=sorted(RELATION_GAMMAS), default="h-fips",
+                        help="the relation whose stage batching vectors to use (default h-fips)")
     parser.add_argument("--set", choices=sorted(SETS), default="44",
                         help="the ML-DSA parameter set (default 44)")
     args = parser.parse_args()

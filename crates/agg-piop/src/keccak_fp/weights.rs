@@ -673,7 +673,7 @@ mod tests {
         assert!(spec.validate().is_err());
         // The sets with polynomial lanes wire every bit once, inside a lane's record cells.
         for set in [agg_witness::params::Set::S65, agg_witness::params::Set::S87] {
-            let manifest = CommitmentManifest::for_set_fp(set, 8, crate::manifest::Relation::Hu).unwrap();
+            let manifest = CommitmentManifest::for_set_fp(set, 8, crate::manifest::Relation::HExact).unwrap();
             let plan = KeccakReductions::for_manifest(&manifest, 0);
             let shape = manifest.shape();
             let cells: Vec<&AbsorbCell> = plan.absorbs().iter().flat_map(|w| &w.cells).collect();

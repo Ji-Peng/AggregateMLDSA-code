@@ -268,6 +268,68 @@ fn every_path_matches_the_reference_on_an_equality_group_with_every_term_kind() 
     }
 }
 
+/// Quadratic equality groups run their dense rounds on the plane tail (with a vector
+/// backend), whose first table is built from the level-2 states of every kind (quartet and
+/// pair-fold tables, folded uncoded lanes) by one fused fold-and-evaluate pass. The domains
+/// cover the smallest tails (at 4 variables the first table has a single pair and its bind
+/// is the last one; at 5 its round has two items), one task and several parallel tasks of
+/// that pass. A second equality point has zero coordinates at the variables of levels 2
+/// and 3: the linear factor then vanishes at one, so those rounds take `q(1)` from the
+/// evaluation instead of the running claim.
+#[test]
+fn plane_tail_groups_match_the_reference() {
+    let mut rng = SplitMix64::new(15);
+    for vars in [4, 5, 6, 11, 16] {
+        let cells = eq_fixture(&mut rng, vars);
+        let wide: Vec<E> = point(&mut rng, 1 << vars);
+        let mut lanes = eq_lanes(&cells);
+        lanes.push(Lane::Folded(wide.clone())); // 10: an uncoded field lane
+        let instances = vec![
+            instance(&mut rng, vec![Term::Bool(0)]),
+            instance(&mut rng, vec![Term::Bool(1), Term::Link(8)]),
+            instance(&mut rng, vec![Term::Product(vec![5, 6])]),
+            instance(&mut rng, vec![Term::Product(vec![8, 10])]),
+            instance(&mut rng, vec![Term::Product(vec![10])]),
+            instance(
+                &mut rng,
+                vec![Term::Affine {
+                    weight: Some(2),
+                    lanes: vec![(9, -3), (8, 16), (3, 4096)],
+                    constant: 7,
+                }],
+            ),
+        ];
+        for (rounds, degree) in [(vars, 3), (vars + 1, 4)] {
+            let tau = point(&mut rng, vars);
+            let mut sparse = point(&mut rng, vars);
+            sparse[2] = E::zero();
+            sparse[3] = E::zero();
+            for tau in [tau, sparse] {
+                let group = Group::new(lanes.clone(), instances.clone(), Some(&tau), rounds, degree).unwrap();
+                if layout() == Layout::Plane {
+                    assert!(group.tail_terms.is_some(), "the tail is on");
+                }
+                check_all_paths(&lanes, &instances, Some(&tau), rounds, degree, 200 + vars as u64);
+            }
+        }
+        if vars == 16 {
+            // The pair-fold policy (one of the policies checked above) keeps the coded
+            // level-2 lanes as pair tables with the challenge: the gather's pair-fold arm
+            // runs on the parallel tasks of the level-2 and level-3 passes, beside uncoded
+            // tables in the same blocks.
+            let tau = point(&mut rng, vars);
+            let policy = Policy { quartet_lut: Choice::Forbid, ..AUTO };
+            let mut group = Group::with_policy(lanes.clone(), instances.clone(), Some(&tau), vars, 3, policy).unwrap();
+            for (round, r) in point(&mut rng, 2).into_iter().enumerate() {
+                group.round_message(round);
+                group.bind(round, r);
+            }
+            assert!(group.states.iter().any(|s| matches!(s, State::PairFold(..))));
+            assert!(group.states.iter().any(|s| matches!(s, State::Table(_))));
+        }
+    }
+}
+
 #[test]
 fn the_two_round_prefix_applies_when_the_quartets_dwarf_the_pattern_space() {
     let mut rng = SplitMix64::new(12);
@@ -1067,3 +1129,47 @@ fn masked_group_matches_explicit_masked_eq_table() {
     );
 }
 
+/// Round times of a quadratic plane-tail group (diagnostic: `AGG_TAIL_TIMING_VARS` sets the
+/// domain, default 2^22; run with `-- --ignored --nocapture tail_round_timing`).
+#[test]
+#[ignore = "diagnostic: round times"]
+fn tail_round_timing() {
+    let vars: usize = std::env::var("AGG_TAIL_TIMING_VARS").ok().and_then(|v| v.parse().ok()).unwrap_or(22);
+    let mut rng = SplitMix64::new(16);
+    // Twelve lanes on quartet lookup tables at level 2 (as the stage-3 main groups).
+    let mut cells = eq_fixture(&mut rng, vars);
+    cells.extend((0..4).map(|_| bits(&mut rng, 1 << vars)));
+    let mut lanes: Vec<Lane<'_>> = (0..4).map(|c| Lane::column(&cells[c])).collect();
+    lanes.push(Lane::mapped(&cells[4], square_map()));
+    lanes.push(Lane::mapped(&cells[4], lo_map()));
+    lanes.push(Lane::mapped(&cells[4], hi_map()));
+    lanes.push(Lane::mapped(&cells[6], square_map()));
+    lanes.extend((7..11).map(|c| Lane::column(&cells[c])));
+    let mut instances: Vec<GroupInstance> = [0, 1, 2, 3, 8, 9, 10, 11].iter().map(|&l| instance(&mut rng, vec![Term::Bool(l)])).collect();
+    for pair in [[5, 6], [4, 7], [0, 8], [1, 9], [2, 10]] {
+        instances.push(instance(&mut rng, vec![Term::Product(pair.to_vec())]));
+    }
+    instances.push(instance(
+        &mut rng,
+        vec![Term::Affine {
+            weight: Some(3),
+            lanes: vec![(7, -3), (4, 16), (11, 4096)],
+            constant: 7,
+        }],
+    ));
+    let tau = point(&mut rng, vars);
+    let challenges = point(&mut rng, vars);
+    for rep in 0..4 {
+        let mut group = Group::new(lanes.clone(), instances.clone(), Some(&tau), vars, 3).unwrap();
+        let mut times = Vec::new();
+        for (round, &r) in challenges.iter().enumerate().take(8) {
+            let start = std::time::Instant::now();
+            let _ = group.round_message(round);
+            let message = start.elapsed().as_secs_f64() * 1e3;
+            let start = std::time::Instant::now();
+            group.bind(round, r);
+            times.push(format!("{message:.1}+{:.1}", start.elapsed().as_secs_f64() * 1e3));
+        }
+        eprintln!("rep {rep} vars {vars} tail {:?}: message+bind (ms) per round: {}", group.tail_shape(), times.join(" "));
+    }
+}

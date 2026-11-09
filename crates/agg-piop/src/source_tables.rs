@@ -3,18 +3,18 @@
 //! Mirrors `aerie-prover/src/protocol/source_tables.rs`: one holder per commitment round,
 //! built from the derived witnesses and checked against the [`CommitmentManifest`]:
 //!
-//! * [`MainTables`], round 1: `G_main16` (`Z_lo, U_lo, V_lo, V_hi`, stored balanced as
-//!   `i32` cells in one stacked lane, column `c` at cells `c 2^d_main ..`) and `G_main4`
-//!   (`Z_hi, U_hi, b_0..b_5`, `i8` cells), from `z + 2^17 = z_lo + 2^16 z_hi`,
-//!   `v + 2^31 = v_lo + 2^16 v_hi` with the stored values `Z_lo = z_lo - 2^15`,
-//!   `Z_hi = z_hi - 2` and likewise, and relation H-u's
-//!   `u + 190,465 = B_ulo + 63,079 H_u` (`H_u = min(floor((u + 190,465) / 63,079), 5)`) stored
-//!   as `U_lo = B_ulo - 2^15`, `U_hi = H_u - 3`. Padded rows carry the digits of zero
-//!   (`Z_lo = V_lo = -2^15`, `U_lo = -31,540`, the rest 0). Under relation H-exact `z` is
+//! * [`MainTables`], round 1: `G_main16` (the low digits of `z` and `u`, `V_lo, V_hi`, stored
+//!   balanced as `i32` cells in one stacked lane, column `c` at cells `c 2^d_main ..`) and
+//!   `G_main4` (the high digits of `z` and `u`, `b_0..b_5`, `i8` cells), from
+//!   `v + 2^31 = v_lo + 2^16 v_hi` with the stored values `V_lo = v_lo - 2^15` and likewise.
+//!   Under relation H-exact `u + 190,465 = B_ulo + 63,079 H_u`
+//!   (`H_u = min(floor((u + 190,465) / 63,079), 5)`) is stored as `U_lo = B_ulo - 2^15`,
+//!   `U_hi = H_u - 3`, and `z` is
 //!   `z + 130,993 = B_zlo + 2^16 B_zhi + 130,915 a_z` (`a_z = [z >= 79]`)
 //!   stored as `bz_lo = B_zlo - 2^15` (the slot of `Z_lo`), the bit `bz_hi` (the slot of
 //!   `Z_hi`) and the bit `a_z` (the ninth `G_main4` column); the digits of zero are
-//!   `(bz_lo, bz_hi, a_z) = (32,689, 1, 0)`. Under relation H-FIPS `z` is H-exact's, and
+//!   `(bz_lo, bz_hi, a_z) = (32,689, 1, 0)`, those of `u` `U_lo = -31,540, U_hi = 0`, and
+//!   `V_lo = -2^15`. Under relation H-FIPS `z` is H-exact's, and
 //!   each coefficient's canonical witness `agg_witness::hfips::honest_coeff(w', h*)`, with
 //!   `w' = 2 gamma_2 w_1' + u mod q` and `h* = [HighBits(w') != w_1']` (the signature's own
 //!   hint for an honest record), gives `l_lo = L_lo - 2^15`, `l_hi` (the slots of `U_lo`,
@@ -34,13 +34,14 @@
 //!
 //! Construction validates the shape and the honest alphabet of every polynomial. This is
 //! an encoder self-check (the honest builder cannot fail it), not a soundness check: the
-//! PIOP proves every range (the lookup into `T_16`, the leaves of `Z_hi`, `U_hi`, `K_2`, `K_3`, the
-//! zero-checks of `bz_hi`, `a_z`); `V_lo`, `V_hi` have none (the projection bounds `v`).
+//! PIOP proves every range (the lookup into `T_16`, the leaves of `U_hi`, `K_2`, `K_3`, the
+//! zero-checks of `bz_hi`, `a_z` and of H-FIPS's columns); `V_lo`, `V_hi` have none (the
+//! projection bounds `v`).
 
 use agg_bridge::{parity, Shape};
 use agg_simd::buf::AlignedVec;
 use agg_witness::bridge::{BridgeError, BridgeMatrices, M3};
-use agg_mldsa_simd::{Engine, HuCols};
+use agg_mldsa_simd::Engine;
 use agg_witness::derive::{derive_with_t, derive_with_t_for, DeriveError};
 use agg_witness::fast::{derive_tile_with, FastWitness, TILE};
 use agg_witness::fast_lanes::LaneWitness;
@@ -48,7 +49,7 @@ use agg_witness::hfips::{coefficient_of, honest_coeff};
 use agg_witness::instance::{PublicInstance, PublicRecord};
 use agg_witness::native::{high_bits, mod_q, use_hint, VecK, VecL};
 use agg_witness::padding::{Geometry, GeometryError};
-use agg_witness::params::{ParamSet, Set, Set44, GAMMA2, K, L, N, OMEGA, W1_BITS};
+use agg_witness::params::{ParamSet, Set, Set44, GAMMA2, K, L, N, W1_BITS};
 use rayon::prelude::*;
 
 use crate::kernel::{Lane, Source};
@@ -56,7 +57,7 @@ use crate::projection::ProjectionTables;
 use crate::lookup::{multiplicities, multiplicity_digits, LookupError, LookupStack, StackShape, Table};
 use crate::manifest::{
     value_columns, value_lane_columns, Column, CommitmentManifest, DigitValue, FipsColumn,
-    GroupDescriptor, GroupRole, Relation, SetShape, LOOKUP_SHIFT,
+    GroupDescriptor, GroupRole, SetShape, LOOKUP_SHIFT,
 };
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -432,9 +433,7 @@ impl Encoder {
         };
         let z_range = match manifest.z_value() {
             DigitValue::Zx => "z outside [-130,993, 130,993]",
-            DigitValue::Zd => "z outside [-2^19, 2^19)",
-            DigitValue::Zdx(_) => "z outside [-B_z, B_z]",
-            _ => "z outside [-2^17, 2^17)",
+            _ => "z outside [-B_z, B_z]",
         };
         let narrow_slot = |column: Column| match slot(column) {
             Slot::Narrow(position) => position,
@@ -932,54 +931,6 @@ impl Encoder {
 /// (manifest order, [`CommitmentManifest::lane_cells`] cells each).
 type RecordViews<'a> = (Vec<&'a mut [MaybeUninit<i32>]>, Vec<&'a mut [MaybeUninit<i8>]>);
 
-/// Relation H-u's manifest slots in the column order of the engine's digit kernel:
-/// `Z_lo, U_lo, V_lo, V_hi` (wide) and `Z_hi, U_hi, b_0..b_5` (narrow).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct HuSlots {
-    wide: [usize; 4],
-    narrow: [usize; 2 + W1_BITS],
-}
-
-impl HuSlots {
-    fn new(manifest: &CommitmentManifest) -> Self {
-        assert_eq!(manifest.relation(), Relation::Hu, "the digit kernel encodes relation H-u");
-        let at = |column: Column, role: GroupRole| match manifest.locate(column) {
-            (r, position) if r == role => position,
-            (r, _) => panic!("{} is in {r:?}", column.name()),
-        };
-        let narrow = [Column::Z_HI, Column::U_HI]
-            .into_iter()
-            .chain((0..W1_BITS as u8).map(|t| Column::W1Bit(t, 0)));
-        Self {
-            wide: [Column::Z_LO, Column::U_LO, Column::V_LO, Column::V_HI].map(|c| at(c, GroupRole::Main16)),
-            narrow: std::array::from_fn({
-                let slots: Vec<usize> = narrow.map(|c| at(c, GroupRole::Main)).collect();
-                move |k| slots[k]
-            }),
-        }
-    }
-
-    /// Every cell of one live record (row `rho` at cells `256 rho ..` of each column).
-    fn write(
-        &self,
-        engine: &Engine,
-        w: &FastWitness,
-        wide: &mut [&mut [MaybeUninit<i32>]],
-        narrow: &mut [&mut [MaybeUninit<i8>]],
-    ) {
-        for (rho, (z, out)) in w.z.iter().zip(&w.rows).enumerate() {
-            let cells = rho * N..(rho + 1) * N;
-            let wide = wide.get_disjoint_mut(self.wide).expect("distinct wide slots");
-            let narrow = narrow.get_disjoint_mut(self.narrow).expect("distinct narrow slots");
-            let cols = HuCols {
-                wide: wide.map(|c| &mut c[cells.clone()]),
-                narrow: narrow.map(|c| &mut c[cells.clone()]),
-            };
-            engine.hu_columns(z, out, cols);
-        }
-    }
-}
-
 /// The bridge inputs of the four bit lanes packed as nibbles: cell `j + 256 rho + P_pad i`
 /// holds `sum_t (b_t & 1) << t` of record `i`'s committed bit cells at that position, and
 /// the padded positions `256 k .. P_pad` are zero. One pass over the bit columns replaces
@@ -1170,10 +1121,9 @@ impl MainTables {
     }
 
     /// [`MainTables::build`] on `engine`: records in tiles of [`TILE`] through the batched
-    /// derivation of [`derive_tile_with`] (its errors are the legacy derivation's); under
-    /// H-u the engine writes the digits of each row straight into the record's final
-    /// column views, under H-exact and H-FIPS the shift-form encoder (`encode_rows`) writes
-    /// the columns (falling back to the generic encoder on error). Identical to
+    /// derivation of [`derive_tile_with`] (its errors are the legacy derivation's); the
+    /// shift-form encoder (`encode_rows`) writes the columns straight into the record's
+    /// final column views (falling back to the generic encoder on error). Identical to
     /// [`MainTables::build_reference`].
     ///
     /// # Panics
@@ -1192,9 +1142,7 @@ impl MainTables {
             });
         }
         let count = instance.records.len();
-        let hu = (manifest.relation() == Relation::Hu).then(|| HuSlots::new(manifest));
-        // The digit kernel of relation H-u writes its cells unchecked.
-        Self::encode_tiles(manifest, count, TILE, hu.is_none(), |encoder, first, views, trace| {
+        Self::encode_tiles(manifest, count, TILE, true, |encoder, first, views, trace| {
             // Live records of the tile; a tile past the last record is all padding.
             let live = first.min(count)..(first + views.len()).min(count);
             let records: Vec<&PublicRecord> = instance.records[live.clone()].iter().collect();
@@ -1209,18 +1157,12 @@ impl MainTables {
                     slack.push(encoder.encode_values(&RecordValues::zero(), wide, narrow)?);
                     continue;
                 };
-                match &hu {
-                    Some(slots) => {
-                        slots.write(engine, w, wide, narrow);
-                        slack.push(OMEGA as i64);
+                match encoder.encode_rows::<Set44>(&w.z, &w.rows, wide, narrow) {
+                    Some(encoded) => slack.push(encoded),
+                    None => {
+                        let values = RecordValues::<Set44> { z: w.z_wide(), u: w.u_wide(), v: w.v_wide(), w1: w.w1() };
+                        slack.push(encoder.encode_values(&values, wide, narrow)?);
                     }
-                    None => match encoder.encode_rows::<Set44>(&w.z, &w.rows, wide, narrow) {
-                        Some(encoded) => slack.push(encoded),
-                        None => {
-                            let values = RecordValues::<Set44> { z: w.z_wide(), u: w.u_wide(), v: w.v_wide(), w1: w.w1() };
-                            slack.push(encoder.encode_values(&values, wide, narrow)?);
-                        }
-                    },
                 }
             }
             add_elapsed(&ENCODE_NS, clock);
@@ -1391,7 +1333,7 @@ impl MainTables {
             .collect()
     }
 
-    /// The eight (H-u) or nine (H-exact) `G_main4` polynomials in manifest order (`2^d_main`
+    /// The nine (H-exact) or twelve (H-FIPS) `G_main4` polynomials in manifest order (`2^d_main`
     /// cells each).
     #[must_use]
     pub fn columns(&self) -> &[AlignedVec<i8>] {
@@ -2069,38 +2011,9 @@ impl<'a> SourceTables<'a> {
 }
 
 #[cfg(test)]
-mod hu_slot_tests {
-    use super::*;
-
-    #[test]
-    fn hu_slots_follow_the_digit_kernel_order() {
-        for records in [1, 20, 1 << 10] {
-            let manifest = CommitmentManifest::for_relation(records, Relation::Hu).unwrap();
-            let slots = HuSlots::new(&manifest);
-            let main16 = manifest.group(GroupRole::Main16);
-            let main = manifest.group(GroupRole::Main);
-            let wide = [Column::Z_LO, Column::U_LO, Column::V_LO, Column::V_HI];
-            for (&slot, column) in slots.wide.iter().zip(wide) {
-                assert_eq!(main16.columns[slot], column);
-            }
-            let narrow: Vec<Column> = [Column::Z_HI, Column::U_HI]
-                .into_iter()
-                .chain((0..W1_BITS as u8).map(|t| Column::W1Bit(t, 0)))
-                .collect();
-            for (&slot, &column) in slots.narrow.iter().zip(&narrow) {
-                assert_eq!(main.columns[slot], column);
-            }
-            assert_eq!(main.polynomial_count(), slots.narrow.len());
-            // Today's manifest order is the kernel's.
-            assert_eq!(slots.wide, [0, 1, 2, 3]);
-            assert_eq!(slots.narrow, std::array::from_fn(|k| k));
-        }
-    }
-}
-
-#[cfg(test)]
 mod lane_tests {
     use super::*;
+    use crate::manifest::Relation;
     use agg_witness::bridge::SparseMatrix;
     use agg_witness::params::{Set65, Set87};
     use jolt_field::Ring;
@@ -2109,7 +2022,7 @@ mod lane_tests {
     #[test]
     fn shift_forms_match_the_value_forms() {
         for set in [Set::S44, Set::S65, Set::S87] {
-            for relation in [Relation::Hu, Relation::HExact, Relation::HFips] {
+            for relation in Relation::ALL {
                 let n = if set == Set::S44 { 16 } else { 64 };
                 let manifest = CommitmentManifest::for_set(set, n, relation).unwrap();
                 let encoder = Encoder::new(&manifest);
@@ -2127,7 +2040,7 @@ mod lane_tests {
                     }
                     let mut x = 0x9e37_79b9_i64;
                     for _ in 0..4096 {
-                        x = (x * 6_364_136_223_846_793 + 1) % (1 << 33);
+                        x = x.wrapping_mul(6_364_136_223_846_793).wrapping_add(1) % (1 << 33);
                         probes.push((x - (1 << 32) / 2) as i32);
                         probes.push(((x % (1 << 21)) - (1 << 20)) as i32);
                     }
@@ -2204,7 +2117,7 @@ mod lane_tests {
         let records = agg_witness::gen::records_for::<P>(seed, 5);
         let instance = PublicInstance::<P>::from_records_for(&records).unwrap();
         let signatures: Vec<&[u8]> = records.iter().map(|r| r.sig.as_slice()).collect();
-        let manifest = CommitmentManifest::for_set(P::SET, 5, Relation::Hu).unwrap();
+        let manifest = CommitmentManifest::for_set(P::SET, 5, Relation::HExact).unwrap();
         let main = MainTables::build_for::<P>(&manifest, &instance, &signatures).unwrap();
         (manifest, records, instance, main)
     }
@@ -2230,8 +2143,9 @@ mod lane_tests {
             }
         }
         for lane in 0..l as u8 {
-            let value = |digit| main.column(&manifest, Column::lane_digit(DigitValue::Zd, digit, lane)).value(padded);
-            assert_eq!((value(0), value(1), value(2)), (-32_768, -4, 1));
+            let value = |digit| main.column(&manifest, Column::lane_digit(DigitValue::Zdx(P::SET), digit, lane)).value(padded);
+            let zero = DigitValue::Zdx(P::SET).layout().decompose(0);
+            assert_eq!(vec![value(0), value(1), value(2)], zero);
         }
         // The cells recompose to the derived values, record by record and lane by lane.
         let mut values = Vec::new();
@@ -2250,7 +2164,7 @@ mod lane_tests {
             values.push(RecordValues::<P> { z: w.z, u: w.u, v: w.v, w1: w.w1 });
         }
         assert_eq!(MainTables::from_values(&manifest, &values).unwrap(), main);
-        // u = +-523,777 and z in [-2^19, 2^19) encode; one past either edge is an honest abort.
+        // u = +-523,777 and z = +-B_z encode; one past either edge is an honest abort.
         for (u, ok) in [(523_777, true), (-523_777, true), (523_778, false), (-523_778, false)] {
             let mut edge = values.clone();
             edge[2].u[k - 1][9] = u;
@@ -2260,7 +2174,8 @@ mod lane_tests {
                 assert_eq!(tables.record_values_for::<P>(&manifest, 2).1[k - 1][9], u);
             }
         }
-        for (z, ok) in [(-(1 << 19), true), ((1 << 19) - 1, true), (1 << 19, false), (-(1 << 19) - 1, false)] {
+        let b_z = P::B_Z;
+        for (z, ok) in [(-b_z, true), (b_z, true), (b_z + 1, false), (-b_z - 1, false)] {
             let mut edge = values.clone();
             edge[1].z[l - 1][3] = z;
             let built = MainTables::from_values(&manifest, &edge);
@@ -2275,7 +2190,7 @@ mod lane_tests {
         // `encode_rows` rejects out-of-range inputs with `None` so the caller falls back to
         // `encode_values` for the exact legacy error.
         let signatures: Vec<&[u8]> = records.iter().map(|r| r.sig.as_slice()).collect();
-        let encoder_hu = Encoder::new(&manifest);
+        let encoder = Encoder::new(&manifest);
         let mut base_lane = LaneWitness::zero::<P>();
         P::derive_lane_tile(&[&instance.records[0]], &[signatures[0]], std::slice::from_mut(&mut base_lane)).unwrap();
         let check_row_reject = |encoder: &Encoder, w: &LaneWitness| -> Option<i64> {
@@ -2285,16 +2200,16 @@ mod lane_tests {
             let mut n_views: Vec<&mut [MaybeUninit<i8>]> = n_buf.chunks_exact_mut(256).collect();
             encoder.encode_rows::<P>(&w.z, &w.rows, &mut w_views, &mut n_views)
         };
-        assert_eq!(check_row_reject(&encoder_hu, &base_lane), Some(P::OMEGA as i64));
+        assert_eq!(check_row_reject(&encoder, &base_lane), Some(P::OMEGA as i64));
         let mut bad_z = base_lane.clone();
-        bad_z.z[0][0] = 1 << 19;
-        assert_eq!(check_row_reject(&encoder_hu, &bad_z), None);
+        bad_z.z[0][0] = (b_z + 1) as _;
+        assert_eq!(check_row_reject(&encoder, &bad_z), None);
         let mut bad_u = base_lane.clone();
         bad_u.rows[0].u[0] = 523_778;
-        assert_eq!(check_row_reject(&encoder_hu, &bad_u), None);
+        assert_eq!(check_row_reject(&encoder, &bad_u), None);
         let mut bad_w1 = base_lane.clone();
         bad_w1.rows[0].w1[0] = 16;
-        assert_eq!(check_row_reject(&encoder_hu, &bad_w1), None);
+        assert_eq!(check_row_reject(&encoder, &bad_w1), None);
         // A base-8 middle digit outside [-4, 3] fails the self-check at its lane's column.
         let u_mid = manifest.locate(Column::lane_digit(DigitValue::Ud, 1, 2)).1;
         let mut bad = main.clone();

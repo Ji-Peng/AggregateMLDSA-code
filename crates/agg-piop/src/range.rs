@@ -1,7 +1,7 @@
 //! Range proofs of the small digits: the per-cell
 //! map of the virtual table `P_Z = Z (Z + 1)` and the order of the leaf and link instances
-//! of `Z_hi` (base 4), `U_hi` (base 6, relation H-u) and the projection digits `K_2`, `K_3`
-//! (base 8). Every other range is the lookup into `T_16`
+//! of `U_hi` (base 6, relation H-exact), the middle digits of ML-DSA-65 and ML-DSA-87 (base
+//! 8) and the projection digits `K_2`, `K_3` (base 8, and `K_4`, base 4). Every other range is the lookup into `T_16`
 //! (`lookup`).
 //!
 //! The map is exact over the integers for every `i8` cell, so the lifted table equals the
@@ -51,8 +51,8 @@ pub struct Digit {
     pub base: u32,
 }
 
-/// The leaf-checked digits `Z_hi`, `U_hi`, `K_2`, `K_3` (H-u) in the order of the leaf and link
-/// instances.
+/// The leaf-checked digits (`U_hi`, `K_2`, `K_3` under H-exact, `K_2`, `K_3` under H-FIPS) in
+/// the order of the leaf and link instances.
 #[must_use]
 pub fn digits(manifest: &CommitmentManifest) -> Vec<Digit> {
     manifest
@@ -86,21 +86,18 @@ mod tests {
     }
 
     #[test]
-    fn leaf_digits_are_z_hi_u_hi_and_the_projection_digits() {
-        let manifest = CommitmentManifest::for_batch(8).unwrap();
-        let all = digits(&manifest);
-        let shape: Vec<(String, u32, GroupRole, usize)> = all
-            .iter()
-            .map(|d| (d.column.name(), d.base, d.group, d.position))
-            .collect();
-        assert_eq!(
-            shape,
-            [
-                ("z_hi".to_owned(), 4, GroupRole::Main, 0),
-                ("u_hi".to_owned(), 6, GroupRole::Main, 1),
-                ("k_2".to_owned(), 8, GroupRole::Proj, 2),
-                ("k_3".to_owned(), 8, GroupRole::Proj, 3)
-            ]
-        );
+    fn leaf_digits_are_u_hi_and_the_projection_digits() {
+        let shape = |relation| -> Vec<(String, u32, GroupRole, usize)> {
+            let manifest = CommitmentManifest::for_relation(8, relation).unwrap();
+            digits(&manifest)
+                .iter()
+                .map(|d| (d.column.name(), d.base, d.group, d.position))
+                .collect()
+        };
+        let k = [("k_2".to_owned(), 8, GroupRole::Proj, 2), ("k_3".to_owned(), 8, GroupRole::Proj, 3)];
+        let mut exact = vec![("u_hi".to_owned(), 6, GroupRole::Main, 1)];
+        exact.extend(k.clone());
+        assert_eq!(shape(crate::manifest::Relation::HExact), exact);
+        assert_eq!(shape(crate::manifest::Relation::HFips), k);
     }
 }

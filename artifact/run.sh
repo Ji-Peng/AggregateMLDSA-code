@@ -10,6 +10,9 @@
 #   ./run.sh tables   raw JSON -> LaTeX tables
 #   ./run.sh all      fetch, build, gates, quick (or full with --full), tables
 #   ./run.sh freeze   maintainers: re-pin hashes.json and sources.lock to HEAD
+#
+# Every run uses relation H-FIPS. gates, quick, full and all take
+# --relations h-fips,h-exact to add the reference relation H-exact.
 set -uo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -19,7 +22,7 @@ export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-6}"
 export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.99.1}"
 
 usage() {
-  sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 }
 
@@ -60,16 +63,26 @@ case "$mode" in
   all)
     run_mode=quick
     extra=()
-    for arg in "$@"; do
-      case "$arg" in
-        --smoke) extra+=("$arg") ;;
+    relations=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
         --full) run_mode=full ;;
-        *) extra+=("$arg") ;;
+        --relations)
+          relations=(--relations "${2:-}")
+          extra+=("$1" "${2:-}")
+          shift
+          ;;
+        --relations=*)
+          relations=("$1")
+          extra+=("$1")
+          ;;
+        *) extra+=("$1") ;;
       esac
+      shift
     done
     bash scripts/fetch.sh || exit 1
     bash scripts/build.sh || exit 1
-    python3 scripts/gates.py || exit 1
+    python3 scripts/gates.py ${relations[@]+"${relations[@]}"} || exit 1
     python3 scripts/runner.py "$run_mode" "${extra[@]}" || exit 1
     python3 scripts/gen_tables.py || exit 1
     ;;

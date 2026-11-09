@@ -159,20 +159,18 @@ pub trait ParamSet: Copy + Send + Sync + 'static {
     const B_T: i32;
     /// Bound on |ve| = |e / q|.
     const C_B_Q: u32;
-    // The five digit-layout constants below are not read by this crate's kernels
-    // (`hu_columns` writes the layouts with literals). They mirror the witness
-    // crate's parameter trait, which derives its implementation of this trait from
-    // its own constants and asserts at compile time that both tables agree.
+    // The four digit-layout constants below are not read by this crate's kernels.
+    // They mirror the witness crate's parameter trait, which derives its
+    // implementation of this trait from its own constants and asserts at compile
+    // time that both tables agree.
     /// Base of the top digit of u (6 for 44, 8 for 65/87).
     const U_TOP_BASE: u32;
     /// Step of the top digit of u for step layout (63,079 for 44; 0 for 65/87).
     const STEP_U: i32;
     /// Slack for u in digit-slack form (523,267 for 65/87; 0 for 44).
     const U_SLACK: i32;
-    /// Reconstruction offset for u in relation H-u (-190,465 for 44, -228,865 for 65/87).
+    /// Reconstruction offset for u in relation H-exact (-190,465 for 44, -228,865 for 65/87).
     const U_OFFSET: i32;
-    /// Reconstruction offset for z in relation H-u (0 for 44, -229,376 for 65/87).
-    const Z_OFFSET: i32;
     /// Bytes of commitment hash c~ (lambda / 4).
     const C_TILDE_BYTES: usize;
     /// Public key byte length.
@@ -208,7 +206,6 @@ impl ParamSet for Set44 {
     const STEP_U: i32 = 63_079;
     const U_SLACK: i32 = 0;
     const U_OFFSET: i32 = -190_465;
-    const Z_OFFSET: i32 = 0;
     const C_TILDE_BYTES: usize = 32;
     const PK_BYTES: usize = 1312;
     const SIG_BYTES: usize = 2420;
@@ -240,7 +237,6 @@ impl ParamSet for Set65 {
     const STEP_U: i32 = 0;
     const U_SLACK: i32 = 523_267;
     const U_OFFSET: i32 = -228_865;
-    const Z_OFFSET: i32 = -229_376;
     const C_TILDE_BYTES: usize = 48;
     const PK_BYTES: usize = 1952;
     const SIG_BYTES: usize = 3309;
@@ -272,7 +268,6 @@ impl ParamSet for Set87 {
     const STEP_U: i32 = 0;
     const U_SLACK: i32 = 523_267;
     const U_OFFSET: i32 = -228_865;
-    const Z_OFFSET: i32 = -229_376;
     const C_TILDE_BYTES: usize = 64;
     const PK_BYTES: usize = 2592;
     const SIG_BYTES: usize = 4627;

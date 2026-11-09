@@ -95,8 +95,8 @@ def main():
                     "base_commit": commit,
                     "head_commit": head,
                     "dirty": bool(status),
-                    "archive_url": source.get("archive_url"),
-                    "tarball_sha256": archive_sha(REPO, commit),
+                    # An anonymized download carries no git history to archive.
+                    "tarball_sha256": archive_sha(REPO, commit) if head else None,
                 }
             )
             continue

@@ -7,8 +7,8 @@
 //! `G_main4`; round 2 `G_1`, `G_2`, `G_3`, `G_k`, then the final group `G_m`), each call
 //! transcript-free and under its group's family; the caller absorbs
 //! [`GroupCommitment::serialized`] in event order. One batched opening covers the stage-3
-//! claims at the suffixes of `r^(3)` (35 for ML-DSA-44 under H-u), the 11 zero polynomials of
-//! `G_3` (claim zero) and the 7 multiplicity digits at the lookup's table point: 53 claims.
+//! claims at the suffixes of `r^(3)` (40 for ML-DSA-44 under H-FIPS), the 12 zero polynomials
+//! of `G_3` (claim zero) and the 7 multiplicity digits at the lookup's table point: 59 claims.
 
 use agg_pcs_config::commit::{
     CommitError, GroupClaim, GroupCommitment, PcsProver, PcsVerifier, PreparedOpening,

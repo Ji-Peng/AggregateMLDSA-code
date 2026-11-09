@@ -50,18 +50,18 @@ pub const PIOP_PROTOCOL_TAG: [u8; 64] = protocol_tag();
 pub const PROTOCOL_DOMAIN: &[u8] = b"agg-mldsa/v1";
 /// cSHAKE256 customization of the instance digest.
 pub const INSTANCE_CUSTOMIZATION: &[u8] = b"agg-mldsa/v1/instance";
-/// Stage message degrees of ML-DSA-44, the same in every relation ([`stage_degrees`]).
-pub const STAGE_DEGREES: [usize; 3] = [4, 5, 3];
+/// Stage message degrees, the same for every parameter set and relation ([`stage_degrees`]).
+pub const STAGE_DEGREES: [usize; 3] = [3, 5, 3];
 
-/// Stage message degrees of the manifest's parameter set: stage 1 has degree 4 with the
-/// six-bit range check of ML-DSA-44 and 3 otherwise.
+/// Stage message degrees of the manifest's parameter set: stage 1 holds only the bridge
+/// instances (degree 3), stage 2 the leaves of degree 5.
 #[must_use]
 pub fn stage_degrees(manifest: &CommitmentManifest) -> [usize; 3] {
     [crate::stage1::degree(manifest), crate::stage2::DEGREE, crate::stage3::DEGREE]
 }
 
-/// Batching coefficients per stage; for ML-DSA-44 `(26, 10, 49)` under H-u, `(26, 9, 50)`
-/// under H-exact and `(26, 9, 56)` under H-FIPS (the other sets: the stage `gamma_count`s).
+/// Batching coefficients per stage; for ML-DSA-44 `(19, 10, 50)` under H-exact and
+/// `(19, 10, 56)` under H-FIPS (the other sets: the stage `gamma_count`s).
 #[must_use]
 pub fn stage_gammas(manifest: &CommitmentManifest) -> [usize; 3] {
     [
@@ -71,8 +71,8 @@ pub fn stage_gammas(manifest: &CommitmentManifest) -> [usize; 3] {
     ]
 }
 
-/// Terminal claims per stage; for ML-DSA-44 `(18, 10, 35)` under H-u, `(18, 9, 36)` under
-/// H-exact and `(18, 10, 40)` under H-FIPS (the other sets: the claim vectors' `len`).
+/// Terminal claims per stage; for ML-DSA-44 `(12, 9, 36)` under H-exact and `(12, 10, 40)`
+/// under H-FIPS (the other sets: the claim vectors' `len`).
 #[must_use]
 pub fn stage_terminals(manifest: &CommitmentManifest) -> [usize; 3] {
     [
@@ -1224,7 +1224,7 @@ mod tests {
         let gammas: Vec<u8> = sites.iter().filter(|s| s.class == SiteClass::StageGamma).map(|s| s.bits).collect();
         assert_eq!(gammas, [5, 4, 6]);
         assert_eq!(sites.iter().filter(|s| s.class == SiteClass::LookupMu).count(), 18);
-        for (stage, bits) in [(1, 3), (2, 3), (3, 2)] {
+        for (stage, bits) in [(1, 2), (2, 3), (3, 2)] {
             let rounds: Vec<&WorkSite> = sites
                 .iter()
                 .filter(|s| s.class == SiteClass::StageRound && s.i == stage)
@@ -1233,17 +1233,18 @@ mod tests {
             assert!(rounds.iter().all(|s| s.bits == bits));
             assert_eq!(rounds[16].j, 16);
         }
-        // 2,270 stream bits at N* = 2^7 (D = 18: one GKR session fewer than with V_lo,
-        // V_hi looked up).
-        assert_eq!(registry.work_bits(), 2270);
-        assert_eq!(work_bytes(&manifest()), 284);
-        // H-exact: gamma^(2) has 9 coefficients (g = 4), gamma^(3) 50
-        // (g = 6), the rounds keep their difficulties: the plan is H-u's.
+        // 2,253 stream bits at N* = 2^7 (D = 18: one GKR session fewer than with V_lo,
+        // V_hi looked up; the 17 degree-3 rounds of stage 1 grind 2 bits each).
+        assert_eq!(registry.work_bits(), 2253);
+        assert_eq!(work_bytes(&manifest()), 282);
+        // H-exact: gamma^(1) has 19 coefficients (g = 5), gamma^(2) 10 (g = 4), gamma^(3) 50
+        // (g = 6), the rounds keep their difficulties: the plan is the default relation's.
         let exact = CommitmentManifest::for_relation(100, crate::manifest::Relation::HExact).unwrap();
-        assert_eq!(stage_gammas(&exact), [26, 9, 50]);
-        assert_eq!(stage_terminals(&exact), [18, 9, 36]);
-        assert_eq!(stage_gammas(&manifest()), [26, 10, 49]);
-        assert_eq!(stage_terminals(&manifest()), [18, 10, 35]);
+        assert_eq!(stage_gammas(&exact), [19, 10, 50]);
+        assert_eq!(stage_terminals(&exact), [12, 9, 36]);
+        assert_eq!(manifest().relation(), crate::manifest::Relation::HFips);
+        assert_eq!(stage_gammas(&manifest()), [19, 10, 56]);
+        assert_eq!(stage_terminals(&manifest()), [12, 10, 40]);
         let exact_registry = Registry::new(&exact);
         let gammas: Vec<u8> = exact_registry
             .work_sites()
@@ -1251,13 +1252,14 @@ mod tests {
             .map(|s| s.bits)
             .collect();
         assert_eq!(gammas, [5, 4, 6]);
-        assert_eq!(exact_registry.work_bits(), 2270);
-        assert_eq!(work_bytes(&exact), 284);
-        // H-FIPS: gamma^(2) has 9 coefficients (def_y1, leaf8[K_2], leaf8[K_3] and F_e, g = 4),
-        // gamma^(3) 56 (g = 6); stage-2 terminals add delta and e, stage 3 opens 40 claims.
+        assert_eq!(exact_registry.work_bits(), 2253);
+        assert_eq!(work_bytes(&exact), 282);
+        // H-FIPS: gamma^(2) has 10 coefficients (def_y1, leaf8[K_2], leaf8[K_3], F_e and
+        // range_w1, g = 4), gamma^(3) 56 (g = 6); stage-2 terminals add delta and e, stage 3
+        // opens 40 claims.
         let fips = CommitmentManifest::for_relation(100, crate::manifest::Relation::HFips).unwrap();
-        assert_eq!(stage_gammas(&fips), [26, 9, 56]);
-        assert_eq!(stage_terminals(&fips), [18, 10, 40]);
+        assert_eq!(stage_gammas(&fips), [19, 10, 56]);
+        assert_eq!(stage_terminals(&fips), [12, 10, 40]);
         let fips_registry = Registry::new(&fips);
         let gammas: Vec<u8> = fips_registry
             .work_sites()
@@ -1460,6 +1462,7 @@ mod tests {
     #[test]
     fn fork_and_join_follow_the_registry() {
         let manifest = manifest();
+        let g3 = stage_gammas(&manifest)[2];
         let record = manifest.binding_bytes();
         let forked = |swap: bool| -> (Vec<OpeningField>, Vec<u8>, [Vec<OpeningField>; 2]) {
             let mut trunk = Transcript::new(&manifest, &record).unwrap();
@@ -1481,7 +1484,7 @@ mod tests {
             assert!(s.challenge_extensions(&lookup_site(LookupSite::X), 2).is_err());
             // The trunk waits at the join: stage 3 cannot start, a join of unfinished
             // branches is refused.
-            assert!(trunk.challenge_extensions(&gamma_site(3), 49).is_err());
+            assert!(trunk.challenge_extensions(&gamma_site(3), g3).is_err());
             let first = [
                 l.challenge_extensions(&lookup_site(LookupSite::X), 2).unwrap(),
                 s.challenge_extensions(TAU_SITE, 17).unwrap(),
@@ -1499,7 +1502,7 @@ mod tests {
                 trunk.join(l, s).unwrap();
             }
             let work = trunk.work_stream();
-            let gamma = trunk.challenge_extensions(&gamma_site(3), 49).unwrap();
+            let gamma = trunk.challenge_extensions(&gamma_site(3), g3).unwrap();
             (gamma, work, first)
         };
         let (gamma, work, first) = forked(false);
@@ -1532,7 +1535,7 @@ mod tests {
         run_branch(&mut l, &manifest);
         run_branch(&mut s, &manifest);
         trunk.join(l, s).unwrap();
-        trunk.challenge_extensions(&gamma_site(3), 49).unwrap();
+        trunk.challenge_extensions(&gamma_site(3), g3).unwrap();
         let mut stream = trunk.work_stream();
         let bits = Registry::new(&manifest).work_bits();
         let stage3: usize = Registry::new(&manifest)
@@ -1550,6 +1553,6 @@ mod tests {
         run_branch(&mut l, &manifest);
         run_branch(&mut s, &manifest);
         replay.join(l, s).unwrap();
-        assert_eq!(replay.challenge_extensions(&gamma_site(3), 49).unwrap(), gamma);
+        assert_eq!(replay.challenge_extensions(&gamma_site(3), g3).unwrap(), gamma);
     }
 }

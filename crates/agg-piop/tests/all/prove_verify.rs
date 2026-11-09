@@ -46,7 +46,7 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
             instance: &instance,
             records: &inputs,
             signatures: &signatures,
-            relation: Relation::Hu,
+            relation: Relation::HFips,
         };
         // Mode A over matrices that ignore the seed is refused before any work.
         for profile in [FlockProfile::Fast, FlockProfile::Slim, FlockProfile::Slim8] {
@@ -105,7 +105,7 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
             &bridge,
             &NoKeccakVerifier,
             FlockProfile::None,
-            Relation::Hu,
+            Relation::HFips,
             Some(&mut cache),
         )
         .expect("verify");
@@ -120,7 +120,7 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
             &bridge,
             &NoKeccakVerifier,
             FlockProfile::None,
-            Relation::Hu,
+            Relation::HFips,
             Some(&mut cache),
         )
         .expect("verify with cached keys");
@@ -142,7 +142,7 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
                 &bridge,
                 &NoKeccakVerifier,
                 FlockProfile::None,
-                Relation::Hu,
+                Relation::HFips,
                 None,
             ),
             Err(VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT }))
@@ -152,31 +152,31 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
         let mut fewer = public.clone();
         fewer.pop();
         assert!(matches!(
-            verify(&fewer, &bytes, &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::Hu, None),
+            verify(&fewer, &bytes, &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::HFips, None),
             Err(VerifyError::RecordCount)
         ));
         let mut swapped = public.clone();
         swapped.swap(3, 4);
-        assert!(verify(&swapped, &bytes, &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::Hu, None).is_err());
+        assert!(verify(&swapped, &bytes, &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::HFips, None).is_err());
         let mut c_tilde = output.proof.clone();
         c_tilde.c_tilde[7][0] ^= 1;
-        assert!(verify(&public, &c_tilde.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::Hu, None).is_err());
+        assert!(verify(&public, &c_tilde.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::HFips, None).is_err());
         let other = FixedMatrices(BridgeMatrices::random_for_tests(0x1234));
         assert!(matches!(
-            verify(&public, &bytes, &other, &NoKeccakVerifier, FlockProfile::None, Relation::Hu, None),
+            verify(&public, &bytes, &other, &NoKeccakVerifier, FlockProfile::None, Relation::HFips, None),
             Err(VerifyError::Stage(_))
         ));
         // A changed lookup message (a GKR round) or layer-1 value: the lookup.
         let mut lookup = output.proof.clone();
         lookup.lookup.sessions[4].rounds[1][0] += agg_piop::OpeningField::from_u64(1);
         assert!(matches!(
-            verify(&public, &lookup.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::Hu, None),
+            verify(&public, &lookup.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::HFips, None),
             Err(VerifyError::Lookup(_))
         ));
         let mut layer = output.proof.clone();
         layer.lookup.layer1[0][3] += agg_piop::OpeningField::from_u64(1);
         assert!(matches!(
-            verify(&public, &layer.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::Hu, None),
+            verify(&public, &layer.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::HFips, None),
             Err(VerifyError::Lookup(_))
         ));
         // A changed multiplicity-digit claim, compensated so that the digits still compose
@@ -187,12 +187,12 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
         digits.multiplicities.0[0] += agg_piop::OpeningField::from_u64(16);
         digits.multiplicities.0[1] -= agg_piop::OpeningField::from_u64(1);
         assert!(matches!(
-            verify(&public, &digits.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::Hu, None),
+            verify(&public, &digits.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::HFips, None),
             Err(VerifyError::Transcript(TranscriptError::Work { .. }) | VerifyError::Stage(_) | VerifyError::Opening(_))
         ));
         // The no-Keccak stand-in cannot verify a mode-A profile (refused before parsing).
         assert!(matches!(
-            verify(&public, &bytes, &bridge, &NoKeccakVerifier, FlockProfile::Fast, Relation::Hu, None),
+            verify(&public, &bytes, &bridge, &NoKeccakVerifier, FlockProfile::Fast, Relation::HFips, None),
             Err(VerifyError::Configuration(ConfigurationError::ProfileMismatch { .. }))
         ));
 
@@ -201,7 +201,7 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
         let mut round = output.proof.clone();
         round.stage2.rounds[5][2] = round.stage2.rounds[5][0];
         assert!(matches!(
-            verify(&public, &round.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::Hu, None),
+            verify(&public, &round.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::HFips, None),
             Err(VerifyError::Stage(
                 agg_piop::stage::StageError::Terminal(2)
                     | agg_piop::stage::StageError::Transcript(TranscriptError::Work { .. })
@@ -210,34 +210,34 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
         let mut claim = output.proof.clone();
         claim.stage3.claims.0[20] = claim.stage3.claims.0[21];
         assert!(matches!(
-            verify(&public, &claim.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::Hu, None),
+            verify(&public, &claim.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::HFips, None),
             Err(VerifyError::Stage(agg_piop::stage::StageError::Terminal(3)))
         ));
         let mut prestage = output.proof.clone();
         prestage.prestage.y2[0] = prestage.prestage.y2[1] + prestage.prestage.kappa3;
-        assert!(verify(&public, &prestage.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::Hu, None).is_err());
+        assert!(verify(&public, &prestage.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::HFips, None).is_err());
         let mut opening = output.proof.clone();
         let last = opening.opening.len() - 1;
         opening.opening[last] ^= 0x40;
         assert!(matches!(
-            verify(&public, &opening.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::Hu, None),
+            verify(&public, &opening.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::HFips, None),
             Err(VerifyError::Opening(_))
         ));
         let mut commitment = output.proof.clone();
         commitment.main_commitment.pop();
         assert!(matches!(
-            verify(&public, &commitment.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::Hu, None),
+            verify(&public, &commitment.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::HFips, None),
             Err(VerifyError::Commitment(agg_piop::manifest::GroupRole::Main))
         ));
         // Mode B rejects a non-empty Keccak payload.
         let mut keccak = output.proof.clone();
         keccak.flock_proofs[0] = vec![1];
         assert!(matches!(
-            verify(&public, &keccak.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::Hu, None),
+            verify(&public, &keccak.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::HFips, None),
             Err(VerifyError::Keccak(0))
         ));
         assert!(matches!(
-            verify(&public, &bytes[..100], &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::Hu, None),
+            verify(&public, &bytes[..100], &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::HFips, None),
             Err(VerifyError::Wire(_))
         ));
     });
@@ -263,7 +263,7 @@ fn padded_batch_of_ten_signatures_round_trips() {
                 instance: &instance,
                 records: &inputs,
                 signatures: &signatures,
-                relation: Relation::Hu,
+                relation: Relation::HFips,
             },
             &bridge,
             &NoKeccak,
@@ -276,6 +276,6 @@ fn padded_batch_of_ten_signatures_round_trips() {
             .iter()
             .map(|r| (r.pk.as_slice(), r.msg.as_slice()))
             .collect();
-        verify(&public, &bytes, &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::Hu, None).expect("verify");
+        verify(&public, &bytes, &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::HFips, None).expect("verify");
     });
 }

@@ -82,14 +82,14 @@ fn forked_transcript_schedules_agree_and_tampering_is_rejected() {
             instance: &instance,
             records: &inputs,
             signatures: &signatures,
-            relation: Relation::Hu,
+            relation: Relation::HFips,
         };
         let public: Vec<(&[u8], &[u8])> = records
             .iter()
             .map(|r| (r.pk.as_slice(), r.msg.as_slice()))
             .collect();
         let check = |proof: &AggregateProof| {
-            verify(&public, &proof.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::Hu, None)
+            verify(&public, &proof.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::HFips, None)
         };
         let prove_now = || prove(&prover_inputs, &bridge, &NoKeccak, FlockProfile::None).expect("prove");
 

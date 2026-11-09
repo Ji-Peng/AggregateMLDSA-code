@@ -12,9 +12,9 @@
 //! rows of `G_main4` and the grouped rows (final group `G_m`), whose precommitted
 //! producers are taken from the scalar row of their own family.
 //!
-//! Rows are keyed by `(d_sig, relation)` (`catalogs::catalog_batches`): H-u and H-exact
-//! share every width-16 row and differ in `G_main4` (8 or 9 polynomials), so the width-4
-//! catalog holds both relations' scalar and grouped rows.
+//! Rows are keyed by `(set, d_sig, relation)` (`catalogs::catalog_batches`): for ML-DSA-44
+//! H-exact and H-FIPS differ in `G_main4` (9 or 12 polynomials) and in `G_2`, `G_3` (12 or
+//! 13), so both catalogs hold rows of both relations.
 //!
 //! Incremental update, one batch size at a time (keeps every checked-in row of both
 //! relations, plans only missing ones, saves after every planned row):
@@ -25,9 +25,10 @@
 //!     -- --ignored --exact schedule_catalog_regen::update_catalog_rows
 //! ```
 //!
-//! `AGG_CATALOG_RELATION` is `h-u`, `h-exact` or `all` (the default). Rows of a batch outside
-//! `catalog_batches()` and the requested ones are pruned, so a batch size is first added to
-//! the requested list, then to `CATALOG_D_SIG` or `CATALOG_D_SIG_H_EXACT` once its rows exist.
+//! `AGG_CATALOG_RELATION` is `h-exact`, `h-fips` or `all` (the default). Rows of a batch
+//! outside `catalog_batches()` and the requested ones are pruned, so a batch size is first
+//! added to the requested list, then to `CATALOG_D_SIG_H_EXACT` or `CATALOG_D_SIG_H_FIPS` once
+//! its rows exist.
 //!
 //! Full regeneration of every row of `catalog_batches()` from scratch:
 //!
@@ -80,7 +81,7 @@ fn artifact_path(family: Family) -> PathBuf {
     output_dir().join(format!("{}.aks", family_name(family)))
 }
 
-/// Relations requested by the environment (`AGG_CATALOG_RELATION=h-exact`), default both.
+/// Relations requested by the environment (`AGG_CATALOG_RELATION=h-exact`), default all.
 fn requested_relations() -> Vec<Relation> {
     match std::env::var("AGG_CATALOG_RELATION") {
         Ok(value) if !value.trim().is_empty() && value.trim() != "all" => vec![
@@ -418,7 +419,7 @@ fn save(family: Family, rows: &Rows) {
 // Offline tests (ignored by default).
 
 /// Plan the rows of the requested batches that the on-disk catalogs lack, keep every
-/// on-disk row of `catalog_batches()` (both relations) or of a requested batch, drop the
+/// on-disk row of `catalog_batches()` (every set and relation) or of a requested batch, drop the
 /// rest, and save after every planned row (so a run killed by a time cap keeps what it
 /// finished).
 #[test]

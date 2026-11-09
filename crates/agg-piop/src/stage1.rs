@@ -1,13 +1,17 @@
-//! Stage 1: bridge Booleanity and levels 2 and 3, w1Encode Booleanity and, for ML-DSA-44,
-//! the bit-range identity. The lookup into `T_16` proves the other ranges.
+//! Stage 1: bridge Booleanity and levels 2 and 3. Every instance lives on a bridge domain
+//! (`D_1`, `D_2`); the main domain has no stage-1 instance. The Booleanity of the w1Encode
+//! bits is a stage-3 zero-check at `r^(2)` and ML-DSA-44's bit-range identity a stage-2
+//! zero-check at `r^(1)`: both read lanes those stages read anyway, and their terminals land
+//! at points where the bits are claimed already. The lookup into `T_16` proves the other
+//! ranges.
 //!
-//! `gamma^(1)` order with `w` bits of `w_1'` (6 for ML-DSA-44, 4 otherwise) and `k_L`
-//! polynomial lanes per bit (1 for ML-DSA-44, `k` otherwise): `bool_y1[t]` (`0..w`),
-//! `level2[t]` (`w..2w`), `level3` (`2w`), `bool_y2[t]` (`2w+1..3w+1`), `bool_b[t, rho]`
-//! (`3w+1 + t k_L + rho`), then `range_w1` for ML-DSA-44 only (`w_1' < 44` needs the
-//! range identity there; four bits give `w_1' < 16 = m_w` by themselves). ML-DSA-44 has 26
-//! instances and degree 4 (the range identity is cubic), ML-DSA-65 37 and ML-DSA-87 45, both
-//! of degree 3.
+//! `gamma^(1)` order with `w` bits of `w_1'` (6 for ML-DSA-44, 4 otherwise): `bool_y1[t]`
+//! (`0..w`), `level2[t]` (`w..2w`), `level3` (`2w`), `bool_y2[t]` (`2w+1..3w+1`): 19
+//! instances for ML-DSA-44 and 13 otherwise, all of degree 3.
+//!
+//! Under `HashField::Fp` there is no bridge: stage 1 holds only the Keccak zero-checks
+//! (`keccak_fp::specs::stage1_groups`, `65 Q + L` instances, degree 4 with the cubic
+//! `chi` and parity terms), and its terminal claims are the Keccak lane claims.
 
 use std::collections::HashMap;
 
@@ -17,7 +21,7 @@ use agg_witness::padding::Geometry;
 use agg_witness::params::{TR_BYTES, W1_BITS};
 use jolt_field::Zero;
 
-use crate::claims::{bit_columns, PreStageClaims, Stage1Claims};
+use crate::claims::{PreStageClaims, Stage1Claims};
 use crate::keccak_fp::specs::stage1_groups;
 use crate::keccak_fp::virtuals::{c_tilde_mle_at_lanes, mu_mle_at_lanes};
 use crate::kernel::Term;
@@ -33,38 +37,31 @@ use crate::OpeningField as E;
 
 /// Stage number.
 pub const STAGE: usize = 1;
-/// Message degree of ML-DSA-44 ([`degree`]).
-pub const DEGREE: usize = 4;
+/// Message degree (Booleanity with its equality factor) under `HashField::Gf2`, the same
+/// for every set.
+pub const DEGREE: usize = 3;
+/// Message degree under `HashField::Fp` (the cubic Keccak zero-checks with their equality
+/// factor).
+pub const FP_DEGREE: usize = 4;
 /// Batching coefficients of ML-DSA-44 under `HashField::Gf2` ([`gamma_count`]).
-pub const GAMMA_COUNT: usize = 26;
+pub const GAMMA_COUNT: usize = 19;
 
-/// True when the set checks `w_1' < m_w` by the cubic range identity (six bits).
-fn has_range_w1(manifest: &CommitmentManifest) -> bool {
-    manifest.shape().w1_bits == W1_BITS
-}
-
-/// The message degree: 4 with the range identity (ML-DSA-44) or the cubic Keccak
-/// zero-checks (`HashField::Fp`), 3 otherwise.
+/// The message degree of `manifest`'s parameter set and hash field ([`DEGREE`] under
+/// `Gf2`, [`FP_DEGREE`] under `Fp`).
 #[must_use]
 pub fn degree(manifest: &CommitmentManifest) -> usize {
-    if manifest.hash_field() == HashField::Fp || has_range_w1(manifest) {
-        DEGREE
-    } else {
-        3
+    match manifest.hash_field() {
+        HashField::Gf2 => DEGREE,
+        HashField::Fp => FP_DEGREE,
     }
 }
 
-/// The `gamma^(1)` layout of a parameter set: `w` bits of `w_1'` in `lanes` polynomial
-/// lanes each, preceded by the bridge checks under `HashField::Gf2` or followed by the
-/// Keccak zero-check instances under `HashField::Fp`.
+/// The `gamma^(1)` layout of a parameter set: the bridge checks over `w` bits of `w_1'`
+/// under `HashField::Gf2`, the Keccak zero-check instances under `HashField::Fp`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Gammas {
     /// Bits of `w_1'`.
     pub bits: usize,
-    /// Polynomial lanes per bit.
-    pub lanes: usize,
-    /// The range identity of ML-DSA-44.
-    pub range_w1: bool,
     /// Commitment-hash field (`Gf2` or `Fp`).
     pub hash_field: HashField,
     /// Keccak zero-check instances (`0` under `Gf2`, `65 Q + L` under `Fp`).
@@ -84,13 +81,12 @@ impl Gammas {
         };
         Self {
             bits: manifest.shape().w1_bits,
-            lanes: manifest.shape().lanes_k,
-            range_w1: has_range_w1(manifest),
             hash_field: manifest.hash_field(),
             keccak,
         }
     }
 
+    /// Batching coefficients of the bridge checks (`HashField::Gf2` only).
     const fn bridge_count(self) -> usize {
         match self.hash_field {
             HashField::Gf2 => 3 * self.bits + 1,
@@ -122,33 +118,21 @@ impl Gammas {
         2 * self.bits + 1 + t
     }
 
-    /// Gamma index of `bool_b[t, rho]` (bit-major).
-    #[must_use]
-    pub const fn bool_b(self, t: usize, lane: usize) -> usize {
-        self.bridge_count() + t * self.lanes + lane
-    }
-
-    /// Gamma index of `range_w1` (ML-DSA-44 only).
-    #[must_use]
-    pub const fn range_w1(self) -> usize {
-        self.bridge_count() + self.bits * self.lanes
-    }
-
-    /// First gamma index after the lattice checks (`bool_b` and `range_w1`).
+    /// First gamma index of the Keccak zero-checks (`HashField::Fp`).
     #[must_use]
     pub const fn keccak_offset(self) -> usize {
-        self.range_w1() + if self.range_w1 { 1 } else { 0 }
+        self.bridge_count()
     }
 
     /// Batching coefficients.
     #[must_use]
     pub const fn count(self) -> usize {
-        self.keccak_offset() + self.keccak
+        self.bridge_count() + self.keccak
     }
 }
 
-/// Batching coefficients of `manifest`'s parameter set and hash field (under `Gf2`: 26, 37
-/// or 45; under `Fp`: 726 for ML-DSA-44).
+/// Batching coefficients of `manifest`'s parameter set and hash field (under `Gf2`: 19 or
+/// 13; under `Fp`: 719 for ML-DSA-44).
 #[must_use]
 pub fn gamma_count(manifest: &CommitmentManifest) -> usize {
     Gammas::new(manifest).count()
@@ -171,18 +155,11 @@ pub const GAMMA_LEVEL3: usize = 2 * W1_BITS;
 pub const fn gamma_bool_y2(t: usize) -> usize {
     2 * W1_BITS + 1 + t
 }
-/// Gamma index of `bool_b[t]` (ML-DSA-44).
-#[must_use]
-pub const fn gamma_bool_b(t: usize) -> usize {
-    3 * W1_BITS + 1 + t
-}
-/// Gamma index of `range_w1` (ML-DSA-44).
-pub const GAMMA_RANGE_W1: usize = 4 * W1_BITS + 1;
 
-/// The stage-1 proof: the round messages and the 18 terminal claims.
+/// The stage-1 proof: the round messages and the 12 terminal claims.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage1Proof {
-    /// Compressed degree-4 messages (4 elements each).
+    /// Compressed degree-3 messages (3 elements each).
     pub rounds: Vec<Vec<E>>,
     /// Terminal claims.
     pub claims: Stage1Claims,
@@ -202,75 +179,51 @@ pub struct Stage1Output {
 pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
     let gammas = Gammas::new(manifest);
     let lanes = 0..gammas.bits;
-    let bits = bit_columns(manifest);
     let mut groups = Vec::new();
-    let mut main_instances: Vec<InstanceSpec> = bits
-        .iter()
-        .enumerate()
-        .map(|(lane, &column)| {
-            let Column::W1Bit(t, rho) = column else { unreachable!("bit columns") };
-            InstanceSpec::new(gammas.bool_b(usize::from(t), usize::from(rho)), vec![Term::Bool(lane)])
-        })
-        .collect();
-    if gammas.range_w1 {
-        main_instances.push(InstanceSpec::new(gammas.range_w1(), vec![Term::RangeW1([5, 4, 3, 2])]));
-    }
-    groups.push(GroupSpec {
-        domain: GroupRole::Main,
-        eq: EqPoint::Tau,
-        lanes: bits.iter().map(|&c| LaneId::Column(c)).collect(),
-        instances: main_instances,
-    });
     match manifest.hash_field() {
         HashField::Gf2 => {
-            // Bridge Booleanity checks on D_1 and D_2.
-            groups.push(GroupSpec {
-                domain: GroupRole::Level1,
-                eq: EqPoint::Tau,
-                lanes: lanes.clone().map(|t| LaneId::Parity1(t as u8)).collect(),
-                instances: lanes
+        // One equality group per bridge domain, holding the Booleanity checks.
+        groups.push(GroupSpec {
+            domain: GroupRole::Level1,
+            eq: EqPoint::Tau,
+            lanes: lanes.clone().map(|t| LaneId::Parity1(t as u8)).collect(),
+            instances: lanes.clone().map(|t| InstanceSpec::new(gammas.bool_y1(t), vec![Term::Bool(t)])).collect(),
+        });
+        groups.push(GroupSpec {
+            domain: GroupRole::Level2,
+            eq: EqPoint::Tau,
+            lanes: lanes.clone().map(|t| LaneId::Column(Column::Parity2(t as u8))).collect(),
+            instances: lanes.clone().map(|t| InstanceSpec::new(gammas.bool_y2(t), vec![Term::Bool(t)])).collect(),
+        });
+        // level2[t] on D_1 with the weight w_2.
+        groups.push(GroupSpec {
+            domain: GroupRole::Level1,
+            eq: EqPoint::None,
+            lanes: std::iter::once(LaneId::Weight(WeightId::Level2))
+                .chain(lanes.clone().map(|t| LaneId::Parity1(t as u8)))
+                .collect(),
+            instances: lanes
+                .clone()
+                .map(|t| InstanceSpec::new(gammas.level2(t), vec![Term::Product(vec![0, 1 + t])]))
+                .collect(),
+        });
+        // level3 on D_2 summed over the bits with the weights w_{3,t}.
+        groups.push(GroupSpec {
+            domain: GroupRole::Level2,
+            eq: EqPoint::None,
+            lanes: lanes
+                .clone()
+                .map(|t| LaneId::Weight(WeightId::Level3(t as u8)))
+                .chain(lanes.clone().map(|t| LaneId::Column(Column::Parity2(t as u8))))
+                .collect(),
+            instances: vec![InstanceSpec::new(
+                gammas.level3(),
+                lanes
                     .clone()
-                    .map(|t| InstanceSpec::new(gammas.bool_y1(t), vec![Term::Bool(t)]))
+                    .map(|t| Term::Product(vec![t, gammas.bits + t]))
                     .collect(),
-            });
-            groups.push(GroupSpec {
-                domain: GroupRole::Level2,
-                eq: EqPoint::Tau,
-                lanes: lanes.clone().map(|t| LaneId::Column(Column::Parity2(t as u8))).collect(),
-                instances: lanes
-                    .clone()
-                    .map(|t| InstanceSpec::new(gammas.bool_y2(t), vec![Term::Bool(t)]))
-                    .collect(),
-            });
-            // level2[t] on D_1 with the weight w_2.
-            groups.push(GroupSpec {
-                domain: GroupRole::Level1,
-                eq: EqPoint::None,
-                lanes: std::iter::once(LaneId::Weight(WeightId::Level2))
-                    .chain(lanes.clone().map(|t| LaneId::Parity1(t as u8)))
-                    .collect(),
-                instances: lanes
-                    .clone()
-                    .map(|t| InstanceSpec::new(gammas.level2(t), vec![Term::Product(vec![0, 1 + t])]))
-                    .collect(),
-            });
-            // level3 on D_2 summed over the bits with the weights w_{3,t}.
-            groups.push(GroupSpec {
-                domain: GroupRole::Level2,
-                eq: EqPoint::None,
-                lanes: lanes
-                    .clone()
-                    .map(|t| LaneId::Weight(WeightId::Level3(t as u8)))
-                    .chain(lanes.clone().map(|t| LaneId::Column(Column::Parity2(t as u8))))
-                    .collect(),
-                instances: vec![InstanceSpec::new(
-                    gammas.level3(),
-                    lanes
-                        .clone()
-                        .map(|t| Term::Product(vec![t, gammas.bits + t]))
-                        .collect(),
-                )],
-            });
+            )],
+        });
         }
         HashField::Fp => {
             let (keccak, used) = stage1_groups(manifest, gammas.keccak_offset());
@@ -500,7 +453,6 @@ fn prove_with(
     let claims = Stage1Claims {
         y1,
         y2,
-        b: bit_columns(manifest).into_iter().map(|c| value(LaneId::Column(c))).collect(),
         keccak: keccak_claim_lanes(&spec).into_iter().map(value).collect(),
     };
     transcript.absorb_extensions(&terminal_site(STAGE), &claims.to_vec())?;
@@ -548,19 +500,10 @@ impl BridgeWeightsAt {
 }
 
 /// The verifier's value of a stage-1 lane at the terminal.
-fn resolve(
-    manifest: &CommitmentManifest,
-    weights: Option<&BridgeWeightsAt>,
-    keccak: &KeccakResolver,
-    claims: &Stage1Claims,
-    id: LaneId,
-) -> E {
+fn resolve(weights: Option<&BridgeWeightsAt>, keccak: &KeccakResolver, claims: &Stage1Claims, id: LaneId) -> E {
     match id {
         LaneId::Parity1(t) => claims.y1[usize::from(t)],
         LaneId::Column(Column::Parity2(t)) => claims.y2[usize::from(t)],
-        LaneId::Column(Column::W1Bit(t, lane)) => {
-            claims.b[usize::from(t) * manifest.shape().lanes_k + usize::from(lane)]
-        }
         LaneId::Weight(WeightId::Level2) => weights.expect("Gf2 bridge weights").level2,
         LaneId::Weight(WeightId::Level3(t)) => weights.expect("Gf2 bridge weights").level3[usize::from(t)],
         other if is_keccak_lane(other) => resolve_keccak(keccak, other),
@@ -585,7 +528,6 @@ pub fn verify(
     let y_len = Stage1Claims::y_len(manifest);
     if proof.claims.y1.len() != y_len
         || proof.claims.y2.len() != y_len
-        || proof.claims.b.len() != bit_columns(manifest).len()
         || proof.claims.keccak.len() != Stage1Claims::keccak_len(manifest)
     {
         return Err(StageError::Shape("stage 1 claims".into()));
@@ -603,7 +545,7 @@ pub fn verify(
         KeccakResolver::new(manifest, &spec, &replay.point, &proof.claims.keccak, keccak_public)
     });
     check_terminal(&spec, manifest, points, &replay, |id| {
-        resolve(manifest, weights.as_ref(), &keccak, &proof.claims, id)
+        resolve(weights.as_ref(), &keccak, &proof.claims, id)
     })?;
     Ok(Stage1Output {
         point: replay.point,
@@ -616,17 +558,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stage_one_has_twenty_six_instances_in_spec_order() {
+    fn stage_one_has_nineteen_bridge_instances_in_spec_order() {
         let manifest = CommitmentManifest::for_batch(8).unwrap();
         let spec = spec(&manifest);
         spec.validate().unwrap();
-        assert_eq!(spec.gamma_count, 26);
-        assert_eq!(spec.groups.len(), 5);
+        assert_eq!(spec.gamma_count, 19);
+        assert_eq!(spec.groups.len(), 4);
         let instances: usize = spec.groups.iter().map(|g| g.instances.len()).sum();
-        assert_eq!(instances, 26);
-        assert_eq!(GAMMA_RANGE_W1, 25);
-        // Every term fits the degree with its equality factor.
+        assert_eq!(instances, 19);
+        // No instance on the main domain; every term fits the degree with its equality factor.
         for group in &spec.groups {
+            assert_ne!(group.domain, GroupRole::Main);
             let inner = usize::from(group.eq != EqPoint::None);
             for instance in &group.instances {
                 for term in &instance.terms {
@@ -634,83 +576,62 @@ mod tests {
                 }
             }
         }
-        assert_eq!(spec.lane_ids().len(), 6 + 6 + 6 + 1 + 6);
+        assert_eq!(spec.lane_ids().len(), 6 + 6 + 1 + 6);
         // The general layout reduces to the pinned ML-DSA-44 indices.
         let gammas = Gammas::new(&manifest);
         for t in 0..W1_BITS {
             assert_eq!(gammas.bool_y1(t), gamma_bool_y1(t));
             assert_eq!(gammas.level2(t), gamma_level2(t));
             assert_eq!(gammas.bool_y2(t), gamma_bool_y2(t));
-            assert_eq!(gammas.bool_b(t, 0), gamma_bool_b(t));
         }
-        assert_eq!((gammas.level3(), gammas.range_w1(), gammas.count()), (GAMMA_LEVEL3, GAMMA_RANGE_W1, GAMMA_COUNT));
+        assert_eq!((gammas.level3(), gammas.count()), (GAMMA_LEVEL3, GAMMA_COUNT));
         assert_eq!(degree(&manifest), DEGREE);
     }
 
-    /// ML-DSA-65 and ML-DSA-87: one Booleanity check per bit and lane, no range identity,
-    /// degree 3; 37 and 45 instances.
+    /// ML-DSA-65 and ML-DSA-87: the same bridge instances over four bits, 13 coefficients.
     #[test]
-    fn lane_sets_check_every_bit_lane_and_drop_the_range_identity() {
+    fn lane_sets_have_only_bridge_instances() {
         use agg_witness::params::Set;
-        for (set, k, count) in [(Set::S65, 6, 37), (Set::S87, 8, 45)] {
-            let manifest = CommitmentManifest::for_set(set, 256, crate::manifest::Relation::Hu).unwrap();
+        for set in [Set::S65, Set::S87] {
+            let manifest = CommitmentManifest::for_set(set, 256, crate::manifest::Relation::HExact).unwrap();
             let spec = spec(&manifest);
             spec.validate().unwrap();
-            assert_eq!((spec.gamma_count, spec.degree, degree(&manifest)), (count, 3, 3));
-            let main = &spec.groups[0];
-            assert_eq!(main.lanes.len(), 4 * k);
-            assert_eq!(main.instances.len(), 4 * k);
-            let gammas = Gammas::new(&manifest);
-            assert_eq!(gammas.bool_b(3, k - 1), count - 1);
-            assert_eq!(main.lane(LaneId::Column(Column::W1Bit(2, 1))), 2 * k + 1);
+            assert_eq!((spec.gamma_count, spec.degree, degree(&manifest)), (13, 3, 3));
             for group in &spec.groups {
+                assert_ne!(group.domain, GroupRole::Main);
                 let inner = usize::from(group.eq != EqPoint::None);
                 for instance in &group.instances {
                     for term in &instance.terms {
                         assert!(term.degree() + inner <= 3);
-                        assert!(!matches!(term, Term::RangeW1(_)));
                     }
                 }
             }
         }
     }
 
+    /// `HashField::Fp`: no bridge and no lattice instance; the Keccak zero-checks alone, of
+    /// degree 4.
     #[test]
-    fn fp_stage_one_drops_bridge_and_appends_keccak_groups() {
+    fn fp_stage_one_holds_only_the_keccak_groups() {
         let gf2 = CommitmentManifest::for_batch(8).unwrap();
-        assert_eq!(gamma_count(&gf2), 26);
+        assert_eq!(gamma_count(&gf2), GAMMA_COUNT);
 
-        let manifest = CommitmentManifest::for_batch_fp(8).unwrap();
+        let manifest = CommitmentManifest::for_relation_fp(8, crate::manifest::Relation::HExact).unwrap();
         let gammas = Gammas::new(&manifest);
-        assert_eq!(gammas.bool_b(0, 0), 0);
-        assert_eq!(gammas.bool_b(5, 0), 5);
-        assert_eq!(gammas.range_w1(), 6);
-        assert_eq!(gammas.keccak_offset(), 7);
-        assert_eq!(gammas.keccak, 719);
-        assert_eq!(gamma_count(&manifest), 726);
-        assert_eq!(degree(&manifest), DEGREE);
+        assert_eq!((gammas.keccak_offset(), gammas.keccak), (0, 719));
+        assert_eq!(gamma_count(&manifest), 719);
+        assert_eq!(degree(&manifest), FP_DEGREE);
 
         let spec = spec(&manifest);
         spec.validate().unwrap();
-        assert_eq!(spec.gamma_count, 726);
-        assert_eq!(spec.degree, DEGREE);
-
-        let main = &spec.groups[0];
-        assert_eq!((main.domain, main.eq), (GroupRole::Main, EqPoint::Tau));
-        assert_eq!(main.lanes.len(), 6);
-        assert_eq!(main.instances.len(), 7);
-        assert_eq!(main.instances[6].gamma, 6);
-        assert_eq!(main.instances[6].terms, vec![Term::RangeW1([5, 4, 3, 2])]);
-
-        for group in &spec.groups[1..] {
+        assert_eq!((spec.gamma_count, spec.degree), (719, FP_DEGREE));
+        for group in &spec.groups {
             assert_eq!(group.domain, GroupRole::KeccakA(0));
             assert!(matches!(group.eq, EqPoint::Tau | EqPoint::TauMasked(_)));
-        }
-        for group in &spec.groups {
             let inner = usize::from(group.eq != EqPoint::None);
             for instance in &group.instances {
                 for term in &instance.terms {
-                    assert!(term.degree() + inner <= DEGREE);
+                    assert!(term.degree() + inner <= FP_DEGREE);
                 }
             }
         }
@@ -721,18 +642,9 @@ mod tests {
             kappa3: E::zero(),
         };
         let sums = claimed_sums(&manifest, &dummy_pre, E::zero());
-        assert_eq!(sums.len(), 726);
+        assert_eq!(sums.len(), 719);
         assert!(sums.iter().all(|&c| c == E::zero()));
-
         assert_eq!(keccak_claim_lanes(&spec).len(), Stage1Claims::keccak_len(&manifest));
-
-        // Lane sets under Fp also validate and use degree 4 for the cubic Keccak terms.
-        use agg_witness::params::Set;
-        for (set, expected_gammas) in [(Set::S65, 24 + 721), (Set::S87, 32 + 918)] {
-            let m = CommitmentManifest::for_set_fp(set, 256, crate::manifest::Relation::Hu).unwrap();
-            let s = super::spec(&m);
-            s.validate().unwrap();
-            assert_eq!((gamma_count(&m), s.gamma_count, s.degree, degree(&m)), (expected_gammas, expected_gammas, DEGREE, DEGREE));
-        }
+        assert_eq!(Stage1Claims::len(&manifest), Stage1Claims::keccak_len(&manifest));
     }
 }

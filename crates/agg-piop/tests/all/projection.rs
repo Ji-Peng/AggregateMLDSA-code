@@ -50,8 +50,9 @@ fn rejecting_place(batch: &impl PiopBatch, main: &MainTables, bridge: &BridgeGro
 }
 
 fn small_batch() -> Batch {
-    // 50 live records pad to N* = 64.
-    Batch::build(common::records(0x51, 40, 10), 0x51)
+    // 50 live records pad to N* = 64; relation H-exact, whose u the attacks move through its
+    // step-form digits.
+    Batch::build_as(agg_piop::manifest::Relation::HExact, common::records(0x51, 40, 10), 0x51)
 }
 
 /// The value of a digit-decomposed main-domain value at cell `x`.
@@ -293,7 +294,7 @@ fn the_shared_projection_claim_is_checked() {
 /// has every coordinate at `2^29` (a valid digit encoding) projects to about `2^39` per row.
 #[test]
 fn the_honest_prover_aborts_on_an_output_outside_the_range() {
-    let manifest = agg_piop::manifest::CommitmentManifest::for_relation(3, Relation::Hu).unwrap();
+    let manifest = agg_piop::manifest::CommitmentManifest::for_relation(3, Relation::HFips).unwrap();
     let mut large = RecordValues::zero();
     for row in large.v.iter_mut() {
         row.fill(1 << 29);

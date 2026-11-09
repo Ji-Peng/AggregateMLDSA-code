@@ -25,8 +25,7 @@ the byte size of every part of the aggregate). Steps:
    event 4 `G_1, G_2, G_3, G_k, G_m`, event 5 `fs_sigma`, event 6 `Y_sigma`
    and the parts' shares, events 7 to 12 the lookup and the stages, then the parts' proofs,
    which the transcript never absorbs (deviations K22, K25: proven on their own thread pool, `AGG_FLOCK_THREADS` threads,
-   default 3/8 of the global pool rounded up, or 7/16 when Flock's GF(2^128) kernels run
-   below AVX-512, `0` for the serial order, at most the logical CPUs or the
+   default 5/16 of the global pool rounded up, `0` for the serial order, at most the logical CPUs or the
    global pool, a non-numeric value warned about on stderr and replaced by the default,
    while the prover runs events 7 to 13), event 13 the finish of the opening. The point-only
    prepare part and, unless `AGG_LATE_JOIN=0`, the finish run in the PIOP branch, so under
@@ -112,11 +111,12 @@ calls `agg_piop::prover::prove_with_tables_using` with `FpKeccakSide`. The verif
 `AggregateVerifier::verify_fp`, which calls `agg_piop::verifier::verify_timed` with
 `FpKeccakVerifier`.
 
-The `F_p` hash field is defined for ML-DSA-44 under relation H-u only. The aggregator
-refuses another set (`AggregateError::HashFieldSet`) or relation
-(`AggregateError::HashFieldRelation`). A verifier of another set rejects every aggregate
-(`ConfigurationError::FpKeccakSet`). The test hooks (`AggregateHooks`) are not available
-under `F_p`.
+The `F_p` hash field is defined for ML-DSA-44 under relation H-exact only, so `fp` needs
+`--relation h-exact` (the default relation H-FIPS is refused). The aggregator refuses another
+set (`AggregateError::HashFieldSet`) or relation (`AggregateError::HashFieldRelation`). A
+verifier of another set or relation rejects every aggregate
+(`ConfigurationError::FpKeccakSet`, `ConfigurationError::FpKeccakRelation`). The test hooks
+(`AggregateHooks`) are not available under `F_p`.
 
 `agg aggregate`, `agg verify` and `agg bench` take `--hash-field gf2|fp` (default `gf2`).
 Under `fp` the options `--flock-profile`, `--flock-span` and `--part-log2` have no meaning.
@@ -135,9 +135,10 @@ other field fails with `WireError::Flags`. Verifying an aggregate therefore need
 `--hash-field` it was made with.
 
 The byte gate of the `fp` mode is `artifact/expected/hashes-fp.json`, kept apart from
-`hashes.json` so that the default digests stay as they are. It pins the 1K ML-DSA-44 H-u
-`fp` aggregate of the artifact records, which must be byte-identical under every `AGG_ISA`
-tier and with `RAYON_NUM_THREADS=1`. The tier identity is checked at 1K against this file;
+`hashes.json` so that the default digests stay as they are. It pins the 1K ML-DSA-44 `fp`
+aggregates of the artifact records (it holds no entry until the `fp` mode supports H-FIPS),
+which must be byte-identical under every `AGG_ISA` tier and with `RAYON_NUM_THREADS=1`. The
+tier identity is checked at 1K against this file;
 `fp_single_thread_byte_identical` (Section 3) checks the single-thread identity at 100 records.
 
 ## 2. Files and the `agg` binary
@@ -153,16 +154,16 @@ tier and with `RAYON_NUM_THREADS=1`. The tier identity is checked at 1K against 
 A=target/release/agg
 taskset -c 0,1,3-15 $A keygen-batch [--params 44|65|87] --count 16 --seed 1 --out keys.bin
 taskset -c 0,1,3-15 $A sign-batch [--params 44|65|87] --keys keys.bin --count 256 --seed 1 --out records.bin
-taskset -c 0,1,3-15 $A aggregate [--params 44|65|87] --records records.bin --out aggregate.bin [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-u|h-exact|h-fips]
-taskset -c 0,1,3-15 $A verify [--params 44|65|87] --records records.bin --aggregate aggregate.bin [--cache keys.cache] [--flock-profile fast|slim|slim8] [--relation h-u|h-exact|h-fips]
-AGG_GIT_REV=$(git rev-parse HEAD) taskset -c 0,1,3-15 $A bench [--params 44|65|87] --count 256 [--keys K] [--seed S] [--warmup 1] [--reps 5] [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-u|h-exact|h-fips] [--json PATH]
+taskset -c 0,1,3-15 $A aggregate [--params 44|65|87] --records records.bin --out aggregate.bin [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-fips|h-exact]
+taskset -c 0,1,3-15 $A verify [--params 44|65|87] --records records.bin --aggregate aggregate.bin [--cache keys.cache] [--flock-profile fast|slim|slim8] [--relation h-fips|h-exact]
+AGG_GIT_REV=$(git rev-parse HEAD) taskset -c 0,1,3-15 $A bench [--params 44|65|87] --count 256 [--keys K] [--seed S] [--warmup 1] [--reps 5] [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-fips|h-exact] [--json PATH]
 ```
 
 Environment knobs (all optional; none changes the proof bytes):
 
 | Variable | Effect |
 | --- | --- |
-| `AGG_FLOCK_THREADS` | threads of the Flock pool beside the PIOP; default `ceil(3/8)` of the rayon pool (`ceil(7/16)` below AVX-512), `0` serial |
+| `AGG_FLOCK_THREADS` | threads of the Flock pool beside the PIOP; default `ceil(5/16)` of the rayon pool, `0` serial |
 | `AGG_PIOP_S_THREADS` | threads of the stage branch's own pool; default as above, `0` shares the rayon pool |
 | `AGG_PIOP_THREADS` | threads of the PIOP pool beside the Flock fork; PIOP + Flock capped at the logical CPUs |
 | `AGG_PIOP_FORK` | `0`: run the two transcript branches one after the other |
@@ -201,15 +202,15 @@ backends and the SIMD environment knobs. ML-DSA-65 and ML-DSA-87 take
 every relation and at least 17 records.
 
 `--relation` selects the relation (`docs/h-exact.md`, spec Section 3.1, Appendix A and
-"ML-DSA-65 and ML-DSA-87 parameters"): `h-u` (default, relation byte 0: ML-DSA-44
-`z in [-2^17, 2^17)`, `|u| <= 190,465`; ML-DSA-65/87 `z in [-2^19, 2^19)`,
-`|u| <= 523,777`), `h-exact` (relation byte 1: also the FIPS 204 bound
-`|z| <= gamma1 - beta - 1`, that is 130,993, 524,091 or 524,167; one more committed column
-for ML-DSA-44, none for 65/87) or `h-fips` (relation byte 2: also the hint, so the
-extracted `(c~, z, h)` is a FIPS 204 signature; `docs/h-exact.md` 10 and 11.2). `aggregate` and `bench` prove the chosen relation
+"ML-DSA-65 and ML-DSA-87 parameters"): `h-fips` (default, relation byte 2: the FIPS 204
+bounds and the hint, so the extracted `(c~, z, h)` is a FIPS 204 signature;
+`docs/h-exact.md` 10 and 11.2) or `h-exact` (relation byte 1: the FIPS 204 bounds
+`|z| <= gamma1 - beta - 1`, that is 130,993, 524,091 or 524,167, and `|u| <= 2 gamma2 + 1`,
+that is 190,465 or 523,777, without the hint; a reference relation, slightly faster).
+Relation byte 0 (the former relaxed relation H-u) is rejected as unknown. `aggregate` and `bench` prove the chosen relation
 (`AggregatorConfig::relation`); `verify` verifies under the chosen relation
 (`AggregateVerifier::relation`) and rejects an aggregate whose header names another one
-("the proof claims relation H-exact, the verifier expects H-u"), so verifying an aggregate
+("the proof claims relation H-exact, the verifier expects H-FIPS"), so verifying an aggregate
 needs the `--relation` it was made with. The prover and verifier reports and the `bench`
 header print the relation. The Keccak side does not depend on it.
 
@@ -309,7 +310,7 @@ workers: single noisy runs, not benchmarks):
 
 | Relation | Aggregate | PIOP rounds and claims | Work nonces | Akita opening | Prove | Stage 2 / stage 3 | Verify uncached / cached |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| H-u | 522,138 B (509.9 B/sig) | 4,736 B | 391 B | 60,994 B | 2,901 ms | 67.5 / 181.1 ms | 352 / 296 ms |
+| H-u (removed) | 522,138 B (509.9 B/sig) | 4,736 B | 391 B | 60,994 B | 2,901 ms | 67.5 / 181.1 ms | 352 / 296 ms |
 | H-exact | 522,154 B (509.9 B/sig) | 4,736 B | 391 B | 61,010 B | 2,981 ms | 60.9 / 198.0 ms | 316 / 290 ms |
 
 Every other part is equal (lookup 21,344 B, Flock proofs 398,518 B). The PIOP bytes agree
@@ -318,8 +319,8 @@ with `16 (81 + 11 d_main)` at `d_main = 20` for both relations (9 + 1 + 34 claim
 ML-DSA-65 and ML-DSA-87 at 1K (revision `1c5516d`, all 16 CPUs of the WSL box with turbo
 and HT on; not benchmarks). Sizes: the artifact gate records (keys seed 42, records seed
 43, `agg aggregate --params P`), byte-identical under `AGG_ISA=avx512ifma|avx512|avx2|scalar`
-and with `RAYON_NUM_THREADS=1` and 16 (H-u; `artifact/expected/hashes.json` pins the 1K
-digest of every set and relation). Times: in-process
+and with `RAYON_NUM_THREADS=1` and 16 (measured under the former default H-u;
+`artifact/expected/hashes.json` pins the 1K digest of every set under H-FIPS and H-exact). Times: in-process
 medians of `agg bench --params P --count 1024 --warmup 1 --reps 2` (1,024 keys; verify with
 uncached and with cached keys):
 

@@ -479,7 +479,7 @@ mod tests {
     fn lane_weights_pull_the_outputs_back_per_row_block() {
         use aerie_falcon::protocol::algebra::{evaluate_mle, lift_table};
         for set in [Set::S65, Set::S87] {
-            let manifest = CommitmentManifest::for_set(set, 5, crate::manifest::Relation::Hu).unwrap();
+            let manifest = CommitmentManifest::for_set(set, 5, crate::manifest::Relation::HExact).unwrap();
             let shape = manifest.shape();
             let psi = test_psi_for(set, 3);
             let mut rng = SplitMix64::new(4);
@@ -516,7 +516,7 @@ mod tests {
         use crate::manifest::{Relation, PROJ_BOUND_39};
         for set in [Set::S65, Set::S87] {
             let shape = SetShape::of(set);
-            let manifest = CommitmentManifest::for_set(set, 5, Relation::Hu).unwrap();
+            let manifest = CommitmentManifest::for_set(set, 5, Relation::HExact).unwrap();
             let records = manifest.padded_records();
             let (positions, blocks, lanes) = (shape.positions, shape.proj_blocks, shape.lanes_k);
             let row_bytes = positions / 8;

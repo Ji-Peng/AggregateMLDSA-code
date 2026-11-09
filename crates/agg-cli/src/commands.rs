@@ -29,7 +29,7 @@ usage: agg <command> [options]
 Every command takes --params 44|65|87, the ML-DSA parameter set (default 44). Key and
 record files of a set are refused by the commands of another set; an aggregate names its
 set, and verify rejects one of another set than --params. The hash field defaults to gf2;
-fp proves the Keccak chain over F_p without Flock.
+fp proves the Keccak chain over F_p without Flock (ML-DSA-44 under --relation h-exact).
 
 commands:
   keygen-batch --count K [--seed S] [--params 44|65|87] --out KEYS
@@ -45,15 +45,15 @@ commands:
       profile P = fast, slim or slim8 (Ligerito rate 1/2, 1/4 or 1/8, all 128-bit in
       Flock's accounting; default fast); with --flock-span on (default) a
       batch of more than one segment in whole-segment parts is one tied part over all
-      segments. Relation R = h-u (default: z in [-2^17, 2^17), |u| <= 190,465), h-exact
-      (the FIPS 204 bounds |z| <= 130,993, |u| <= 190,465) or h-fips (also the hint:
-      the extracted (c~, z, h) is a FIPS 204 signature). For ML-DSA-65 and ML-DSA-87:
-      h-u z in [-2^19, 2^19), |u| <= 523,777; h-exact |z| <= 524,091 resp. 524,167;
-      h-fips also the hint.
+      segments. Relation R = h-fips (default: the FIPS 204 bounds and the hint, so the
+      extracted (c~, z, h) is a FIPS 204 signature) or h-exact (the FIPS 204 bounds
+      |z| <= 130,993, |u| <= 190,465 without the hint; a reference relation, slightly
+      faster). For ML-DSA-65 and ML-DSA-87 h-exact proves |z| <= 524,091 resp. 524,167,
+      |u| <= 523,777.
   verify --records RECORDS --aggregate AGGREGATE [--params 44|65|87] [--cache CACHE]
          [--flock-profile P] [--relation R] [--hash-field gf2|fp]
       Verify the aggregate for the records' (pk, M) (signatures are ignored), under the
-      Flock profile its items name (or only under P), under relation R (default h-u; an
+      Flock profile its items name (or only under P), under relation R (default h-fips; an
       aggregate of another relation is rejected) and for the set of --params. With
       --cache, expanded keys are read from and added to the cache file (one file per
       set). Exit status 0 on accept, 1 on reject.
@@ -69,9 +69,8 @@ commands:
 
 environment:
   AGG_FLOCK_THREADS=K   threads of the pool that proves the Flock parts beside the PIOP
-                        (aggregate, bench; default 3/8 of the rayon pool rounded up, or 7/16
-                        when Flock's GF(2^128) kernels run below AVX-512 — 12 or 14 on a
-                        32-thread host; 0: one after the other; at most the logical CPUs or
+                        (aggregate, bench; default 5/16 of the rayon pool rounded up, 10 on
+                        a 32-thread host; 0: one after the other; at most the logical CPUs or
                         the rayon pool; a value that is not a number warns and falls back to
                         the default).
   AGG_PIOP_S_THREADS=K  threads of the stage branch's own pool beside the Flock fork
@@ -196,11 +195,11 @@ impl Options {
             .transpose()
     }
 
-    /// `--name h-u|h-exact|h-fips`: the relation, H-u when absent.
+    /// `--name h-fips|h-exact`: the relation, H-FIPS when absent.
     fn relation(&mut self, name: &str) -> Result<Relation, String> {
         match self.take(name) {
-            None => Ok(Relation::Hu),
-            Some(v) => Relation::parse(&v).ok_or_else(|| format!("--{name}: h-u, h-exact or h-fips, not {v:?}")),
+            None => Ok(Relation::default()),
+            Some(v) => Relation::parse(&v).ok_or_else(|| format!("--{name}: h-fips or h-exact, not {v:?}")),
         }
     }
 
@@ -1099,10 +1098,12 @@ mod tests {
         assert!(o.hash_field("hash-field").is_err());
         let mut o = Options::parse(&strings(&["--relation", "h-exact"])).unwrap();
         assert_eq!(o.relation("relation"), Ok(Relation::HExact));
-        assert_eq!(o.relation("relation"), Ok(Relation::Hu));
+        assert_eq!(o.relation("relation"), Ok(Relation::HFips));
         let mut o = Options::parse(&strings(&["--relation", "h-fips"])).unwrap();
         assert_eq!(o.relation("relation"), Ok(Relation::HFips));
         let mut o = Options::parse(&strings(&["--relation", "fips"])).unwrap();
+        assert!(o.relation("relation").is_err());
+        let mut o = Options::parse(&strings(&["--relation", "h-u"])).unwrap();
         assert!(o.relation("relation").is_err());
         let mut o = Options::parse(&strings(&["--flock-span", "off", "--x", "maybe"])).unwrap();
         assert_eq!(o.switch("flock-span", true), Ok(false));
