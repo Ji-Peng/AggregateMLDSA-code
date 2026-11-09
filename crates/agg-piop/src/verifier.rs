@@ -185,7 +185,8 @@ pub enum ConfigurationError {
     /// Mode B (public bits) for a parameter set other than ML-DSA-44: its direct bit check
     /// reads ML-DSA-44's six `w_1` bits per coefficient.
     PublicBitsSet(Set),
-    /// The all-prime-field aggregate (`FpKeccak`) for a parameter set other than ML-DSA-44.
+    /// The all-prime-field aggregate (`FpKeccak`) for a parameter set that the calling front
+    /// end does not route through it (this crate's verifier takes every set).
     FpKeccakSet(Set),
 }
 
@@ -211,7 +212,7 @@ impl std::fmt::Display for ConfigurationError {
             ),
             Self::FpKeccakSet(set) => write!(
                 f,
-                "the all-prime-field aggregate is defined for ML-DSA-44 only, not ML-DSA-{}",
+                "the all-prime-field aggregate is not available for ML-DSA-{} here",
                 set.name()
             ),
         }
@@ -946,7 +947,7 @@ fn run(
     })
 }
 
-/// [`run`] for the all-prime-field aggregate (`HashField::Fp`, ML-DSA-44): parse the proof
+/// [`run`] for the all-prime-field aggregate (`HashField::Fp`, every parameter set): parse the proof
 /// as an `Fp` proof, replay the round-1 commitments (`G_main16`, `G_main4`, the seven Keccak
 /// groups), `Psi` and the round-2 commitments (`G_k`, `G_m`), verify the PIOP with the public
 /// `mu` and `c~` tables, and verify one Akita opening of the eleven groups. There is no bridge
@@ -962,12 +963,6 @@ fn run_fp(
     keys: Keys<'_>,
     timings: &mut VerifyTimings,
 ) -> Result<VerifiedAggregate, VerifyError> {
-    let Keys::Rows(cache) = keys else {
-        return Err(VerifyError::Configuration(ConfigurationError::FpKeccakSet(set)));
-    };
-    if set != Set::S44 {
-        return Err(VerifyError::Configuration(ConfigurationError::FpKeccakSet(set)));
-    }
     let mut clock = Lap(Instant::now());
     let proof = AggregateProof::from_bytes_for(proof_bytes, HashField::Fp)?;
     if proof.set != set {
@@ -987,20 +982,20 @@ fn run_fp(
     if records.len() != n || proof.c_tilde.len() != n || proof.c_tilde.iter().any(|c| c.len() != width) {
         return Err(VerifyError::RecordCount);
     }
+    if set != Set::S44 && n < crate::prover::LANE_MIN_RECORDS {
+        return Err(VerifyError::RecordCount);
+    }
     let manifest = CommitmentManifest::for_set_fp(set, n, relation)
         .map_err(|e| VerifyError::Opening(PcsError::Plan(e)))?;
     timings.parse = clock.lap();
 
     let (pcs, prepared) = rayon::join(
         || verifier_for(&manifest),
-        || prepare_public(set, n, records, &proof.c_tilde, Keys::Rows(cache)),
+        || prepare_public(set, n, records, &proof.c_tilde, keys),
     );
     let pcs = pcs.map_err(VerifyError::Opening)?;
     let plan = pcs.plan();
-    let (public, geometry, digest, mu) = prepared?;
-    let Public::Rows(public, mut cache) = public else {
-        unreachable!("ML-DSA-44 is verified on its rows")
-    };
+    let (mut public, geometry, digest, mu) = prepared?;
     timings.public_data = clock.lap();
 
     // The transcript through round 2: no Flock commitments, no bridge seed, no final vectors.
@@ -1035,6 +1030,8 @@ fn run_fp(
         stage2: proof.stage2.clone(),
         stage3: proof.stage3.clone(),
     };
+    // The public Keccak tables: `mu` of the live records (from the public pass of either
+    // layout) and the proof's `c~`; padded records take the set's zero-message digest.
     let keccak_public = KeccakPublicInputs {
         mu: &mu,
         c_tilde: &proof.c_tilde,
@@ -1050,12 +1047,24 @@ fn run_fp(
         &piop,
         &mut transcript,
         timings,
-        |r2, r3, _| {
-            let started = Instant::now();
-            let pass = public.pass(r2, r3, cache.as_deref_mut());
-            pass_window = Some((started, Instant::now()));
-            pass_result = Some((pass.t_time, pass.a_time, pass.expanded));
-            (vec![pass.t_at_r2], vec![pass.ring_weight])
+        |r2, r3, gammas| match &mut public {
+            Public::Rows(public, cache) => {
+                let started = Instant::now();
+                let pass = public.pass(r2, r3, cache.as_deref_mut());
+                pass_window = Some((started, Instant::now()));
+                pass_result = Some((pass.t_time, pass.a_time, pass.expanded));
+                (vec![pass.t_at_r2], vec![pass.ring_weight])
+            }
+            Public::Lanes(public, cache) => {
+                let started = Instant::now();
+                let t = public.t_evaluations(r2);
+                let middle = Instant::now();
+                let w = public.ring_weights_at(r2, r3, gammas, cache.as_deref_mut());
+                let finished = Instant::now();
+                pass_window = Some((started, finished));
+                pass_result = Some((middle - started, finished - middle, public.expanded_keys()));
+                (t, w)
+            }
         },
     );
     clock.0 = verified.stage3_end;

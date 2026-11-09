@@ -447,6 +447,23 @@ fifth polynomial and the projection stack's third column (`docs/h-exact.md` 10.9
 adds `F_e`, and stage 3 adds the H-FIPS checks and reductions: 1,284 coefficients and 406
 opening claims.
 
+ML-DSA-65 and ML-DSA-87 (Section 15) take the same route through `prover::prove_lanes_with_tables_using`
+and `verifier::verify_lanes_timed`. The Keccak domain (`d_K = 10 + d_sig`) is two variables longer
+than the lane main domain, so the stages run `d_stage = d_K` rounds and the lattice instances are
+lifted (`stage::check_terminal` with `rounds - vars` inactive rounds). The lattice weights read
+the last `d_main` coordinates of `r^(2)` and `r^(3)`. `LaneStreamedPublic` supplies `mu`, and the proof
+supplies `c~` (padded records take the set's zero-message digest). Without the six-bit range
+identity, stage 2 claims no bit at `r^(2)`. The bits reach `r^(3)` through `bool_b` and the
+`k_absorb[t, lane]` weights (28 for ML-DSA-65, 36 for ML-DSA-87). Counts (stages 1, 2, 3 and
+opening claims; Keccak claims of stages 1 and 2):
+
+| Set, relation | gamma^(1) | gamma^(2) | gamma^(3) | opening claims | Keccak claims |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 65 H-exact | 721 | 164 | 1,320 | 459 (385 Keccak) | 743 + 516 |
+| 65 H-FIPS | 721 | 164 | 1,351 | 478 (385 Keccak) | 743 + 516 |
+| 87 H-exact | 918 | 218 | 1,711 | 588 (490 Keccak) | 943 + 688 |
+| 87 H-FIPS | 918 | 218 | 1,752 | 613 (490 Keccak) | 943 + 688 |
+
 ## 8. Weight tables (`weights`)
 
 Point conventions (least significant coordinate first): a main point splits as

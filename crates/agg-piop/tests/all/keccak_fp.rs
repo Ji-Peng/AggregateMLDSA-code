@@ -1,7 +1,8 @@
 //! The `HashField::Fp` aggregate (ML-DSA-44): the commit and batched-opening round trip of
 //! the seven Keccak groups (`KeccakA(0..4)`, `KeccakC`, `KeccakCPrime`) with the lattice
 //! groups (`G_main16`, `G_main4`, `G_k`, `G_m`) at `N = 64` and `N = 1024`, the Keccak
-//! instances of stages 1 to 3, and the whole prover and verifier at `N = 8`.
+//! instances of stages 1 to 3, and the whole prover and verifier at `N = 8`; the lane sets
+//! ML-DSA-65 and ML-DSA-87 under both relations at the smallest lane batch and at `N = 32`.
 
 use crate::common::{self, mle_i64, point, Batch};
 
@@ -24,7 +25,7 @@ use agg_piop::transcript::{commitment_site, terminal_site, Transcript, KAPPA1_SI
 use agg_piop::virtual_polys::{compose_table, w1_table, MainValues};
 use agg_piop::{stage1, stage2, BaseField, OpeningField};
 use agg_witness::gen::SplitMix64;
-use agg_witness::params::{Set, K, N as POLY_N, TR_BYTES, W1_BITS, W1_ENCODE_BYTES};
+use agg_witness::params::{ParamSet, Set, Set65, Set87, K, N as POLY_N, TR_BYTES, W1_BITS, W1_ENCODE_BYTES};
 use jolt_field::{ExtField, Ring, Zero};
 
 fn on_large_stack(f: impl FnOnce() + Send + 'static) {
@@ -1337,3 +1338,177 @@ fn round_trip_100() { round_trip(100); }
 
 #[test]
 fn round_trip_1024() { round_trip(1024); }
+
+/// What a lane-set round trip proves besides the honest proof: the tamper cases of
+/// [`lane_round_trip`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LaneTampers {
+    None,
+    All,
+}
+
+/// The all-prime-field aggregate of a set with polynomial lanes (ML-DSA-65, ML-DSA-87) end to
+/// end: the stages run `d_K = d_main + 2` rounds with the lattice instances lifted, the
+/// absorbed `w_1'` bits are bound to the committed lanes by the stage-3 `k_absorb` weights, and
+/// one opening covers the lattice and Keccak groups. With `tampers`, three unchecked proofs are
+/// rejected: a flipped `A'` cell, a flipped committed `w_1'` bit under the honest Keccak trace
+/// (the absorbed block no longer matches the committed bits), and a wrong `c~` byte of the
+/// record list (the output check `k_out` of stage 1).
+fn lane_round_trip<P: ParamSet>(relation: Relation, n_records: usize, seed: u64, tampers: LaneTampers)
+where
+    P::CTilde: Sync,
+{
+    use agg_piop::binding::FlockProfile;
+    use agg_piop::keccak_fp::virtuals::build_keccak_witness;
+    use agg_piop::manifest::HashField;
+    use agg_piop::prover::{
+        prove_lanes_with_tables_using, FpKeccakSide, ProveHooks, ProverInputs, SeededMatrices, LANE_MIN_RECORDS,
+    };
+    use agg_piop::source_tables::MainTables;
+    use agg_piop::verifier::{verify_lanes_timed, FpKeccakVerifier, VerifyError};
+    use agg_piop::wire::AggregateProof;
+    use agg_witness::instance::PublicInstance;
+
+    assert!(n_records >= LANE_MIN_RECORDS);
+    let records = agg_witness::gen::records_for::<P>(seed, n_records);
+    let instance = PublicInstance::<P>::from_records_for(&records).expect("instance");
+    let manifest = CommitmentManifest::for_set_fp(P::SET, n_records, relation).expect("fp manifest");
+    assert_eq!(manifest.d_stage(), manifest.d_main() + 2, "the Keccak domain is two variables longer");
+    let signatures: Vec<&[u8]> = records.iter().map(|r| r.sig.as_slice()).collect();
+    let main = MainTables::build_for::<P>(&manifest, &instance, &signatures).expect("round 1 tables");
+    let inputs: Vec<(&[u8], &[u8], P::CTilde)> = records
+        .iter()
+        .map(|r| (r.pk.as_slice(), r.msg.as_slice(), P::c_tilde_from_slice(&r.sig[..P::C_TILDE_BYTES])))
+        .collect();
+    let prove_with = |inputs: &[(&[u8], &[u8], P::CTilde)], main: &MainTables, hooks: &ProveHooks<'_>| {
+        let prover_inputs = ProverInputs { instance: &instance, records: inputs, signatures: &signatures, relation };
+        prove_lanes_with_tables_using(
+            None,
+            None,
+            &prover_inputs,
+            &manifest,
+            main,
+            &SeededMatrices,
+            &FpKeccakSide,
+            FlockProfile::FpKeccak,
+            hooks,
+        )
+    };
+    let public: Vec<(&[u8], &[u8])> = records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice())).collect();
+    let verify_bytes = |bytes: &[u8]| {
+        verify_lanes_timed(P::SET, &public, bytes, &SeededMatrices, &FpKeccakVerifier, FlockProfile::FpKeccak, relation, None)
+            .outcome
+    };
+
+    let start = std::time::Instant::now();
+    let output = prove_with(&inputs, &main, &ProveHooks::default()).expect("honest Fp prove");
+    let prove_time = start.elapsed();
+    let proof = &output.proof;
+    let bytes = proof.to_bytes();
+    assert_eq!(AggregateProof::from_bytes_for(&bytes, HashField::Fp).expect("Fp parse"), *proof);
+    assert_eq!((proof.keccak_commitments.len(), proof.bridge_commitments.len()), (7, 2));
+    assert!(proof.flock_commitments.is_empty() && proof.final_vectors.is_empty());
+    assert_eq!(output.points.1.len(), manifest.d_stage());
+    assert_eq!(proof.stage1.rounds.len(), manifest.d_stage());
+    let layout = KeccakLayout::for_set(P::SET);
+    let keccak_polys = 35 * layout.slot_groups;
+    assert_eq!(manifest.stage3_polynomials(), proof.stage3.claims.0.len());
+    let gammas = [
+        stage1::gamma_count(&manifest),
+        stage2::gamma_count(&manifest),
+        agg_piop::stage3::Gammas::new(&manifest).count(),
+    ];
+
+    let start = std::time::Instant::now();
+    let verified = verify_bytes(&bytes).expect("the verifier accepts the honest Fp proof");
+    let verify_time = start.elapsed();
+    assert_eq!(verified.records, n_records);
+    assert_eq!(verified.session, output.session);
+    let size = proof.size();
+    eprintln!(
+        "Fp {} {relation} N = {n_records}: gammas {gammas:?}, claims (stage 1 {}, stage 2 {}, opening {} = {keccak_polys} Keccak + {}), \
+         proof {} bytes (commitments {}, lookup {}, PIOP {}, opening {}), prover {prove_time:.2?}, verifier {verify_time:.2?}",
+        P::NAME,
+        proof.stage1.claims.keccak.len(),
+        proof.stage2.claims.keccak.len(),
+        proof.stage3.claims.0.len(),
+        proof.stage3.claims.0.len() - keccak_polys,
+        bytes.len(),
+        size.akita_commitments,
+        size.lookup,
+        size.piop,
+        size.opening,
+    );
+    // The other relation's verifier refuses the proof on its header.
+    let other = match relation {
+        Relation::HExact => Relation::HFips,
+        Relation::HFips => Relation::HExact,
+    };
+    let outcome = verify_lanes_timed(P::SET, &public, &bytes, &SeededMatrices, &FpKeccakVerifier, FlockProfile::FpKeccak, other, None).outcome;
+    assert!(matches!(outcome, Err(VerifyError::Relation { .. })), "{outcome:?}");
+    if tampers == LaneTampers::None {
+        return;
+    }
+    fn unchecked<'a>(tamper: Option<&'a dyn Fn(&mut KeccakTables, &mut KeccakPublics)>) -> ProveHooks<'a> {
+        ProveHooks { unchecked: true, tamper_keccak: tamper, ..ProveHooks::default() }
+    }
+
+    // A flipped A' cell at the first round of the second permutation (a live slot): the
+    // round's link breaks in stage 1.
+    let flip = |t: &mut KeccakTables, _: &mut KeccakPublics| t.flip_a_prime_bit(7, 24, 19, 3);
+    let tampered = prove_with(&inputs, &main, &unchecked(Some(&flip))).expect("unchecked prove of a flipped A' cell");
+    let outcome = verify_bytes(&tampered.proof.to_bytes());
+    assert!(matches!(outcome, Err(VerifyError::Stage(StageError::Terminal(1)))), "flipped A' cell: {outcome:?}");
+
+    // A flipped committed w1 bit (bit 2 of coefficient 5 of row 1, record 3) under the Keccak
+    // trace of the honest bits: the chain and its output still match c~, so stages 1 and 2
+    // pass, and stage 3 rejects (the absorbed block differs from the committed bits in
+    // `k_absorb`; the ring identity reads the flipped bit as well).
+    let mu: Vec<[u8; TR_BYTES]> = instance.records.iter().map(|r| r.mu).collect();
+    let (honest_tables, honest_publics) = build_keccak_witness(&manifest, &main, &mu);
+    let mut flipped = main.clone();
+    let shape = manifest.shape();
+    let (lane, base) = shape.row_lane(1);
+    let (_, pos) = manifest.locate(Column::W1Bit(2, lane as u8));
+    flipped.columns_mut()[pos][3 * manifest.lane_cells() + base + 5] ^= 1;
+    let restore = |t: &mut KeccakTables, p: &mut KeccakPublics| {
+        *t = honest_tables.clone();
+        *p = honest_publics.clone();
+    };
+    let tampered = prove_with(&inputs, &flipped, &unchecked(Some(&restore))).expect("unchecked prove of a flipped w1 bit");
+    let outcome = verify_bytes(&tampered.proof.to_bytes());
+    assert!(matches!(outcome, Err(VerifyError::Stage(StageError::Terminal(3)))), "flipped w1 bit: {outcome:?}");
+
+    // A wrong c~ byte of record 3 in the record list, proven over the honest witness: the
+    // verifier's c~ table differs from the chain's output in one byte.
+    let mut wrong = inputs.clone();
+    wrong[3].2.as_mut()[5] ^= 0x10;
+    let tampered = prove_with(&wrong, &main, &unchecked(None)).expect("unchecked prove of a wrong c~");
+    let outcome = verify_lanes_timed(P::SET, &public, &tampered.proof.to_bytes(), &SeededMatrices, &FpKeccakVerifier, FlockProfile::FpKeccak, relation, None).outcome;
+    assert!(matches!(outcome, Err(VerifyError::Stage(StageError::Terminal(1)))), "wrong c~ byte: {outcome:?}");
+}
+
+#[test]
+fn lane_round_trip_65_hexact_17() {
+    on_large_stack(|| lane_round_trip::<Set65>(Relation::HExact, 17, 0x65f, LaneTampers::None));
+}
+
+#[test]
+fn lane_round_trip_65_hfips_17() {
+    on_large_stack(|| lane_round_trip::<Set65>(Relation::HFips, 17, 0x65f, LaneTampers::None));
+}
+
+#[test]
+fn lane_round_trip_87_hexact_17() {
+    on_large_stack(|| lane_round_trip::<Set87>(Relation::HExact, 17, 0x87f, LaneTampers::None));
+}
+
+#[test]
+fn lane_round_trip_87_hfips_17_and_tampers() {
+    on_large_stack(|| lane_round_trip::<Set87>(Relation::HFips, 17, 0x87f, LaneTampers::All));
+}
+
+#[test]
+fn lane_round_trip_65_hfips_32() {
+    on_large_stack(|| lane_round_trip::<Set65>(Relation::HFips, 32, 0x65e, LaneTampers::None));
+}

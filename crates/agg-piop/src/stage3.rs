@@ -76,8 +76,8 @@ use crate::lookup::LookupClaims;
 use crate::manifest::{value_columns, Column, CommitmentManifest, FipsColumn, GroupRole, HashField, LOOKUP_SHIFT, V16_DIGITS};
 use crate::range::digits;
 use crate::stage::{
-    check_terminal, draw_gammas, prove_stage, prove_stage_drawn, prove_stage_unchecked, replay_stage, EqPoint,
-    GroupSpec, InstanceSpec, LaneId, Points, StageError, StageSpec, WeightId,
+    check_terminal, draw_gammas, prove_stage, prove_stage_drawn, prove_stage_unchecked, replay_stage, suffix,
+    EqPoint, GroupSpec, InstanceSpec, LaneId, Points, StageError, StageSpec, WeightId,
 };
 use crate::stage1::Stage1Output;
 use crate::stage2::Stage2Output;
@@ -988,12 +988,15 @@ fn prove_with(
                 RingInputs::Lanes { public, .. } => {
                     let rows = Gammas::new(manifest);
                     let row_gammas: Vec<E> = (0..rows.rings).map(|rho| gammas[rows.ring(rho)]).collect();
+                    // `w_A` lives on the main domain: the last `d_main` coordinates of `r^(2)`
+                    // (all of them unless the Keccak domain is longer).
+                    let r2 = suffix(&points.r2, manifest.d_main());
                     // The plane-layout kernels read the weights as canonical planes, built in
                     // place; the row layout reads one `K` table per column.
                     Some(if crate::kernel::layout() == crate::kernel::Layout::Plane {
-                        RingWeights::Planes(public.ring_weight_planes(&points.r2, &row_gammas), public.padded_records() * N)
+                        RingWeights::Planes(public.ring_weight_planes(&r2, &row_gammas), public.padded_records() * N)
                     } else {
-                        RingWeights::Rows(public.ring_weight_tables(&points.r2, &row_gammas))
+                        RingWeights::Rows(public.ring_weight_tables(&r2, &row_gammas))
                     })
                 }
             };
@@ -1090,7 +1093,10 @@ pub(crate) fn verify_streamed(
     }
     transcript.absorb_extensions(&terminal_site(STAGE), &proof.claims.0)?;
     let row_gammas: Vec<E> = (0..gammas.rings).map(|rho| replay.gammas[gammas.ring(rho)]).collect();
-    let (t_at_r2, ring_weights) = public_pass(&stage2.point, &replay.point, &row_gammas);
+    // The public lattice tables live on the main domain: the last `d_main` coordinates of the
+    // stage points (all of them unless the Keccak domain is longer).
+    let (r2_main, r3_main) = (suffix(&stage2.point, manifest.d_main()), suffix(&replay.point, manifest.d_main()));
+    let (t_at_r2, ring_weights) = public_pass(&r2_main, &r3_main, &row_gammas);
     let lanes_l = manifest.shape().lanes_l;
     if t_at_r2.len() != gammas.rings || ring_weights.len() != lanes_l {
         return Err(StageError::Internal("public pass shape".into()));
@@ -1099,9 +1105,9 @@ pub(crate) fn verify_streamed(
     let deferred = row_gammas.iter().zip(&t_at_r2).fold(E::zero(), |acc, (&g, &t)| acc + g * t);
     replay.final_claim += deferred * slope;
     let proj_weights = if manifest.has_lanes() {
-        crate::projection::lane_weights_at(manifest, psi, &stage2.point, &replay.point)
+        crate::projection::lane_weights_at(manifest, psi, &r2_main, &r3_main)
     } else {
-        vec![crate::projection::weight_at(manifest, psi, &stage2.point, &replay.point)]
+        vec![crate::projection::weight_at(manifest, psi, &r2_main, &r3_main)]
     };
     let keccak_values = keccak.as_ref().map(|k| {
         crate::stage1::timed_keccak_terminal(|| {

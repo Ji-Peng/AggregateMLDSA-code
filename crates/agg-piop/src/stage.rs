@@ -513,7 +513,7 @@ pub fn prove_stage_drawn<'a>(
     transcript: &mut Transcript,
     check: bool,
 ) -> Result<StageRun, StageError> {
-    let rounds = manifest.d_main();
+    let rounds = manifest.d_stage();
     // Buffers of the plane groups of this stage.
     let mut pool = agg_simd::buf::Pool::default();
     let mut groups = Vec::with_capacity(spec.groups.len());
@@ -1701,7 +1701,7 @@ pub fn replay_stage(
     if claims.len() != spec.gamma_count {
         return Err(StageError::Internal("one claim per gamma".into()));
     }
-    let rounds = manifest.d_main();
+    let rounds = manifest.d_stage();
     if messages.len() != rounds || messages.iter().any(|m| m.len() != spec.degree) {
         return Err(StageError::Shape(format!("stage {} rounds", spec.stage)));
     }
@@ -1732,7 +1732,7 @@ pub fn check_terminal(
     replay: &StageReplay,
     resolve: impl Fn(LaneId) -> E,
 ) -> Result<(), StageError> {
-    let rounds = manifest.d_main();
+    let rounds = manifest.d_stage();
     let mut expected = E::zero();
     for group in &spec.groups {
         let vars = manifest.group(group.domain).logical_vars;

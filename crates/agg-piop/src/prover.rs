@@ -1226,7 +1226,8 @@ fn prove_stages_branch<'a>(
         }
         PiopPublic::Lanes(public) => {
             prover_tables.drop_level1();
-            public.t_evaluations(&points.r2)
+            // `T~_rho` lives on the main domain, the last `d_main` coordinates of `r^(2)`.
+            public.t_evaluations(&suffix(&points.r2, manifest.d_main()))
         }
     };
     prover_tables.set_projection(psi, &points.r2);
@@ -1506,7 +1507,7 @@ pub fn prove_with_tables_using(
     }
     let public = public.unwrap_or_else(|| PublicData::from_instance(inputs.instance));
     if manifest.hash_field() == HashField::Fp {
-        return prove_core_fp(total, committer, &public, inputs, manifest, main, keccak, flock, hooks);
+        return prove_core_fp(total, committer, PiopPublic::Rows(&public), inputs, manifest, main, keccak, flock, hooks);
     }
     prove_core(
         total,
@@ -1524,7 +1525,8 @@ pub fn prove_with_tables_using(
 
 /// [`prove_with_tables_using`] for a parameter set with polynomial lanes (ML-DSA-65,
 /// ML-DSA-87): the public data is the instance's [`LanePublicData`] (built here unless
-/// given), the bridge matrices are the set's ([`BridgeDerivation::matrices_for`]).
+/// given), the bridge matrices are the set's ([`BridgeDerivation::matrices_for`]). Under
+/// `HashField::Fp` the Keccak chain is proven in the PIOP as for ML-DSA-44 ([`prove_core_fp`]).
 #[allow(clippy::too_many_arguments)]
 pub fn prove_lanes_with_tables_using<P: ParamSet>(
     committer: Option<TableCommitter>,
@@ -1548,9 +1550,6 @@ where
     if manifest.records() != n || main.geometry().n != n || manifest.set() != P::SET {
         return Err(ProveError::Internal("tables and records differ".into()));
     }
-    if manifest.hash_field() != HashField::Gf2 {
-        return Err(ProveError::Internal("the Fp aggregate covers ML-DSA-44 only".into()));
-    }
     if n < LANE_MIN_RECORDS {
         return Err(ProveError::Internal(format!(
             "{} batches hold at least {LANE_MIN_RECORDS} records",
@@ -1558,10 +1557,29 @@ where
         )));
     }
     check_bridge(bridge, flock)?;
+    if !flock.matches_hash_field(manifest.hash_field()) {
+        return Err(ProveError::Internal(format!(
+            "Keccak-side profile {flock:?} under hash field {:?}",
+            manifest.hash_field()
+        )));
+    }
     let public = match public {
         Some(public) if public.set() == P::SET && public.records() == n => public,
         _ => LanePublicData::from_instance(inputs.instance),
     };
+    if manifest.hash_field() == HashField::Fp {
+        return prove_core_fp(
+            total,
+            committer,
+            PiopPublic::Lanes(&public),
+            inputs,
+            manifest,
+            main,
+            keccak,
+            flock,
+            hooks,
+        );
+    }
     prove_core(
         total,
         committer,
@@ -1875,19 +1893,21 @@ fn prove_core<C: AsRef<[u8]> + Sync>(
     })
 }
 
-/// The prover under `HashField::Fp` (ML-DSA-44): the Keccak chain of every record is proven
-/// in the PIOP beside the lattice relation, and one Akita opening covers both. Round 1
+/// The prover under `HashField::Fp` (every parameter set): the Keccak chain of every record
+/// is proven in the PIOP beside the lattice relation, and one Akita opening covers both. With
+/// polynomial lanes (ML-DSA-65, ML-DSA-87) the Keccak domain has two variables more than the
+/// main domain, so the stages run `d_K` rounds and the lattice instances are lifted. Round 1
 /// commits `G_main16`, `G_main4` and the seven Keccak groups; `Psi` follows (no bridge
 /// seed); round 2 commits `G_k` and `G_m`; the lookup and stages 1 to 3 read the Keccak
 /// tables; the opening adds the Keccak claims at the `d_K` suffix of `r^(3)`. There are no
 /// Flock items and no final vectors, so nothing runs beside the PIOP. `total` is the
 /// caller's start.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-fn prove_core_fp(
+fn prove_core_fp<P: ParamSet>(
     total: Instant,
     committer: Option<TableCommitter>,
-    public: &PublicData,
-    inputs: &ProverInputs<'_>,
+    public: PiopPublic<'_>,
+    inputs: &ProverInputs<'_, P>,
     manifest: &CommitmentManifest,
     main: &MainTables,
     keccak: &impl KeccakSide,
@@ -1972,7 +1992,7 @@ fn prove_core_fp(
         tables,
         Some(prover_tables),
         &no_bridge,
-        PiopPublic::Rows(public),
+        public,
         &mut transcript,
         hooks.unchecked,
         hooks.swap_join,
@@ -2016,7 +2036,7 @@ fn prove_core_fp(
         relation: manifest.relation(),
         records: n,
         hash_field: HashField::Fp,
-        c_tilde: records.iter().map(|r| r.2.to_vec()).collect(),
+        c_tilde: records.iter().map(|r| r.2.as_ref().to_vec()).collect(),
         main16_commitment,
         main_commitment,
         keccak_commitments,
