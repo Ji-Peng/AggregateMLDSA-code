@@ -395,4 +395,43 @@ mod tests {
             assert_eq!(seen.len(), layout.k * 256 * layout.w1_bits, "{set:?}");
         }
     }
+    /// Every lane id of the stage-1 and stage-2 specs reads the same cells from the packed
+    /// words as from the expanded `i8` tables, for 8 and 64 records of every set.
+    #[test]
+    fn fp_bits_lanes_match_i8() {
+        let mut rng = SplitMix64::new(0xB175_1A9E);
+        for set in Set::ALL {
+            for n in [8, 64] {
+                let manifest = CommitmentManifest::for_set_fp(set, n, Relation::default()).unwrap();
+                let layout = KeccakLayout::for_set(set);
+                let n_star = manifest.padded_records();
+                let records: Vec<([u8; TR_BYTES], Vec<u8>)> = (0..n)
+                    .map(|_| {
+                        let mu: [u8; TR_BYTES] = std::array::from_fn(|_| rng.next_u64() as u8);
+                        (mu, (0..layout.w1_encode_bytes).map(|_| rng.next_u64() as u8).collect())
+                    })
+                    .collect();
+                let witness = std::sync::Arc::new(KeccakTables::build(&layout, &records, n_star));
+                let publics = KeccakPublics::from_records(&layout, &records, n_star);
+                let wide = KeccakProverTables::build_shared(&witness, &publics, false);
+                let packed = KeccakProverTables::build_shared(&witness, &publics, true);
+                let ids: HashSet<LaneId> = [stage1_groups(&manifest, 0).0, stage2_groups(&manifest, 0).0]
+                    .iter()
+                    .flatten()
+                    .flat_map(|g| g.lanes.iter().copied())
+                    .collect();
+                let mut packed_lanes = 0;
+                for id in ids {
+                    let (a, b) = (wide.lane(id).expect("Keccak lane"), packed.lane(id).expect("Keccak lane"));
+                    packed_lanes += usize::from(matches!(b, crate::kernel::Lane::Source(crate::kernel::Source::Bits(_))));
+                    assert_eq!(a.len(), b.len(), "{set:?} {n} {id:?}");
+                    assert_eq!(a.len(), 1024 * n_star);
+                    for cell in 0..a.len() {
+                        assert_eq!(a.value(cell), b.value(cell), "{set:?} {n} {id:?} cell {cell}");
+                    }
+                }
+                assert!(packed_lanes > 0, "{set:?} {n}: the packed source serves the committed lanes");
+            }
+        }
+    }
 }

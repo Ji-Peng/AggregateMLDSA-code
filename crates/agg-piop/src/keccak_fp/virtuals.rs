@@ -1,6 +1,8 @@
 //! Prover-side virtual lane materialization, polynomial constraint terms, and verifier-side
 //! public multilinear evaluators for the prime-field Keccak sum-check instances.
 
+use std::sync::{Arc, OnceLock};
+
 use aerie_falcon::protocol::algebra::eq_table;
 use agg_fpkeccak::{
     lane, lane_xy, rot, xor2, Absorbed, KeccakLayout, KeccakPublics, KeccakTables, COLS, LANES,
@@ -12,9 +14,9 @@ use jolt_field::Zero;
 use rayon::prelude::*;
 
 use crate::keccak_fp::masks::{boundary_slot_groups, output_rot_columns, t0_w1_lanes};
-use crate::kernel::{Lane, Term};
-use crate::manifest::{Column, CommitmentManifest, GroupRole};
-use crate::source_tables::{Cells, MainTables};
+use crate::kernel::{BitCells, Lane, SlotShift, Term};
+use crate::manifest::{Column, CommitmentManifest};
+use crate::source_tables::MainTables;
 use crate::stage::LaneId;
 use crate::OpeningField as E;
 
@@ -199,13 +201,30 @@ pub fn extract_keccak_records(
     out
 }
 
-/// Expanded `i8` columns for the committed and virtual Keccak tables of one batch.
+/// Whether the stage kernels read the committed Keccak columns, their rotations and their
+/// slot shifts from the packed words (`AGG_KECCAK_SOURCE=bits`, the default) or from
+/// expanded `i8` copies (`AGG_KECCAK_SOURCE=i8`, kept for A/B runs). Read once.
+#[must_use]
+pub fn keccak_source_bits() -> bool {
+    static BITS: OnceLock<bool> = OnceLock::new();
+    *BITS.get_or_init(|| {
+        std::env::var("AGG_KECCAK_SOURCE").map_or(true, |v| !v.trim().eq_ignore_ascii_case("i8"))
+    })
+}
+
+/// The committed and virtual Keccak tables of one batch. Under the packed source the
+/// committed columns, the rotations of `C` and of the output `A'` columns other than
+/// `(0, 0)`, and every `Prev` lane are read from the packed words; the lanes that add a round
+/// constant and the public tables are expanded `i8` tables either way.
 #[derive(Clone, Debug)]
 pub struct KeccakProverTables {
     layout: KeccakLayout,
     n_star: usize,
     cells_per_poly: usize,
-    /// Expanded `i8` cells of all `layout.num_polys()` committed polynomials (`A'`, `C`, `C'`).
+    /// The packed words, when the kernels read them (no cell overrides).
+    packed: Option<Arc<KeccakTables>>,
+    /// Expanded `i8` cells of all `layout.num_polys()` committed polynomials (`A'`, `C`, `C'`);
+    /// empty under the packed source.
     committed: Vec<i8>,
     /// `Rot(C[x, q])`: `C[x, q]` rotated by 1 bit in `z` (`(z - 1) mod 64`), indexed by `x * Q + q`.
     c_rot: Vec<Vec<i8>>,
@@ -235,18 +254,49 @@ impl KeccakProverTables {
     /// `publics`.
     #[must_use]
     pub fn build(tables: &KeccakTables, publics: &KeccakPublics) -> Self {
+        Self::build_from(tables, None, publics)
+    }
+
+    /// [`Self::build`] that, when `bits` holds, keeps a reference to the packed `tables` and
+    /// expands only the lanes that add a round constant and the public tables. Tables with
+    /// non-Boolean cell overrides take the `i8` path, which alone can hold such cells.
+    #[must_use]
+    pub fn build_shared(tables: &Arc<KeccakTables>, publics: &KeccakPublics, bits: bool) -> Self {
+        let packed = (bits && !tables.has_overrides()).then(|| Arc::clone(tables));
+        Self::build_from(tables, packed, publics)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn build_from(
+        tables: &KeccakTables,
+        packed: Option<Arc<KeccakTables>>,
+        publics: &KeccakPublics,
+    ) -> Self {
         let layout = tables.layout().clone();
         let n_star = tables.n_star();
         let q_count = layout.slot_groups;
         let cells_per_poly = RECORD_CELLS_PER_POLY * n_star;
-        let committed = tables.expand_i8(0..layout.num_polys());
+        let bits = packed.is_some();
+        let committed =
+            if bits { Vec::new() } else { tables.expand_i8(0..layout.num_polys()) };
+        // The cells of a lane given by its words `word(w)`, `w in 0..16 n_star`.
+        let expand_words = |word: &dyn Fn(usize) -> u64| -> Vec<i8> {
+            let mut out = vec![0_i8; cells_per_poly];
+            for (w, cells) in out.chunks_exact_mut(LANE_BITS).enumerate() {
+                let word = word(w);
+                for (z, cell) in cells.iter_mut().enumerate() {
+                    *cell = ((word >> z) & 1) as i8;
+                }
+            }
+            out
+        };
 
         let poly_slice = |poly: usize| -> &[i8] {
             &committed[poly * cells_per_poly..(poly + 1) * cells_per_poly]
         };
 
         // 1. C rotated by 1 in z: C[x, q]((z - 1) mod 64, s, i).
-        let c_rot: Vec<Vec<i8>> = (0..COLS * q_count)
+        let c_rot: Vec<Vec<i8>> = (0..if bits { 0 } else { COLS * q_count })
             .into_par_iter()
             .map(|idx| {
                 let (x, q) = (idx / q_count, idx % q_count);
@@ -272,6 +322,16 @@ impl KeccakProverTables {
                     unreachable!("output_rot_columns returns KeccakA")
                 };
                 let (x, y, q) = (usize::from(x), usize::from(y), usize::from(q));
+                if bits {
+                    // `(0, 0)` adds the last round constant at the output slot, so it stays
+                    // an expanded table; the other lanes are read rotated from the words.
+                    if (x, y) != (0, 0) {
+                        return Vec::new();
+                    }
+                    let words = tables.poly_words(layout.a_prime_poly(0, 0, q));
+                    let rc = RC[ROUNDS_PER_PERM - 1];
+                    return expand_words(&|w| words[w] ^ if w % SLOTS == s_out { rc } else { 0 });
+                }
                 let src = poly_slice(layout.a_prime_poly(x, y, q));
                 let mut out = vec![0_i8; cells_per_poly];
                 if (x, y) == (0, 0) {
@@ -300,7 +360,7 @@ impl KeccakProverTables {
             .collect();
 
         // 3. Prev[(x, y), q]: Rot(A') shifted by 1 slot (s - 1, or s = 15 of q - 1 when s = 0).
-        let a_prev: Vec<Vec<i8>> = (0..LANES * q_count)
+        let a_prev: Vec<Vec<i8>> = (0..if bits { 0 } else { LANES * q_count })
             .into_par_iter()
             .map(|idx| {
                 let (l, q) = (idx / q_count, idx % q_count);
@@ -335,17 +395,25 @@ impl KeccakProverTables {
         let a_prev_iota: Vec<Vec<i8>> = (0..q_count)
             .into_par_iter()
             .map(|q| {
+                let rc_at = |s: usize| {
+                    let t = layout.time(q, s);
+                    if t >= 1 && t < layout.rounds { RC[(t - 1) % ROUNDS_PER_PERM] } else { 0 }
+                };
+                if bits {
+                    let cur = tables.poly_words(layout.a_prime_poly(0, 0, q));
+                    let prev = match q {
+                        0 => SlotShift::Zero,
+                        _ => SlotShift::Prev(tables.poly_words(layout.a_prime_poly(0, 0, q - 1))),
+                    };
+                    let prev = BitCells::new(cur, 0, prev);
+                    return expand_words(&|w| prev.word(w) ^ rc_at(w % SLOTS));
+                }
                 let src = &a_prev[lane(0, 0) * q_count + q];
                 let mut out = vec![0_i8; cells_per_poly];
                 for i in 0..n_star {
                     for s in 0..SLOTS {
                         let base = (i * SLOTS + s) * LANE_BITS;
-                        let t = layout.time(q, s);
-                        let rc = if t >= 1 && t < layout.rounds {
-                            RC[(t - 1) % ROUNDS_PER_PERM]
-                        } else {
-                            0
-                        };
+                        let rc = rc_at(s);
                         for z in 0..LANE_BITS {
                             let prev_val = i64::from(src[base + z]);
                             let rc_bit = ((rc >> z) & 1) as i64;
@@ -444,6 +512,7 @@ impl KeccakProverTables {
             layout,
             n_star,
             cells_per_poly,
+            packed,
             committed,
             c_rot,
             a_rot_out_cols,
@@ -473,10 +542,9 @@ impl KeccakProverTables {
         self.n_star
     }
 
-    /// The `i8` cells of a committed Keccak column (`KeccakA`, `KeccakC`, `KeccakCPrime`).
-    #[must_use]
-    pub fn column_slice(&self, column: Column) -> &[i8] {
-        let poly = match column {
+    /// The polynomial index of a committed Keccak column (`KeccakA`, `KeccakC`, `KeccakCPrime`).
+    fn poly(&self, column: Column) -> usize {
+        match column {
             Column::KeccakA { x, y, q } => {
                 self.layout.a_prime_poly(usize::from(x), usize::from(y), usize::from(q))
             }
@@ -485,28 +553,18 @@ impl KeccakProverTables {
                 self.layout.c_prime_poly(usize::from(x), usize::from(q))
             }
             other => panic!("{other:?} is not a Keccak column"),
-        };
-        &self.committed[poly * self.cells_per_poly..(poly + 1) * self.cells_per_poly]
+        }
     }
 
-    /// The `Cells::Narrow` views of one Keccak commitment group (`KeccakA(y)`, `KeccakC`,
-    /// `KeccakCPrime`) in manifest order.
+    /// The `i8` cells of a committed Keccak column (`KeccakA`, `KeccakC`, `KeccakCPrime`).
+    ///
+    /// # Panics
+    /// Under the packed source, which keeps no `i8` copy.
     #[must_use]
-    pub fn group_cells(&self, role: GroupRole) -> Vec<Cells<'_>> {
-        let group_idx = match role {
-            GroupRole::KeccakA(y) => usize::from(y),
-            GroupRole::KeccakC => 5,
-            GroupRole::KeccakCPrime => 6,
-            other => panic!("{other:?} is not a Keccak group"),
-        };
-        let range = self.layout.group_poly_range(group_idx);
-        range
-            .map(|poly| {
-                Cells::Narrow(
-                    &self.committed[poly * self.cells_per_poly..(poly + 1) * self.cells_per_poly],
-                )
-            })
-            .collect()
+    pub fn column_slice(&self, column: Column) -> &[i8] {
+        assert!(self.packed.is_none(), "the packed Keccak source keeps no i8 columns");
+        let poly = self.poly(column);
+        &self.committed[poly * self.cells_per_poly..(poly + 1) * self.cells_per_poly]
     }
 
     /// The `i8` cells of `LaneId::KeccakRot(column)`.
@@ -580,12 +638,46 @@ impl KeccakProverTables {
     /// Kernel [`Lane`] for a committed Keccak column.
     #[must_use]
     pub fn column_lane(&self, column: Column) -> Lane<'_> {
-        Lane::column(self.column_slice(column))
+        self.lane(LaneId::Column(column)).expect("a Keccak column")
+    }
+
+    /// The packed view of a lane that is a committed column, a rotation of one without a
+    /// round constant, or a `Prev` lane (`None` for the others).
+    fn bit_cells<'a>(&self, packed: &'a KeccakTables, id: LaneId) -> Option<BitCells<'a>> {
+        let words = |poly: usize| packed.poly_words(poly);
+        let (poly, rot_by, shift) = match id {
+            LaneId::Column(
+                column @ (Column::KeccakA { .. }
+                | Column::KeccakC { .. }
+                | Column::KeccakCPrime { .. }),
+            ) => (self.poly(column), 0, SlotShift::None),
+            // `C` rotated by 1 in `z`: cell `z` reads bit `(z - 1) mod 64`.
+            LaneId::KeccakRot(column @ Column::KeccakC { .. }) => (self.poly(column), 1, SlotShift::None),
+            LaneId::KeccakRot(column @ Column::KeccakA { x, y, .. }) if (x, y) != (0, 0) => {
+                (self.poly(column), rot(usize::from(x), usize::from(y)), SlotShift::None)
+            }
+            // `Rot(A')` one slot back: slot 0 reads slot 15 of the previous slot group.
+            LaneId::KeccakPrev(column @ Column::KeccakA { x, y, q }) => {
+                let (ux, uy) = (usize::from(x), usize::from(y));
+                let shift = match q {
+                    0 => SlotShift::Zero,
+                    _ => SlotShift::Prev(words(self.layout.a_prime_poly(ux, uy, usize::from(q) - 1))),
+                };
+                (self.poly(column), rot(ux, uy), shift)
+            }
+            _ => return None,
+        };
+        Some(BitCells::new(words(poly), rot_by, shift))
     }
 
     /// Kernel [`Lane`] for a committed or virtual Keccak table (`None` for non-Keccak ids).
     #[must_use]
     pub fn lane(&self, id: LaneId) -> Option<Lane<'_>> {
+        if let Some(packed) = self.packed.as_deref() {
+            if let Some(cells) = self.bit_cells(packed, id) {
+                return Some(Lane::bits(cells));
+            }
+        }
         let cells = match id {
             LaneId::Column(
                 column @ (Column::KeccakA { .. }

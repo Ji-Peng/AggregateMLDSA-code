@@ -710,14 +710,15 @@ fn affine_at(lanes: &[(Source<'_>, i64)], constant: i64, x: usize) -> i64 {
         acc + c * match lane {
             Source::Ints(cells) => i64::from(cells[x]),
             Source::Bytes { cells, map } => map[cells[x] as u8 as usize],
+            Source::Bits(cells) => cells.bit(x),
             _ => unreachable!("integer lanes only"),
         }
     })
 }
 
 /// `gamma sum_x w(x) (sum_l c_l f_l(x) + c)` for a weight `w` kept as its factors
-/// ([`RankOneWeight`]) and integer or byte lanes `f_l`, without an equality factor (prover
-/// only). With `g = sum_l c_l f_l + c` the sum is `sum_lo low[lo] D[lo]`,
+/// ([`RankOneWeight`]) and integer, byte or bit-packed lanes `f_l`, without an equality
+/// factor (prover only). With `g = sum_l c_l f_l + c` the sum is `sum_lo low[lo] D[lo]`,
 /// `D[lo] = sum_hi high[hi] g(lo, hi)`, so the first `z` rounds run on the two `2^z` tables
 /// `low, D`; the remaining rounds run on the weight `low(r_low) high` and the lanes folded by
 /// the low challenges, with the original instance. Round polynomials are unique, so the
@@ -746,8 +747,8 @@ pub struct RankOneGroup<'a> {
 impl<'a> RankOneGroup<'a> {
     /// The group for the weight `weight` at group lane `weight_lane`, the group's `lanes`
     /// (the weight's entry is ignored) and one instance with one affine term weighted by
-    /// that lane. `None` when the shape is not that, a lane is not an integer or byte table
-    /// of `2^rounds` cells, a factor is not a power of two of at least two entries, or the
+    /// that lane. `None` when the shape is not that, a lane is not an integer, byte or
+    /// bit-packed table of `2^rounds` cells, a factor is not a power of two of at least two entries, or the
     /// integer combination may leave `i64` (coefficients above `2^20`, a constant above
     /// `2^40`).
     #[must_use]
@@ -782,7 +783,9 @@ impl<'a> RankOneGroup<'a> {
                 continue;
             }
             match lane {
-                Lane::Source(source @ (Source::Ints(_) | Source::Bytes { .. })) if source.len() == rows => {
+                Lane::Source(source @ (Source::Ints(_) | Source::Bytes { .. } | Source::Bits(_)))
+                    if source.len() == rows =>
+                {
                     others.push(*source);
                 }
                 _ => return None,
@@ -927,6 +930,7 @@ impl<'a> RankOneGroup<'a> {
                     Source::Bytes { cells, map } => {
                         agg_simd::eval::column_at(&agg_simd::eval::Mapped { cells, map }, first, second)
                     }
+                    Source::Bits(cells) => agg_simd::eval::column_at(cells, first, second),
                     _ => unreachable!("integer lanes only"),
                 }
             })

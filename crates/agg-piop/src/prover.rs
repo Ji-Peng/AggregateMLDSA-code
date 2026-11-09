@@ -20,7 +20,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use agg_fpkeccak::{KeccakPublics, KeccakTables};
@@ -33,7 +33,7 @@ use jolt_field::Zero;
 use crate::binding::{instance_record, public_records_binding, FlockProfile};
 use crate::claims::{MultiplicityClaims, PreStageClaims};
 use crate::lookup::{prove_in, LookupError, LookupProof, LookupShape, Table};
-use crate::keccak_fp::virtuals::{build_keccak_witness, KeccakProverTables};
+use crate::keccak_fp::virtuals::{build_keccak_witness, keccak_source_bits, KeccakProverTables};
 use crate::manifest::{
     CommitmentManifest, GroupRole, HashField, Relation, GROUP_COUNT, LOOKUP_CHALLENGES,
 };
@@ -1941,13 +1941,15 @@ fn prove_core_fp<P: ParamSet>(
     if let Some(tamper) = hooks.tamper_keccak {
         tamper(&mut keccak_tables, &mut keccak_publics);
     }
-    let keccak_prover = KeccakProverTables::build(&keccak_tables, &keccak_publics);
+    let keccak_tables = Arc::new(keccak_tables);
+    let keccak_prover = KeccakProverTables::build_shared(&keccak_tables, &keccak_publics, keccak_source_bits());
     drop(keccak_publics);
     timings.keccak = clock.lap();
 
     // Round 1: the lattice groups, then the Keccak groups, absorbed in group order; then Psi.
     let [main16_round1, main_round1] = committer.commit_round1(main)?;
     let keccak_round1 = committer.commit_keccak(&keccak_tables)?;
+    // Under the packed source `keccak_prover` keeps the words alive until stage 3 ends.
     drop(keccak_tables);
     let main16_commitment = main16_round1.serialized()?;
     let main_commitment = main_round1.serialized()?;
