@@ -2,6 +2,7 @@
 # Cells run with --warmup 1 --reps N, split into `processes` chunks that
 # are launched round-robin across tiers. The runs below are executed in the order
 # the paper reports them, covering ML-DSA-44, ML-DSA-65 and ML-DSA-87.
+# Every group runs H-FIPS except the opt-in `relations` groups (H-exact).
 
 mode = "full"
 
@@ -14,7 +15,7 @@ params = "44"
 configs = ["ifma", "avx512", "avx2"]
 allocations = ["16C32T", "8C16T"]
 sizes = [32768]
-relation = "h-u"
+relation = "h-fips"
 warmup = 1
 reps = 5
 processes = 1
@@ -26,7 +27,7 @@ params = "65"
 configs = ["ifma", "avx512", "avx2"]
 allocations = ["16C32T", "8C16T"]
 sizes = [32768]
-relation = "h-u"
+relation = "h-fips"
 warmup = 1
 reps = 5
 processes = 1
@@ -38,7 +39,7 @@ params = "87"
 configs = ["ifma", "avx512", "avx2"]
 allocations = ["16C32T", "8C16T"]
 sizes = [32768]
-relation = "h-u"
+relation = "h-fips"
 warmup = 1
 reps = 5
 processes = 1
@@ -50,7 +51,7 @@ params = "44"
 configs = ["ifma", "avx512", "avx2"]
 allocations = ["1T"]
 sizes = [32768]
-relation = "h-u"
+relation = "h-fips"
 warmup = 1
 reps = 5
 processes = 2
@@ -62,7 +63,7 @@ params = "65"
 configs = ["ifma", "avx512", "avx2"]
 allocations = ["1T"]
 sizes = [32768]
-relation = "h-u"
+relation = "h-fips"
 warmup = 1
 reps = 5
 processes = 2
@@ -74,12 +75,14 @@ params = "87"
 configs = ["ifma", "avx512", "avx2"]
 allocations = ["1T"]
 sizes = [32768]
-relation = "h-u"
+relation = "h-fips"
 warmup = 1
 reps = 5
 processes = 2
 
-# Relations (H-u, H-exact, H-FIPS) across all three parameter sets (tab:relations).
+# The reference relation H-exact across all three parameter sets (tab:relations), against
+# the H-FIPS headline cells. Opt-in: these groups run only with --relations h-fips,h-exact
+# (or --relations h-exact).
 
 [[runs]]
 kind = "ours"
@@ -88,7 +91,7 @@ params = "44"
 configs = ["ifma", "avx512", "avx2"]
 allocations = ["16C32T", "8C16T"]
 sizes = [32768]
-relations = ["h-u", "h-exact", "h-fips"]
+relations = ["h-exact"]
 warmup = 1
 reps = 5
 processes = 2
@@ -100,7 +103,7 @@ params = "65"
 configs = ["ifma", "avx512", "avx2"]
 allocations = ["16C32T"]
 sizes = [32768]
-relations = ["h-u", "h-exact", "h-fips"]
+relations = ["h-exact"]
 warmup = 1
 reps = 5
 processes = 2
@@ -112,7 +115,7 @@ params = "87"
 configs = ["ifma", "avx512", "avx2"]
 allocations = ["16C32T"]
 sizes = [32768]
-relations = ["h-u", "h-exact", "h-fips"]
+relations = ["h-exact"]
 warmup = 1
 reps = 5
 processes = 2
@@ -126,7 +129,7 @@ params = "44"
 configs = ["ifma", "avx512", "avx2"]
 allocations = ["16C32T", "8C16T"]
 sizes = [1024, 2048, 4096, 8192, 16384, 32768]
-relation = "h-u"
+relation = "h-fips"
 warmup = 1
 reps = 5
 processes = 2
@@ -138,7 +141,7 @@ params = "65"
 configs = ["ifma", "avx512", "avx2"]
 allocations = ["16C32T", "8C16T"]
 sizes = [1024, 8192, 32768]
-relation = "h-u"
+relation = "h-fips"
 warmup = 1
 reps = 5
 processes = 2
@@ -150,7 +153,7 @@ params = "87"
 configs = ["ifma", "avx512", "avx2"]
 allocations = ["16C32T", "8C16T"]
 sizes = [1024, 8192, 32768]
-relation = "h-u"
+relation = "h-fips"
 warmup = 1
 reps = 5
 processes = 2
@@ -164,7 +167,7 @@ params = "44"
 configs = ["ifma", "avx2"]
 allocations = ["16C32T"]
 sizes = [32768]
-relation = "h-u"
+relation = "h-fips"
 warmup = 1
 reps = 5
 
@@ -175,7 +178,7 @@ params = "44"
 configs = ["ifma", "avx2"]
 allocations = ["16C32T"]
 sizes = [32768]
-relation = "h-u"
+relation = "h-fips"
 warmup = 1
 reps = 3
 processes = 1
@@ -196,7 +199,7 @@ params = "44"
 configs = ["ifma", "avx2"]
 allocations = ["16C32T"]
 sizes = [32768]
-relation = "h-u"
+relation = "h-fips"
 warmup = 1
 reps = 1
 processes = 1
@@ -215,7 +218,7 @@ params = "44"
 configs = ["ifma", "avx2"]
 allocations = ["16C32T", "8C16T", "1T"]
 sizes = [32768]
-relation = "h-u"
+relation = "h-fips"
 reps = 3
 mode = "aggregate"
 
@@ -226,7 +229,7 @@ params = "44"
 configs = ["ifma", "avx2"]
 allocations = ["16C32T", "8C16T", "1T"]
 sizes = [32768]
-relation = "h-u"
+relation = "h-fips"
 reps = 5
 mode = "verify"
 

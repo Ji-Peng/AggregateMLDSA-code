@@ -4,49 +4,37 @@
   "aggregates": {
     "44": {
       "1024": {
-        "h-u": {
-          "bytes": 427196,
-          "sha256": "9ecafece0cb82903385df3bc89bfaedbf4960956eaf91eceafb5bf7c182e4e40"
+        "h-fips": {
+          "bytes": 428576,
+          "sha256": "c826a3604fd94f7f693888ee665d5f973b42ecbdf764086dde8f66ba91a2b0a4"
         },
         "h-exact": {
           "bytes": 428467,
           "sha256": "8bdb70cf97224716df7be3baf18aa4fc11930b81d746d994286d7b3cffc7acbe"
-        },
-        "h-fips": {
-          "bytes": 428576,
-          "sha256": "c826a3604fd94f7f693888ee665d5f973b42ecbdf764086dde8f66ba91a2b0a4"
         }
       }
     },
     "65": {
       "1024": {
-        "h-u": {
-          "bytes": 448765,
-          "sha256": "8a0b6939d04acfcec25b32a5e0cb11794e072ee2e4674778fd4d22062dcd3cc8"
+        "h-fips": {
+          "bytes": 450534,
+          "sha256": "8627ec44fb420e386f08882038c3daca4b0b506c1462e8a98a5cb3487227b704"
         },
         "h-exact": {
           "bytes": 448712,
           "sha256": "836ba7db16685e575d7e61e389607223a8a090b326bbc7205e900f5b3995b7f6"
-        },
-        "h-fips": {
-          "bytes": 450534,
-          "sha256": "8627ec44fb420e386f08882038c3daca4b0b506c1462e8a98a5cb3487227b704"
         }
       }
     },
     "87": {
       "1024": {
-        "h-u": {
-          "bytes": 489195,
-          "sha256": "7b1ff3f9c7c304c99d5e65fb4537ae94e8b4d64d6bcc9d274a278aa80057e0b8"
+        "h-fips": {
+          "bytes": 489943,
+          "sha256": "ba8912b8aecee4262f12ed26a67a7c73315606df6a711e637e7e68a15dd1968d"
         },
         "h-exact": {
           "bytes": 489195,
           "sha256": "c4e448ac67215360437b48cf634f2a0b9b16630a4c1a2bc90d3cb81e6ab8708b"
-        },
-        "h-fips": {
-          "bytes": 489943,
-          "sha256": "ba8912b8aecee4262f12ed26a67a7c73315606df6a711e637e7e68a15dd1968d"
         }
       }
     }

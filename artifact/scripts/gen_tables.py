@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import (  # noqa: E402
+    DEFAULT_RELATION,
     PARAM_SETS,
     TABLES,
     cell_params,
@@ -27,8 +28,10 @@ ORDER = ["ifma", "avx512", "avx2"]
 MACRO = {"ifma": "Ifma", "avx512": "AvxVn", "avx2": "AvxTwo"}
 SET_MACRO = {"44": "FortyFour", "65": "SixtyFive", "87": "EightySeven"}
 LABEL = {"ifma": "IFMA", "avx512": "AVX-512F", "avx2": "AVX2"}
-RELATION = {"h-u": "$\\Relu$", "h-exact": "$\\Relex$", "h-fips": "$\\Relfips$"}
-RELATION_ORDER = ["h-u", "h-exact", "h-fips"]
+RELATION = {"h-fips": "$\\Relfips$", "h-exact": "$\\Relex$"}
+# H-FIPS is the relation of every table; H-exact rows appear in tab:relations when the
+# run opted in (`--relations h-fips,h-exact`).
+RELATION_ORDER = ["h-fips", "h-exact"]
 ALLOC_ORDER = ["16C32T", "8C16T", "1T", "all"]
 NA = "n/a"
 
@@ -164,7 +167,9 @@ def cell_priority(cell, prefer_tag="headline"):
     )
 
 
-def pick_ours_cell(cells, *, params, config, allocation, n, relation="h-u", prefer_tag="headline"):
+def pick_ours_cell(
+    cells, *, params, config, allocation, n, relation=DEFAULT_RELATION, prefer_tag="headline"
+):
     matches = [
         c
         for c in cells
@@ -249,7 +254,7 @@ def table_begin(label, caption, note, colspec, header_rows=1, extra_hlines=None)
 
 def prove_table(cells, directory, commit, machine, skipped):
     """Generate `tab-prove.tex` (`\\label{tab:prove}`): prover time by set, tier and allocation."""
-    standard = [c for c in cells if is_standard_ours(c) and c.get("relation") == "h-u" and c.get("times_ms")]
+    standard = [c for c in cells if is_standard_ours(c) and c.get("relation") == DEFAULT_RELATION and c.get("times_ms")]
     if not standard:
         return "% no prover data\n"
     n = max(c["n"] for c in standard)
@@ -260,7 +265,7 @@ def prove_table(cells, directory, commit, machine, skipped):
     out += table_begin(
         "tab:prove",
         f"Prover time at $N={fmt_n_tex(n)}$ in seconds.",
-        "$\\Relu$; medians of the measured runs. The aggregate bytes do not depend on the tier or the allocation.",
+        "$\\Relfips$; medians of the measured runs. The aggregate bytes do not depend on the tier or the allocation.",
         "Q[l] X[l] X[r] X[r] X[r]",
         header_rows=1,
         extra_hlines=extra_hlines,
@@ -277,7 +282,7 @@ def prove_table(cells, directory, commit, machine, skipped):
                     config=config,
                     allocation=allocation,
                     n=n,
-                    relation="h-u",
+                    relation=DEFAULT_RELATION,
                     prefer_tag="headline",
                 )
                 if cell and cell.get("times_ms"):
@@ -292,40 +297,48 @@ def prove_table(cells, directory, commit, machine, skipped):
 
 
 def relations_table(cells, directory, commit, machine, skipped):
-    """Generate `tab-relations.tex` (`\\label{tab:relations}`): H-u, H-exact and H-FIPS across sets."""
+    """Generate `tab-relations.tex` (`\\label{tab:relations}`): H-exact against H-FIPS across sets.
+
+    H-exact is an opt-in reference relation; without its cells the file holds a comment.
+    """
     standard = [c for c in cells if is_standard_ours(c) and c.get("times_ms")]
-    if not standard:
-        return "% no relation data\n"
-    n = max(c["n"] for c in standard)
+    if not any(c.get("relation") == "h-exact" for c in standard):
+        return "% no H-exact data (opt in with --relations h-fips,h-exact)\n"
+    n = max(c["n"] for c in standard if c.get("relation") == "h-exact")
     at_n = [c for c in standard if c["n"] == n]
-    alloc = preferred_allocation(at_n)
-    sets = [p for p in PARAM_SETS if any(cell_params(c) == p for c in at_n)] or list(PARAM_SETS)
-    extra_hlines = [2 + 3 * i for i in range(1, len(sets))]
+    alloc = preferred_allocation([c for c in at_n if c.get("relation") == "h-exact"])
+    sets = [
+        p
+        for p in PARAM_SETS
+        if any(cell_params(c) == p and c.get("relation") == "h-exact" for c in at_n)
+    ] or list(PARAM_SETS)
+    per_set = len(RELATION_ORDER)
+    extra_hlines = [2 + per_set * i for i in range(1, len(sets))]
     out = header(directory, commit, machine)
     out += table_begin(
         "tab:relations",
-        f"Relations $\\Relu$, $\\Relex$ and $\\Relfips$ at $N={fmt_n_tex(n)}$ on {alloc}.",
-        "Prove in seconds (change against $\\Relu$ in parentheses); verify in ms on IFMA, uncached / cached keys.",
+        f"Relations $\\Relfips$ and $\\Relex$ at $N={fmt_n_tex(n)}$ on {alloc}.",
+        "Prove in seconds (change against $\\Relfips$ in parentheses); verify in ms on IFMA, uncached / cached keys.",
         "Q[l] Q[l] X[r] X[r] X[r] X[1.1,r] X[1.2,r]",
         header_rows=1,
         extra_hlines=extra_hlines,
     )
     out += "Set & Rel. & " + " & ".join(LABEL[c] for c in ORDER) + " & Verify & Bytes \\\\\n"
     for params in sets:
-        hu_cells = {
+        base_cells = {
             config: pick_ours_cell(
                 at_n,
                 params=params,
                 config=config,
                 allocation=alloc,
                 n=n,
-                relation="h-u",
+                relation=DEFAULT_RELATION,
                 prefer_tag="relations",
             )
             for config in ORDER
         }
         for idx, relation in enumerate(RELATION_ORDER):
-            set_col = f"\\SetCell[r=3]{{l}} {params}" if idx == 0 else ""
+            set_col = f"\\SetCell[r={per_set}]{{l}} {params}" if idx == 0 else ""
             row = [set_col, RELATION[relation]]
             verify_str = "--"
             bytes_str = "--"
@@ -342,11 +355,11 @@ def relations_table(cells, directory, commit, machine, skipped):
                 if cell and cell.get("times_ms"):
                     med = median(cell["times_ms"])
                     val = fmt_seconds(med)
-                    hu = hu_cells.get(config)
-                    if relation != "h-u" and hu and hu.get("times_ms"):
-                        hu_med = median(hu["times_ms"])
-                        if hu_med > 0:
-                            pct = (med - hu_med) / hu_med * 100.0
+                    base = base_cells.get(config)
+                    if relation != DEFAULT_RELATION and base and base.get("times_ms"):
+                        base_med = median(base["times_ms"])
+                        if base_med > 0:
+                            pct = (med - base_med) / base_med * 100.0
                             val += f" ({pct:+.1f}\\%)"
                     row.append(val)
                     if verify_str == "--" and cell.get("verify_uncached_ms"):
@@ -360,9 +373,11 @@ def relations_table(cells, directory, commit, machine, skipped):
                     if bytes_str == "--" and cell.get("aggregate_bytes"):
                         b = cell["aggregate_bytes"]
                         bytes_str = fmt_n_tex(b)
-                        hu_b = hu["aggregate_bytes"] if hu and hu.get("aggregate_bytes") else None
-                        if relation != "h-u" and hu_b is not None:
-                            diff = b - hu_b
+                        base_b = (
+                            base["aggregate_bytes"] if base and base.get("aggregate_bytes") else None
+                        )
+                        if relation != DEFAULT_RELATION and base_b is not None:
+                            diff = b - base_b
                             bytes_str += f" ({diff:+d})"
                 elif config in skipped:
                     row.append(NA)
@@ -402,7 +417,7 @@ def ablation_table(cells, directory, commit, machine, skipped):
         abl_defaults[0]
         if abl_defaults
         else pick_ours_cell(
-            ours_44, params="44", config=tier, allocation=alloc, n=n, relation="h-u", prefer_tag="headline"
+            ours_44, params="44", config=tier, allocation=alloc, n=n, relation=DEFAULT_RELATION, prefer_tag="headline"
         )
     )
 
@@ -529,7 +544,7 @@ def ablation_table(cells, directory, commit, machine, skipped):
 
 def scaling_table(cells, directory, commit, machine, skipped):
     """Generate `tab-scaling.tex` (`\\label{tab:scaling}`): scaling with the batch size across sets."""
-    standard = [c for c in cells if is_standard_ours(c) and c.get("relation") == "h-u" and c.get("times_ms")]
+    standard = [c for c in cells if is_standard_ours(c) and c.get("relation") == DEFAULT_RELATION and c.get("times_ms")]
     if not standard:
         return "% no scaling data\n"
     alloc = preferred_allocation(standard)
@@ -581,7 +596,7 @@ def scaling_table(cells, directory, commit, machine, skipped):
                 config=tier,
                 allocation=alloc,
                 n=n,
-                relation="h-u",
+                relation=DEFAULT_RELATION,
                 prefer_tag="scaling",
             )
             if cell:
@@ -621,7 +636,7 @@ def extract_breakdown(cell, directory):
     if logs_dir.exists():
         params = cell_params(cell)
         n = cell.get("n")
-        relation = cell.get("relation", "h-u")
+        relation = cell.get("relation", DEFAULT_RELATION)
         pattern = f"*-{n}-{relation}-p{params}-*.log"
         for log_file in sorted(logs_dir.glob(pattern)):
             try:
@@ -636,7 +651,7 @@ def extract_breakdown(cell, directory):
 def bytes_table(cells, directory, commit, machine):
     """Generate `tab-bytes.tex` (`\\label{tab:bytes}`): composition of the aggregate across sets."""
     standard = [
-        c for c in cells if is_standard_ours(c) and c.get("relation") == "h-u" and c.get("aggregate_bytes")
+        c for c in cells if is_standard_ours(c) and c.get("relation") == DEFAULT_RELATION and c.get("aggregate_bytes")
     ]
     if not standard:
         return "% no byte data\n"
@@ -745,7 +760,7 @@ def is_aerie_avx2(cell):
 
 def baselines_table(cells, directory, commit, machine, skipped):
     """Generate `tab-baselines.tex` (`\\label{tab:baselines}`): native, Aerie and ours at 16C32T and 1T."""
-    standard = [c for c in cells if is_standard_ours(c) and c.get("relation") == "h-u" and c.get("times_ms")]
+    standard = [c for c in cells if is_standard_ours(c) and c.get("relation") == DEFAULT_RELATION and c.get("times_ms")]
     aerie = [c for c in cells if c.get("system") == "aerie"]
     native = [c for c in cells if c.get("system") == "native"]
     if not standard and not aerie and not native:
@@ -841,10 +856,10 @@ def baselines_table(cells, directory, commit, machine, skipped):
     for params in sets:
         constants = PARAM_SETS[params]
         c_par = pick_ours_cell(
-            standard, params=params, config=tier, allocation=par_alloc, n=n, relation="h-u", prefer_tag="headline"
+            standard, params=params, config=tier, allocation=par_alloc, n=n, relation=DEFAULT_RELATION, prefer_tag="headline"
         )
         c_1t = pick_ours_cell(
-            standard, params=params, config=tier, allocation="1T", n=n, relation="h-u", prefer_tag="headline"
+            standard, params=params, config=tier, allocation="1T", n=n, relation=DEFAULT_RELATION, prefer_tag="headline"
         )
         p_par = fmt_seconds(median(c_par["times_ms"])) if c_par and c_par.get("times_ms") else "--"
         p_1t = fmt_seconds(median(c_1t["times_ms"])) if c_1t and c_1t.get("times_ms") else "--"
@@ -877,7 +892,7 @@ def numbers(cells, directory, commit, machine):
                 config=config,
                 allocation=alloc,
                 n=n,
-                relation="h-u",
+                relation=DEFAULT_RELATION,
                 prefer_tag="headline",
             )
             if not cell:
@@ -906,31 +921,30 @@ def numbers(cells, directory, commit, machine):
                     values[f"BytesPerSig{m_tier}"] = bps
                     values["AggregateBytes"] = agg_b
 
-        # Relation overheads on IFMA for each set.
-        hu_cell = pick_ours_cell(
+        # The reference relation H-exact against H-FIPS on IFMA for each set (opt-in runs only).
+        base_cell = pick_ours_cell(
             at_n,
             params=params,
             config="ifma",
             allocation=alloc,
             n=n,
-            relation="h-u",
+            relation=DEFAULT_RELATION,
             prefer_tag="relations",
         )
-        if hu_cell and hu_cell.get("times_ms"):
-            hu_ms = median(hu_cell["times_ms"])
-            for rel, rel_macro in (("h-exact", "RelExact"), ("h-fips", "RelFips")):
-                rel_cell = pick_ours_cell(
-                    at_n,
-                    params=params,
-                    config="ifma",
-                    allocation=alloc,
-                    n=n,
-                    relation=rel,
-                    prefer_tag="relations",
-                )
-                if rel_cell and rel_cell.get("times_ms") and hu_ms > 0:
-                    pct = (median(rel_cell["times_ms"]) - hu_ms) / hu_ms * 100.0
-                    values[f"{rel_macro}OverheadIfma{set_suffix}"] = f"{pct:+.1f}\\%"
+        exact_cell = pick_ours_cell(
+            at_n,
+            params=params,
+            config="ifma",
+            allocation=alloc,
+            n=n,
+            relation="h-exact",
+            prefer_tag="relations",
+        )
+        if base_cell and base_cell.get("times_ms") and exact_cell and exact_cell.get("times_ms"):
+            base_ms = median(base_cell["times_ms"])
+            if base_ms > 0:
+                pct = (median(exact_cell["times_ms"]) - base_ms) / base_ms * 100.0
+                values[f"RelExactVsFipsIfma{set_suffix}"] = f"{pct:+.1f}\\%"
 
     if "ProveIfma" in values:
         try:

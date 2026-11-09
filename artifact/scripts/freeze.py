@@ -2,7 +2,7 @@
 """Pin the artifact to the current revision in one step.
 
 Builds the release binary at the checked-out revision, runs the 1K gates for every
-parameter set and relation with `--write-expected` (which rewrites
+parameter set and relation (H-FIPS and the opt-in H-exact) with `--write-expected` (which rewrites
 `expected/hashes.json`), and sets the in-repo commit of `sources.lock` to `HEAD`.
 Run it on a clean tree at the submission revision, then commit the two files.
 """
@@ -14,7 +14,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import ARTIFACT, EXPECTED, REPO, git_dirty, git_rev, read_json, run  # noqa: E402
+from common import (  # noqa: E402
+    ARTIFACT,
+    EXPECTED,
+    RELATIONS,
+    REPO,
+    git_dirty,
+    git_rev,
+    read_json,
+    run,
+)
 
 LOCK = ARTIFACT / "sources.lock"
 HASHES = EXPECTED / "hashes.json"
@@ -63,7 +72,14 @@ def main():
             capture=False,
         )
     gates = run(
-        ["python3", scripts / "gates.py", "--write-expected", "--no-sde"],
+        [
+            "python3",
+            scripts / "gates.py",
+            "--write-expected",
+            "--no-sde",
+            "--relations",
+            ",".join(RELATIONS),
+        ],
         check=False,
         capture=False,
     )

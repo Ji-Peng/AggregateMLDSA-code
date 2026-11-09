@@ -1,6 +1,8 @@
 # Quick mode: small batches, the configurations the CPU supports, one core
 # complex with SMT (or the largest available), and one thread at 1K. Touches
 # every run kind once so a ~5 minute smoke run exercises the full pipeline.
+# Every group runs H-FIPS. The `quick-ours` groups also list the reference
+# relation H-exact, which runs only with --relations h-fips,h-exact.
 
 mode = "quick"
 warmup = 1
@@ -13,7 +15,7 @@ params = "44"
 configs = ["ifma", "avx512", "avx2"]
 allocations = ["8C16T"]
 sizes = [1024, 4096]
-relation = "h-u"
+relations = ["h-fips", "h-exact"]
 processes = 2
 
 [[runs]]
@@ -23,7 +25,7 @@ params = "65"
 configs = ["ifma", "avx512", "avx2"]
 allocations = ["8C16T"]
 sizes = [1024]
-relation = "h-u"
+relations = ["h-fips", "h-exact"]
 warmup = 1
 reps = 2
 processes = 1
@@ -35,7 +37,7 @@ params = "87"
 configs = ["ifma", "avx512", "avx2"]
 allocations = ["8C16T"]
 sizes = [1024]
-relation = "h-u"
+relations = ["h-fips", "h-exact"]
 warmup = 1
 reps = 2
 processes = 1
@@ -47,7 +49,7 @@ params = "44"
 configs = ["ifma", "avx512", "avx2"]
 allocations = ["1T"]
 sizes = [1024]
-relation = "h-u"
+relation = "h-fips"
 processes = 2
 
 [[runs]]
@@ -57,7 +59,7 @@ params = "44"
 configs = ["ifma", "avx2"]
 allocations = ["8C16T"]
 sizes = [1024]
-relation = "h-u"
+relation = "h-fips"
 warmup = 1
 reps = 2
 
@@ -68,7 +70,7 @@ params = "44"
 configs = ["ifma", "avx2"]
 allocations = ["8C16T"]
 sizes = [1024]
-relation = "h-u"
+relation = "h-fips"
 warmup = 1
 reps = 1
 processes = 1
@@ -86,7 +88,7 @@ params = "44"
 configs = ["ifma"]
 allocations = ["8C16T"]
 sizes = [1024]
-relation = "h-u"
+relation = "h-fips"
 reps = 1
 mode = "aggregate"
 

@@ -17,7 +17,10 @@ from common import (  # noqa: E402
     ARTIFACT,
     BIN,
     BUILD,
+    DEFAULT_RELATION,
+    DEFAULT_RELATIONS,
     PARAM_SETS,
+    RELATIONS,
     RESULTS,
     TABLES,
     built_revision,
@@ -26,6 +29,7 @@ from common import (  # noqa: E402
     load_matrix,
     median,
     new_result_dir,
+    parse_relations,
     read_json,
     run,
     utc_stamp,
@@ -643,7 +647,7 @@ class Runner:
         binary = BIN / "mode_b"
         if not self.dry_run and not binary.exists():
             raise SystemExit(f"{binary} is missing; run ./run.sh build")
-        relation = group.get("relation", "h-u")
+        relation = group.get("relation", DEFAULT_RELATION)
         for requested, actual, allocation, note in self.allocation_plan(
             group, ["8C16T"]
         ):
@@ -1000,7 +1004,7 @@ class Runner:
     def fresh_aggregate(
         self, group, name, requested, actual, allocation, note, n, records, reps, params, record=True
     ):
-        relation = group.get("relation", "h-u")
+        relation = group.get("relation", DEFAULT_RELATION)
         binary = BIN / self.configs["rows"][name]["binary"]
         out = self.result_dir / "data" / f"fresh-{name}-{actual}-{n}-p{params}.bin"
         env = self.env_for(name, allocation, None)
@@ -1068,7 +1072,7 @@ class Runner:
     def fresh_verify(
         self, group, name, requested, actual, allocation, note, n, records, reps, params
     ):
-        relation = group.get("relation", "h-u")
+        relation = group.get("relation", DEFAULT_RELATION)
         binary = BIN / self.configs["rows"][name]["binary"]
         aggregate = self.result_dir / "data" / f"fresh-{name}-{actual}-{n}-p{params}.bin"
         env = self.env_for(name, allocation, None)
@@ -1352,6 +1356,19 @@ class Runner:
             params_list = group_params_list(group, self.args.params)
             if kind != "aerie" and not params_list:
                 continue
+            relations = group_relations(group, self.args.relations)
+            if kind not in ("aerie", "native") and not relations:
+                listed = ",".join(group_relations(group, RELATIONS))
+                self.skipped.append(
+                    {
+                        "kind": "relation",
+                        "name": listed,
+                        "tag": tag,
+                        "reason": f"relation {listed} not selected (--relations)",
+                    }
+                )
+                print(f"skip {tag}: relation {listed} not selected (select it with --relations)")
+                continue
             rows = self.rows(group.get("configs")) if kind not in ("native", "aerie") else []
             group_sizes = sizes or group.get("sizes") or [1024]
             if self.args.smoke:
@@ -1385,7 +1402,6 @@ class Runner:
                     f"warmup={warmup} processes={processes}"
                 )
                 if kind == "ours":
-                    relations = group.get("relations") or [group.get("relation", "h-u")]
                     self.run_ours_group(
                         group, rows, group_sizes, relations, reps, warmup, params
                     )
@@ -1394,7 +1410,7 @@ class Runner:
                         group,
                         rows,
                         group_sizes,
-                        group.get("relation", "h-u"),
+                        relations[0],
                         reps,
                         warmup,
                         params,
@@ -1416,6 +1432,15 @@ class Runner:
             return
         self.summary()
         print(f"results: {self.result_dir}")
+
+
+def group_relations(group, selected):
+    """The relations of a matrix group (`relation` or `relations`; default H-FIPS) that are selected."""
+    listed = group.get("relations") or [group.get("relation", DEFAULT_RELATION)]
+    for relation in listed:
+        if relation not in RELATIONS:
+            raise SystemExit(f"group {group.get('tag')}: unknown relation {relation}")
+    return [relation for relation in listed if relation in selected]
 
 
 def group_params(group):
@@ -1549,6 +1574,12 @@ def main():
     parser.add_argument("--results")
     parser.add_argument("--only", help="run only groups whose tag contains this")
     parser.add_argument("--params", help="comma-separated ML-DSA parameter sets (44,65,87)")
+    parser.add_argument(
+        "--relations",
+        default=",".join(DEFAULT_RELATIONS),
+        help="comma-separated relations to run (default h-fips; add h-exact for the reference "
+        "relation: --relations h-fips,h-exact)",
+    )
     parser.add_argument("--configs")
     parser.add_argument("--allocations")
     parser.add_argument("--sizes")
@@ -1569,6 +1600,10 @@ def main():
     args = parser.parse_args()
     if args.params:
         args.params = [p.strip() for p in args.params.split(",") if p.strip()]
+    try:
+        args.relations = parse_relations(args.relations)
+    except ValueError as error:
+        parser.error(str(error))
     if args.configs:
         args.configs = [c.strip() for c in args.configs.split(",") if c.strip()]
     if args.sizes:

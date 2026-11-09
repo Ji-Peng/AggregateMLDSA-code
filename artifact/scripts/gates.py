@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Correctness gates at N=1024 for every kernel tier, ML-DSA parameter set and relation.
 
-Per set (`--params`, default 44,65,87) and relation (`--relations`, default
-h-u,h-exact,h-fips): the aggregates of every tier must be byte-identical and equal to
-`expected/hashes.json` (keyed by set and relation), every tier's verifier must accept,
-and a flipped byte must be rejected. Per set, the H-u aggregate must not depend on the
-thread count (RAYON_NUM_THREADS=1 against the pinned allocation's count).
+Per set (`--params`, default 44,65,87) and relation (`--relations`, default h-fips; the
+reference relation H-exact with `--relations h-fips,h-exact`): the aggregates of every
+tier must be byte-identical and equal to `expected/hashes.json` (keyed by set and
+relation), every tier's verifier must accept, and a flipped byte must be rejected. Per
+set, the aggregate of the first selected relation must not depend on the thread count
+(RAYON_NUM_THREADS=1 against the pinned allocation's count).
 """
 
 import argparse
@@ -21,11 +22,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
     ARTIFACT,
     BIN,
+    DEFAULT_RELATIONS,
     EXPECTED,
+    RELATIONS,
     built_revision,
     cpu_flags,
     load_configs,
     new_result_dir,
+    parse_relations,
     pinned_commit,
     read_json,
     run,
@@ -77,7 +81,6 @@ def available_rows(configs, flags):
 
 
 PARAMS = ("44", "65", "87")
-RELATIONS = ("h-u", "h-exact", "h-fips")
 # The records of the reference aggregates: 1,024 keys from seed 42, records signed with seed 43.
 KEY_SEED = "42"
 RECORD_SEED = "43"
@@ -234,8 +237,8 @@ def first_tier(rows):
     )
 
 
-def threads_check(configs, rows, prefix, allocation, records, out_dir, params, results):
-    """The H-u aggregate of the first available tier on one thread equals the pinned run's."""
+def threads_check(configs, rows, prefix, allocation, records, out_dir, params, relation, results):
+    """The aggregate of the first available tier on one thread equals the pinned run's."""
     name = first_tier(rows)
     if name is None or allocation["threads"] == 1:
         return None
@@ -244,7 +247,7 @@ def threads_check(configs, rows, prefix, allocation, records, out_dir, params, r
     env.update(spec.get("env", {}))
     env["RAYON_NUM_THREADS"] = "1"
     env["OMP_NUM_THREADS"] = "1"
-    out = out_dir / f"gates-{params}-{name}-t1.bin"
+    out = out_dir / f"gates-{params}-{relation}-{name}-t1.bin"
     proc = sh(
         prefix
         + [
@@ -255,7 +258,7 @@ def threads_check(configs, rows, prefix, allocation, records, out_dir, params, r
             "--records",
             str(records),
             "--relation",
-            "h-u",
+            relation,
             "--out",
             str(out),
         ],
@@ -265,6 +268,7 @@ def threads_check(configs, rows, prefix, allocation, records, out_dir, params, r
         return {"tier": name, "ok": False, "error": (proc.stderr or "")[-2000:]}
     return {
         "tier": name,
+        "relation": relation,
         "threads": [1, allocation["threads"]],
         "ok": sha256_file(out) == results[name]["sha256"],
     }
@@ -420,9 +424,9 @@ def main():
     )
     parser.add_argument(
         "--relations",
-        default=",".join(RELATIONS),
-        type=lambda v: [r.strip() for r in v.split(",") if r.strip()],
-        help="comma-separated relations (default h-u,h-exact,h-fips)",
+        default=",".join(DEFAULT_RELATIONS),
+        help="comma-separated relations (default h-fips; the reference relation H-exact "
+        "with --relations h-fips,h-exact)",
     )
     parser.add_argument(
         "--sde",
@@ -434,11 +438,10 @@ def main():
     unknown = [params for params in args.params if params not in PARAMS]
     if unknown or not args.params:
         parser.error(f"--params: a comma-separated subset of {','.join(PARAMS)}, not {unknown}")
-    unknown = [relation for relation in args.relations if relation not in RELATIONS]
-    if unknown or not args.relations:
-        parser.error(
-            f"--relations: a comma-separated subset of {','.join(RELATIONS)}, not {unknown}"
-        )
+    try:
+        args.relations = parse_relations(args.relations)
+    except ValueError as error:
+        parser.error(f"--{error}")
     result_dir = new_result_dir() if not args.results else Path(args.results)
     result_dir.mkdir(parents=True, exist_ok=True)
     (result_dir / "data").mkdir(exist_ok=True)
@@ -508,18 +511,18 @@ def main():
                 "expected_ok": expected_ok,
                 "reference": reference,
             }
-        threads = None
-        if "h-u" in per_relation:
-            threads = threads_check(
-                configs,
-                rows,
-                prefix,
-                allocation,
-                records,
-                out_dir,
-                params,
-                per_relation["h-u"]["aggregates"],
-            )
+        first_relation = args.relations[0]
+        threads = threads_check(
+            configs,
+            rows,
+            prefix,
+            allocation,
+            records,
+            out_dir,
+            params,
+            first_relation,
+            per_relation[first_relation]["aggregates"],
+        )
         native = natver_check(params, allocation, result_dir)
         per_set[params] = {
             "relations": per_relation,
@@ -569,6 +572,11 @@ def main():
             f"sign-batch --params P --count 1024 --seed {RECORD_SEED}"
         )
         document.setdefault("aggregates", {})
+        # Entries of relations this artifact no longer accepts are dropped.
+        for sizes in document["aggregates"].values():
+            for entries in sizes.values():
+                for relation in [r for r in entries if r not in RELATIONS]:
+                    del entries[relation]
         for params, result in per_set.items():
             entries = document["aggregates"].setdefault(params, {}).setdefault("1024", {})
             for relation, outcome in result["relations"].items():
@@ -625,7 +633,8 @@ def main():
         if threads:
             print(
                 f"  ML-DSA-{params} threads {threads.get('threads')}: "
-                f"{'identical' if threads['ok'] else 'DIFFER'} ({threads['tier']}, h-u)"
+                f"{'identical' if threads['ok'] else 'DIFFER'} "
+                f"({threads['tier']}, {threads.get('relation')})"
             )
         native = result["native"]
         if native:
