@@ -148,6 +148,43 @@ fn public_tile<P: ParamSet, const TAU: usize>(
     challenges
 }
 
+/// The distinct keys of `pks` in first-occurrence order, and per record the index of its key
+/// among them. The keys are hashed in parallel (one 64-bit hash per key, under the process's
+/// random hash keys); the serial pass then works on the hashes and compares two keys in full
+/// only when their hashes are equal.
+fn distinct_keys<'k>(pks: &[&'k [u8]]) -> (Vec<&'k [u8]>, Vec<usize>) {
+    use std::hash::BuildHasher;
+    let state = std::collections::hash_map::RandomState::new();
+    distinct_keys_by(pks, |pk| state.hash_one(pk))
+}
+
+/// [`distinct_keys`] under the hash `hash` (tests force collisions).
+fn distinct_keys_by<'k>(pks: &[&'k [u8]], hash: impl Fn(&[u8]) -> u64 + Sync) -> (Vec<&'k [u8]>, Vec<usize>) {
+    use std::collections::hash_map::Entry;
+    let hashes: Vec<u64> = pks.par_iter().map(|pk| hash(pk)).collect();
+    let mut distinct: Vec<&[u8]> = Vec::new();
+    // The first distinct key of every hash; a different key with an equal hash is placed
+    // through `collided`, keyed by its bytes.
+    let mut first: HashMap<u64, usize> = HashMap::with_capacity(pks.len());
+    let mut collided: HashMap<&[u8], usize> = HashMap::new();
+    let mut slot = Vec::with_capacity(pks.len());
+    for (&pk, &hash) in pks.iter().zip(&hashes) {
+        let index = match first.entry(hash) {
+            Entry::Vacant(entry) => {
+                distinct.push(pk);
+                *entry.insert(distinct.len() - 1)
+            }
+            Entry::Occupied(entry) if distinct[*entry.get()] == pk => *entry.get(),
+            Entry::Occupied(_) => *collided.entry(pk).or_insert_with(|| {
+                distinct.push(pk);
+                distinct.len() - 1
+            }),
+        };
+        slot.push(index);
+    }
+    (distinct, slot)
+}
+
 impl PublicInstance<Set44> {
     /// Builds the instance from (pk, M, c~) triples; keys are expanded once per distinct pk.
     pub fn new(inputs: &[(&[u8], &[u8], [u8; C_TILDE_BYTES])]) -> Result<Self, InstanceError> {
@@ -161,18 +198,9 @@ impl PublicInstance<Set44> {
         inputs: &[(&[u8], &[u8], [u8; C_TILDE_BYTES])],
     ) -> Result<Self, InstanceError> {
         let geom = Geometry::<Set44>::new_for(inputs.len()).map_err(InstanceError::Geometry)?;
-        // Full-key dedup; `slot[i]` is the distinct key of record i (each key hashed once).
-        let mut distinct: Vec<&[u8]> = Vec::new();
-        let mut index: HashMap<&[u8], usize> = HashMap::new();
-        let slot: Vec<usize> = inputs
-            .iter()
-            .map(|(pk, _, _)| {
-                *index.entry(pk).or_insert_with(|| {
-                    distinct.push(pk);
-                    distinct.len() - 1
-                })
-            })
-            .collect();
+        // Full-key dedup; `slot[i]` is the distinct key of record i.
+        let pks: Vec<&[u8]> = inputs.iter().map(|&(pk, _, _)| pk).collect();
+        let (distinct, slot) = distinct_keys(&pks);
         let keys: Vec<Option<Arc<ExpandedKey<Set44>>>> = ExpandedKey::many_with(engine, &distinct)
             .into_iter()
             .map(|key| key.map(Arc::new))
@@ -247,17 +275,8 @@ impl<P: ParamSet> PublicInstance<P> {
     /// Builds the instance for parameter set P from (pk, M, c~) triples.
     pub fn new_for(inputs: &[(&[u8], &[u8], P::CTilde)]) -> Result<Self, InstanceError> {
         let geom = Geometry::<P>::new_for(inputs.len()).map_err(InstanceError::Geometry)?;
-        let mut distinct: Vec<&[u8]> = Vec::new();
-        let mut index: HashMap<&[u8], usize> = HashMap::new();
-        let slot: Vec<usize> = inputs
-            .iter()
-            .map(|(pk, _, _)| {
-                *index.entry(pk).or_insert_with(|| {
-                    distinct.push(pk);
-                    distinct.len() - 1
-                })
-            })
-            .collect();
+        let pks: Vec<&[u8]> = inputs.iter().map(|&(pk, _, _)| pk).collect();
+        let (distinct, slot) = distinct_keys(&pks);
         // Keys in batches of eight: one batch of SHAKE256 streams for their `tr` and one of
         // SHAKE128 streams for their matrices.
         let keys: Vec<Option<Arc<ExpandedKey<P>>>> = distinct
@@ -399,6 +418,30 @@ mod tests {
             for (row, want) in t.iter().enumerate() {
                 assert_eq!(&r.t[row], want);
             }
+        }
+    }
+
+    /// The hashed dedup numbers the keys as a full-key map in record order does, also when
+    /// distinct keys share a hash.
+    #[test]
+    fn distinct_keys_match_a_full_key_map() {
+        let keys: Vec<Vec<u8>> = (0..40_u8).map(|k| vec![k % 7, k % 3, 1]).collect();
+        let pks: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
+        let mut want_distinct: Vec<&[u8]> = Vec::new();
+        let mut index: HashMap<&[u8], usize> = HashMap::new();
+        let want_slot: Vec<usize> = pks
+            .iter()
+            .map(|&pk| {
+                *index.entry(pk).or_insert_with(|| {
+                    want_distinct.push(pk);
+                    want_distinct.len() - 1
+                })
+            })
+            .collect();
+        assert_eq!(distinct_keys(&pks), (want_distinct.clone(), want_slot.clone()));
+        let colliding: [fn(&[u8]) -> u64; 2] = [|_| 0, |pk| u64::from(pk[0] % 2)];
+        for hash in colliding {
+            assert_eq!(distinct_keys_by(&pks, hash), (want_distinct.clone(), want_slot.clone()));
         }
     }
 
