@@ -64,7 +64,7 @@ pub const CATALOG_D_SIG_H_FIPS: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13
 
 /// Batch sizes (`d_sig`) whose `HashField::Fp` catalog rows are generated and checked in
 /// for every parameter set and relation.
-pub const CATALOG_D_SIG_FP: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10];
+pub const CATALOG_D_SIG_FP: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
 /// Relation byte of H-exact: the proof header's flags byte and byte 3 of the instance-record
 /// bytes. Byte 0 belonged to a relaxed relation that this version no longer accepts.

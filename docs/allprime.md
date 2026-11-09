@@ -3,7 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Implemented in | `crates/agg-fpkeccak` (layout, packed trace, reference constraint evaluator), `crates/agg-piop/src/keccak_fp/` (masks, stage specs, virtual lanes, stage-3 weights), `agg_pcs_config::catalogs::{HashField, Group::ALL_FP, BatchLayout::new_fp}`, `agg_piop::{prover::prove_core_fp, verifier::run_fp}`, `agg-cli` `--hash-field fp` |
-| Applies to | mode A, ML-DSA-44, ML-DSA-65 and ML-DSA-87, relations H-FIPS (byte 2, the default) and H-exact (byte 1); PIOP wire version 4 with the flags bit `0x08`; Akita width-4 catalog rows `mldsa-<set>-p16[x\|f]-fp-batch-<N*>-mult-final` for `d_sig` 3 to 10 (`CATALOG_D_SIG_FP`) |
+| Applies to | mode A, ML-DSA-44, ML-DSA-65 and ML-DSA-87, relations H-FIPS (byte 2, the default) and H-exact (byte 1); PIOP wire version 4 with the flags bit `0x08`; Akita width-4 catalog rows `mldsa-<set>-p16[x\|f]-fp-batch-<N*>-mult-final` for `d_sig` 3 to 12 (`CATALOG_D_SIG_FP`) |
 | Selected by | `CommitmentManifest::hash_field() == HashField::Fp`; the default (`HashField::Gf2`, Flock and the bridge) is unchanged byte for byte |
 | Script | `python3 -I docs/scripts/pow_plan.py --hash-field fp [--set 44\|65\|87] [--relation h-fips\|h-exact]`, pinned by `agg_piop::pow::tests::fp_plans_reproduce_the_script` |
 | Related | `docs/spec.md` 10.1 (event table and wire layout), `docs/piop.md` 7.6 (stage counts), `docs/h-exact.md` 10.9 (`u_h` under `F_p`), `docs/soundness.md` (the default's census and theorem) |
@@ -128,8 +128,8 @@ Polynomial counts (`Group::num_polynomials_in`; variables at `N* = 2^10` in pare
 | 87 H-exact | 31 | 62 | 7 x 70 | 5 | 7 | 595 | 588 |
 
 The multiplicity digits of `G_m` are opened at `pi_m`, every other polynomial at the suffix of
-`r^(3)` of its domain. The catalog rows are planned for `d_sig` 3 to 10 (48 grouped `F_p` rows in
-the width-4 artifact, 204 rows in all); larger batches need rows that are not yet planned.
+`r^(3)` of its domain. The catalog rows are planned for `d_sig` 3 to 12 (60 grouped `F_p` rows in
+the width-4 artifact, 220 rows in all); larger batches need rows that are not yet planned.
 
 **`u_h` under H-FIPS.** With no `G_2`, the per-signature hint slack `u_h` is the last polynomial of
 `G_k` (`Column::HINT_SLACK_PROJ`) and the third column of the projection stack
