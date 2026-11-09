@@ -1,6 +1,7 @@
-//! Commit and batched-opening round trip of the seven `HashField::Fp` Keccak groups
-//! (`KeccakA(0..4)`, `KeccakC`, `KeccakCPrime`) together with the lattice groups
-//! (`G_main16`, `G_main4`, `G_k`, `G_m`) for ML-DSA-44 at `N = 64` and `N = 1024`.
+//! The `HashField::Fp` aggregate (ML-DSA-44): the commit and batched-opening round trip of
+//! the seven Keccak groups (`KeccakA(0..4)`, `KeccakC`, `KeccakCPrime`) with the lattice
+//! groups (`G_main16`, `G_main4`, `G_k`, `G_m`) at `N = 64` and `N = 1024`, the Keccak
+//! instances of stages 1 to 3, and the whole prover and verifier at `N = 8`.
 
 use crate::common::{self, mle_i64, point, Batch};
 
@@ -19,11 +20,7 @@ use agg_piop::stage::{
 };
 use agg_piop::stage1::{keccak_claim_lanes, resolve_keccak, KeccakPublicInputs, KeccakResolver};
 use agg_piop::tables::ProverTables;
-use agg_piop::transcript::{
-    commitment_site, terminal_site, Transcript, BRIDGE_SEED_SITE, FINAL_VECTORS_SITE,
-    FINAL_VECTOR_BYTES, FLOCK_COMMIT_SITE, FLOCK_SEEDS_SITE, FLOCK_SHARES_SITE, KAPPA1_SITE,
-    PRESTAGE_SITE, TAU_SITE,
-};
+use agg_piop::transcript::{commitment_site, terminal_site, Transcript, KAPPA1_SITE, TAU_SITE};
 use agg_piop::virtual_polys::{compose_table, w1_table, MainValues};
 use agg_piop::{stage1, stage2, BaseField, OpeningField};
 use agg_witness::gen::SplitMix64;
@@ -453,46 +450,26 @@ fn keccak_specs_vanish_on_the_boolean_domain() {
     }
 }
 
-fn stages_branch_transcript(manifest: &CommitmentManifest) -> (Transcript, Points) {
+/// A trunk of the `HashField::Fp` registry through round 2 with dummy commitments: the
+/// round-1 lattice and Keccak commitments, `Psi`, `G_k` and `G_m`.
+fn fp_trunk_after_round2(manifest: &CommitmentManifest) -> Transcript {
     let mut trunk = Transcript::new(manifest, &manifest.binding_bytes()).expect("transcript");
-    for role in [GroupRole::Main16, GroupRole::Main] {
+    for role in [GroupRole::Main16, GroupRole::Main].into_iter().chain(GroupRole::KECCAK) {
         trunk.absorb(commitment_site(role), 1, &[0]).expect("round 1");
     }
-    trunk
-        .absorb_items(FLOCK_COMMIT_SITE, &[vec![]])
-        .expect("flock commit");
-    trunk
-        .challenge_bytes(BRIDGE_SEED_SITE, 1)
-        .expect("bridge seed");
     trunk.challenge_psi().expect("psi");
-    for role in [
-        GroupRole::Level1,
-        GroupRole::Level2,
-        GroupRole::Level3,
-        GroupRole::Proj,
-        GroupRole::Mult,
-    ] {
+    for role in [GroupRole::Proj, GroupRole::Mult] {
         trunk.absorb(commitment_site(role), 1, &[0]).expect("round 2");
     }
     trunk
-        .challenge_bytes(FLOCK_SEEDS_SITE, 1)
-        .expect("flock seeds");
-    trunk
-        .absorb(FINAL_VECTORS_SITE, 1, &[0; FINAL_VECTOR_BYTES])
-        .expect("final vectors");
-    trunk
-        .absorb_items(FLOCK_SHARES_SITE, &[vec![]])
-        .expect("flock shares");
+}
+
+fn stages_branch_transcript(manifest: &CommitmentManifest) -> (Transcript, Points) {
+    let mut trunk = fp_trunk_after_round2(manifest);
     let (_lookup, mut stages) = trunk.fork().expect("fork");
     let tau = stages
         .challenge_extensions(TAU_SITE, manifest.d_stage())
         .expect("tau");
-    stages
-        .absorb_extensions(
-            PRESTAGE_SITE,
-            &vec![OpeningField::zero(); PreStageClaims::len(manifest)],
-        )
-        .expect("prestage");
     (
         stages,
         Points {
@@ -878,19 +855,7 @@ fn transcript_at_stage3(manifest: &CommitmentManifest) -> (Transcript, Vec<Openi
         MULTIPLICITY_SITE, PROJ_CLAIM_SITE,
     };
     let zeros = |n: usize| vec![OpeningField::zero(); n];
-    let mut trunk = Transcript::new(manifest, &manifest.binding_bytes()).expect("transcript");
-    for role in [GroupRole::Main16, GroupRole::Main] {
-        trunk.absorb(commitment_site(role), 1, &[0]).expect("round 1");
-    }
-    trunk.absorb_items(FLOCK_COMMIT_SITE, &[vec![]]).expect("flock commit");
-    trunk.challenge_bytes(BRIDGE_SEED_SITE, 1).expect("bridge seed");
-    trunk.challenge_psi().expect("psi");
-    for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Proj, GroupRole::Mult] {
-        trunk.absorb(commitment_site(role), 1, &[0]).expect("round 2");
-    }
-    trunk.challenge_bytes(FLOCK_SEEDS_SITE, 1).expect("flock seeds");
-    trunk.absorb(FINAL_VECTORS_SITE, 1, &[0; FINAL_VECTOR_BYTES]).expect("final vectors");
-    trunk.absorb_items(FLOCK_SHARES_SITE, &[vec![]]).expect("flock shares");
+    let mut trunk = fp_trunk_after_round2(manifest);
     let (mut lookup, mut stages) = trunk.fork().expect("fork");
 
     // Branch L: the lookup's events with zero payloads.
@@ -912,9 +877,8 @@ fn transcript_at_stage3(manifest: &CommitmentManifest) -> (Transcript, Vec<Openi
     }
     lookup.absorb_extensions(MULTIPLICITY_SITE, &zeros(MULTIPLICITY_CLAIMS)).expect("multiplicities");
 
-    // Branch S: tau, the pre-stage claims, stages 1 and 2 with zero messages.
+    // Branch S: tau, stages 1 and 2 with zero messages (no pre-stage claims under Fp).
     stages.challenge_extensions(TAU_SITE, manifest.d_stage()).expect("tau");
-    stages.absorb_extensions(PRESTAGE_SITE, &zeros(PreStageClaims::len(manifest))).expect("prestage");
     let (degrees, gammas, terminals) = (stage_degrees(manifest), stage_gammas(manifest), stage_terminals(manifest));
     let mut points = Vec::new();
     for stage in 1..=2 {
@@ -1126,5 +1090,106 @@ fn keccak_stage3_reductions_round_trip() {
             range.len(),
             spec.groups.len()
         );
+    });
+}
+
+/// The all-prime-field aggregate end to end (ML-DSA-44, H-u, `N = 8`): the prover commits
+/// the lattice and Keccak groups in round 1, `G_k` and `G_m` in round 2, runs the lookup and
+/// the three stages with the Keccak instances, and opens all eleven groups once; the
+/// verifier accepts the proof bytes from the public records alone. A witness with one `A'`
+/// bit flipped, proven without the prover's self-checks, is rejected by a stage.
+#[test]
+fn round_trip_8() {
+    use agg_piop::binding::FlockProfile;
+    use agg_piop::manifest::{HashField, Relation};
+    use agg_piop::prover::{prove_with_tables, FpKeccakSide, ProveHooks, ProverInputs, SeededMatrices};
+    use agg_piop::verifier::{verify, FpKeccakVerifier, VerifyError};
+    use agg_piop::wire::AggregateProof;
+    use agg_witness::params::C_TILDE_BYTES;
+
+    on_large_stack(|| {
+        let seed = 0x518_u64;
+        let batch = Batch::build(common::records(seed, 6, 2), seed);
+        let n = batch.records.len();
+        assert_eq!(n, 8);
+        let manifest = CommitmentManifest::for_batch_fp(n).expect("fp manifest");
+        let inputs: Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> = batch
+            .records
+            .iter()
+            .map(|r| {
+                let c_tilde: [u8; C_TILDE_BYTES] = r.sig[..C_TILDE_BYTES].try_into().expect("c~");
+                (r.pk.as_slice(), r.msg.as_slice(), c_tilde)
+            })
+            .collect();
+        let signatures: Vec<&[u8]> = batch.records.iter().map(|r| r.sig.as_slice()).collect();
+        let prover_inputs = ProverInputs {
+            instance: &batch.instance,
+            records: &inputs,
+            signatures: &signatures,
+            relation: Relation::Hu,
+        };
+        let prove = |hooks: &ProveHooks<'_>| {
+            prove_with_tables(
+                &prover_inputs,
+                &manifest,
+                &batch.main,
+                &SeededMatrices,
+                &FpKeccakSide,
+                FlockProfile::FpKeccak,
+                hooks,
+            )
+        };
+        let public: Vec<(&[u8], &[u8])> = batch.records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice())).collect();
+        let verify_bytes = |bytes: &[u8]| {
+            verify(&public, bytes, &SeededMatrices, &FpKeccakVerifier, FlockProfile::FpKeccak, Relation::Hu, None)
+        };
+
+        let start = std::time::Instant::now();
+        let output = prove(&ProveHooks::default()).expect("honest Fp prove");
+        let prove_time = start.elapsed();
+        let proof = &output.proof;
+        let bytes = proof.to_bytes();
+        assert_eq!(AggregateProof::from_bytes_for(&bytes, HashField::Fp).expect("Fp parse"), *proof);
+        assert!(AggregateProof::from_bytes(&bytes).is_err(), "the Gf2 parser refuses an Fp proof");
+        assert_eq!((proof.keccak_commitments.len(), proof.bridge_commitments.len()), (7, 2));
+        assert!(proof.flock_commitments.is_empty() && proof.final_vectors.is_empty());
+        assert!(proof.flock_shares.is_empty() && proof.flock_proofs.is_empty());
+        assert_eq!(
+            (proof.stage1.claims.keccak.len(), proof.stage2.claims.keccak.len(), proof.stage3.claims.0.len()),
+            (740, 516, 401)
+        );
+        assert_eq!(output.points.1.len(), manifest.d_stage());
+
+        let start = std::time::Instant::now();
+        let verified = verify_bytes(&bytes).expect("the verifier accepts the honest Fp proof");
+        let verify_time = start.elapsed();
+        assert_eq!(verified.records, n);
+        assert_eq!(verified.session, output.session);
+        let size = proof.size();
+        eprintln!(
+            "Fp N = 8: proof {} bytes (commitments {}, lookup {}, PIOP {}, opening {}), prover {prove_time:.2?} ({}), verifier {verify_time:.2?}",
+            bytes.len(),
+            size.akita_commitments,
+            size.lookup,
+            size.piop,
+            size.opening,
+            output.timings
+        );
+
+        // A changed c~ changes the record binding: the replayed transcript differs.
+        let mut corrupted = bytes.clone();
+        corrupted[2 + 1 + 8] ^= 1;
+        assert!(verify_bytes(&corrupted).is_err(), "a changed c~ is rejected");
+
+        // One A' bit flipped before the Keccak groups are committed.
+        let flip = |tables: &mut KeccakTables, _: &mut KeccakPublics| tables.flip_a_prime_bit(3, 24, 19, 1);
+        let hooks = ProveHooks {
+            unchecked: true,
+            tamper_keccak: Some(&flip),
+            ..ProveHooks::default()
+        };
+        let tampered = prove(&hooks).expect("unchecked prove of a tampered witness");
+        let outcome = verify_bytes(&tampered.proof.to_bytes());
+        assert!(matches!(outcome, Err(VerifyError::Stage(_))), "{outcome:?}");
     });
 }

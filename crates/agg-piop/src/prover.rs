@@ -22,16 +22,21 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use agg_fpkeccak::{KeccakPublics, KeccakTables};
 use agg_pcs_config::commit::{CommitError, GroupClaim, GroupCommitment, PreparedOpening};
-use agg_witness::bridge::BridgeMatrices;
+use agg_witness::bridge::{BridgeMatrices, SparseMatrix};
 use agg_witness::instance::PublicInstance;
-use agg_witness::params::{ParamSet, Set, Set44};
+use agg_witness::params::{ParamSet, Set, Set44, TR_BYTES};
+use jolt_field::Zero;
 
 use crate::binding::{instance_record, public_records_binding, FlockProfile};
 use crate::claims::{MultiplicityClaims, PreStageClaims};
 use crate::lookup::{prove_in, LookupError, LookupProof, LookupShape, Table};
-use crate::manifest::{CommitmentManifest, GroupRole, Relation, GROUP_COUNT, LOOKUP_CHALLENGES};
-use crate::opening::opening_claims;
+use crate::keccak_fp::virtuals::{build_keccak_witness, KeccakProverTables};
+use crate::manifest::{
+    CommitmentManifest, GroupRole, HashField, Relation, GROUP_COUNT, LOOKUP_CHALLENGES,
+};
+use crate::opening::{opening_claims, opening_claims_for};
 use crate::pcs::{PcsError, TableCommitter};
 use crate::pow::{KeccakPlan, PowPlan};
 use crate::lane_public::LanePublicData;
@@ -194,6 +199,50 @@ impl KeccakSide for NoKeccak {
         _record: &[u8; 32],
     ) -> Result<Vec<Vec<u8>>, ProveError> {
         Ok(vec![Vec::new(); seeds.len()])
+    }
+}
+
+/// The Keccak side of the all-prime-field aggregate (Flock profile `FpKeccak`): the Keccak
+/// chain is proven inside the PIOP, so the side has no commitments, share items or proofs
+/// (test stand-in: unit tests and the `test-hooks` feature only).
+#[cfg(any(test, feature = "test-hooks"))]
+pub struct FpKeccakSide;
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl KeccakSide for FpKeccakSide {
+    fn commitments(&self, _segments: usize) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
+
+    fn proves_concurrently(&self) -> bool {
+        false
+    }
+
+    fn prove(
+        &self,
+        _bridge_seed: &[u8; 32],
+        _matrices: &BridgeMatrices,
+        _seeds: &[[u8; 32]],
+        _final_vectors: &[Vec<u8>],
+        _record: &[u8; 32],
+    ) -> Result<Vec<Vec<u8>>, ProveError> {
+        Ok(Vec::new())
+    }
+}
+
+/// Empty bridge matrices for the stage drivers under `HashField::Fp`, which take matrices
+/// but read none (there is no bridge).
+pub(crate) fn no_bridge_matrices() -> BridgeMatrices {
+    let empty = || SparseMatrix {
+        rows: 0,
+        cols: 0,
+        k: 0,
+        entries: Vec::new(),
+    };
+    BridgeMatrices {
+        m1: empty(),
+        m2: empty(),
+        m3: empty(),
     }
 }
 
@@ -694,6 +743,10 @@ fn seeds_of(bytes: &[u8]) -> Vec<[u8; 32]> {
 /// A change applied to the honest round-2 tables before they are committed.
 pub type BridgeTamper<'a> = &'a dyn Fn(&CommitmentManifest, &mut BridgeGroupTables);
 
+/// A change applied to the honest Keccak witness and its public tables before the Keccak
+/// groups are committed (`HashField::Fp`).
+pub type KeccakTamper<'a> = &'a dyn Fn(&mut KeccakTables, &mut KeccakPublics);
+
 /// Adversarial-test hooks of [`prove_with_tables`]: skip the honest prover's self-checks so
 /// that a tampered witness reaches the verifier.
 #[doc(hidden)]
@@ -703,6 +756,9 @@ pub struct ProveHooks<'a> {
     pub unchecked: bool,
     /// Change the honest round-2 tables before they are committed.
     pub tamper_bridge: Option<BridgeTamper<'a>>,
+    /// Change the honest Keccak witness before the Keccak groups are committed
+    /// (`HashField::Fp`).
+    pub tamper_keccak: Option<KeccakTamper<'a>>,
     /// Absorb the two branch digests at the join in the wrong order (S, then L).
     pub swap_join: bool,
 }
@@ -1091,17 +1147,25 @@ fn prove_stages_branch<'a>(
     trace: bool,
 ) -> Result<StagesBranch<'a>, ProveError> {
     let mut clock = Lap::new();
+    // Under `HashField::Fp` there is no bridge: no pre-stage claims, no bridge weights, and
+    // the stages read the Keccak tables the caller set on the prebuilt prover tables.
+    let bridge = manifest.hash_field() == HashField::Gf2;
     // Tau and the pre-stage claims.
     let mut points = Points {
-        tau: transcript.challenge_extensions(TAU_SITE, manifest.d_main())?,
+        tau: transcript.challenge_extensions(TAU_SITE, manifest.d_stage())?,
         ..Points::default()
     };
-    let prestage = PreStageClaims::evaluate(manifest, tables, &points.tau);
-    transcript.absorb_extensions(PRESTAGE_SITE, &prestage.to_vec())?;
-    let y_at_tau3 = agg_bridge::final_vector::evaluate(
-        tables.bridge.public_y(),
-        &suffix(&points.tau, manifest.group(GroupRole::Level3).logical_vars),
-    );
+    let (prestage, y_at_tau3) = if bridge {
+        let prestage = PreStageClaims::evaluate(manifest, tables, &points.tau);
+        transcript.absorb_extensions(PRESTAGE_SITE, &prestage.to_vec())?;
+        let y_at_tau3 = agg_bridge::final_vector::evaluate(
+            tables.bridge.public_y(),
+            &suffix(&points.tau, manifest.group(GroupRole::Level3).logical_vars),
+        );
+        (prestage, y_at_tau3)
+    } else {
+        (PreStageClaims::none(), E::zero())
+    };
     let prestage_time = clock.lap();
     phase_stamp("prestage");
 
@@ -1109,7 +1173,9 @@ fn prove_stages_branch<'a>(
     let weights_clock = Instant::now();
     let mut prover_tables = prebuilt.unwrap_or_else(|| ProverTables::new(tables, matrices));
     let parity_time = weights_clock.elapsed();
-    prover_tables.set_tau(matrices, &points.tau);
+    if bridge {
+        prover_tables.set_tau(matrices, &points.tau);
+    }
     if trace {
         eprintln!(
             "weights: parity1 tables {:.1} ms, w_2/w_3 {:.1} ms",
@@ -1125,29 +1191,31 @@ fn prove_stages_branch<'a>(
     points.r1 = stage1.point.clone();
     let stage1_time = clock.lap();
     phase_stamp("stage1");
-    let weights_clock = Instant::now();
-    prover_tables.set_r1(matrices, &points.r1);
-    if trace {
-        eprintln!("weights: w_1 {:.1} ms", weights_clock.elapsed().as_secs_f64() * 1e3);
+    if bridge {
+        let weights_clock = Instant::now();
+        prover_tables.set_r1(matrices, &points.r1);
+        if trace {
+            eprintln!("weights: w_1 {:.1} ms", weights_clock.elapsed().as_secs_f64() * 1e3);
+        }
+        // The split replaces `w_1` with an empty placeholder lane in `ProverTables::lane`; only
+        // stage 2's first group may read it, because the split driver substitutes its factors
+        // there. Any other position would silently use the empty table.
+        let stage2_spec = stage2::spec(manifest);
+        assert_eq!(
+            stage2_spec.groups[0].lanes.first(),
+            Some(&LaneId::Weight(WeightId::Level1(0))),
+            "stage 2's first group must read w_1 in lane 0"
+        );
+        assert!(
+            manifest.has_lanes()
+                || stage2_spec.groups.iter().all(|group| group
+                    .lanes
+                    .iter()
+                    .position(|&lane| lane == LaneId::Weight(WeightId::Level1(0)))
+                    .is_none_or(|position| position == 0)),
+            "w_1 may only appear as the first lane of a stage-2 group"
+        );
     }
-    // The split replaces `w_1` with an empty placeholder lane in `ProverTables::lane`; only
-    // stage 2's first group may read it, because the split driver substitutes its factors
-    // there. Any other position would silently use the empty table.
-    let stage2_spec = stage2::spec(manifest);
-    assert_eq!(
-        stage2_spec.groups[0].lanes.first(),
-        Some(&LaneId::Weight(WeightId::Level1(0))),
-        "stage 2's first group must read w_1 in lane 0"
-    );
-    assert!(
-        manifest.has_lanes()
-            || stage2_spec.groups.iter().all(|group| group
-                .lanes
-                .iter()
-                .position(|&lane| lane == LaneId::Weight(WeightId::Level1(0)))
-                .is_none_or(|position| position == 0)),
-        "w_1 may only appear as the first lane of a stage-2 group"
-    );
     let (stage2_proof, stage2) = if unchecked {
         stage2::prove_unchecked(manifest, &prover_tables, &points, &stage1, transcript)?
     } else {
@@ -1380,7 +1448,7 @@ fn finish_opening(
     committer: &TableCommitter,
     tables: SourceTables<'_>,
     transcript: &mut Transcript,
-    claims: &[GroupClaim; GROUP_COUNT],
+    claims: &[GroupClaim],
     prepared: PreparedOpening,
     threads: usize,
     unchecked: bool,
@@ -1391,11 +1459,15 @@ fn finish_opening(
     // The stage-3 terminal values are the multilinear extensions of the committed tables at
     // the group points (the kernel's terminal values; `tests/all/prove_verify.rs` checks them
     // against the table evaluations), so the opening takes them directly instead of
-    // evaluating every table again.
+    // evaluating every table again. The recomputation reads the source tables, which hold the
+    // lattice groups only, so it runs under `HashField::Gf2`.
     debug_assert!(
         unchecked
-            || crate::pcs::opening_claims(tables, &claims.clone().map(|c| c.point))
-                .is_ok_and(|recomputed| recomputed == *claims),
+            || tables.manifest.hash_field() != HashField::Gf2
+            || <[GroupClaim; GROUP_COUNT]>::try_from(claims.to_vec()).is_ok_and(|claims| {
+                crate::pcs::opening_claims(tables, &claims.clone().map(|c| c.point))
+                    .is_ok_and(|recomputed| recomputed == claims)
+            }),
         "stage-3 terminal values differ from the table evaluations"
     );
     let pool = rayon::current_num_threads();
@@ -1437,7 +1509,16 @@ pub fn prove_with_tables_using(
         return Err(ProveError::Internal("tables and records differ".into()));
     }
     check_bridge(bridge, flock)?;
+    if !flock.matches_hash_field(manifest.hash_field()) {
+        return Err(ProveError::Internal(format!(
+            "Keccak-side profile {flock:?} under hash field {:?}",
+            manifest.hash_field()
+        )));
+    }
     let public = public.unwrap_or_else(|| PublicData::from_instance(inputs.instance));
+    if manifest.hash_field() == HashField::Fp {
+        return prove_core_fp(total, committer, &public, inputs, manifest, main, keccak, flock, hooks);
+    }
     prove_core(
         total,
         committer,
@@ -1477,6 +1558,9 @@ where
     }
     if manifest.records() != n || main.geometry().n != n || manifest.set() != P::SET {
         return Err(ProveError::Internal("tables and records differ".into()));
+    }
+    if manifest.hash_field() != HashField::Gf2 {
+        return Err(ProveError::Internal("the Fp aggregate covers ML-DSA-44 only".into()));
     }
     if n < LANE_MIN_RECORDS {
         return Err(ProveError::Internal(format!(
@@ -1770,11 +1854,13 @@ fn prove_core<C: AsRef<[u8]> + Sync>(
         set: manifest.set(),
         relation: manifest.relation(),
         records: n,
+        hash_field: HashField::Gf2,
         c_tilde: records.iter().map(|r| r.2.as_ref().to_vec()).collect(),
         main16_commitment,
         main_commitment,
+        keccak_commitments: Vec::new(),
         flock_commitments,
-        bridge_commitments,
+        bridge_commitments: bridge_commitments.to_vec(),
         final_vectors,
         flock_shares,
         flock_proofs,
@@ -1793,6 +1879,178 @@ fn prove_core<C: AsRef<[u8]> + Sync>(
         bridge_seed,
         psi,
         flock_seeds,
+        session,
+        points: (run.points, run.r3),
+        pi_m: run.pi_m,
+        timings,
+    })
+}
+
+/// The prover under `HashField::Fp` (ML-DSA-44): the Keccak chain of every record is proven
+/// in the PIOP beside the lattice relation, and one Akita opening covers both. Round 1
+/// commits `G_main16`, `G_main4` and the seven Keccak groups; `Psi` follows (no bridge
+/// seed); round 2 commits `G_k` and `G_m`; the lookup and stages 1 to 3 read the Keccak
+/// tables; the opening adds the Keccak claims at the `d_K` suffix of `r^(3)`. There are no
+/// Flock items and no final vectors, so nothing runs beside the PIOP. `total` is the
+/// caller's start.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn prove_core_fp(
+    total: Instant,
+    committer: Option<TableCommitter>,
+    public: &PublicData,
+    inputs: &ProverInputs<'_>,
+    manifest: &CommitmentManifest,
+    main: &MainTables,
+    keccak: &impl KeccakSide,
+    flock: FlockProfile,
+    hooks: &ProveHooks<'_>,
+) -> Result<ProverOutput, ProveError> {
+    let segments = manifest.segments();
+    if !keccak.commitments(segments).is_empty() {
+        return Err(ProveError::Internal("the Fp aggregate has no Flock items".into()));
+    }
+    let mut clock = Lap(total);
+    let mut timings = ProveTimings::default();
+    let records = inputs.records;
+    let n = records.len();
+    let committer = match committer {
+        Some(prebuilt) if prebuilt.manifest() == manifest => prebuilt,
+        _ => TableCommitter::new(manifest.clone())?,
+    };
+    timings.setup = clock.lap();
+    phase_stamp("setup");
+
+    let digest = public_records_binding(records);
+    let plan = PowPlan::new(manifest, flock, &keccak.plan(segments));
+    let record = instance_record(manifest, &digest, flock, &plan.digest());
+    let mut transcript = Transcript::new(manifest, &record)?;
+
+    // The Keccak witness: one sponge trace per record, absorbing `mu` and the committed
+    // `w_1'` bits of the main tables.
+    let mu: Vec<[u8; TR_BYTES]> = inputs.instance.records.iter().map(|r| r.mu).collect();
+    let (mut keccak_tables, mut keccak_publics) = build_keccak_witness(manifest, main, &mu);
+    if let Some(tamper) = hooks.tamper_keccak {
+        tamper(&mut keccak_tables, &mut keccak_publics);
+    }
+    let keccak_prover = KeccakProverTables::build(&keccak_tables, &keccak_publics);
+    drop(keccak_publics);
+    timings.keccak = clock.lap();
+
+    // Round 1: the lattice groups, then the Keccak groups, absorbed in group order; then Psi.
+    let [main16_round1, main_round1] = committer.commit_round1(main)?;
+    let keccak_round1 = committer.commit_keccak(&keccak_tables)?;
+    drop(keccak_tables);
+    let main16_commitment = main16_round1.serialized()?;
+    let main_commitment = main_round1.serialized()?;
+    transcript.absorb(commitment_site(GroupRole::Main16), 1, &main16_commitment)?;
+    transcript.absorb(commitment_site(GroupRole::Main), 1, &main_commitment)?;
+    let mut keccak_commitments = Vec::with_capacity(keccak_round1.len());
+    for group in &keccak_round1 {
+        let bytes = group.serialized()?;
+        transcript.absorb(commitment_site(group.group), 1, &bytes)?;
+        keccak_commitments.push(bytes);
+    }
+    let psi = transcript.challenge_psi()?;
+    timings.round1 = clock.lap();
+    phase_stamp("events1-3");
+
+    // Round 2: the projection digits and the multiplicities of the two stacks.
+    let bridge_tables = BridgeGroupTables::build_fp(manifest, main, &psi)?;
+    let tables = SourceTables {
+        manifest,
+        main,
+        bridge: &bridge_tables,
+    };
+    let round2 = committer.commit_round2_fp(
+        &bridge_tables.group(manifest, GroupRole::Proj),
+        &bridge_tables.group(manifest, GroupRole::Mult),
+    )?;
+    let mut bridge_commitments = Vec::with_capacity(round2.len());
+    for group in &round2 {
+        let bytes = group.serialized()?;
+        transcript.absorb(commitment_site(group.group), 1, &bytes)?;
+        bridge_commitments.push(bytes);
+    }
+    timings.round2 = clock.lap();
+    phase_stamp("round2");
+
+    // The PIOP: the lookup beside tau and stages 1 and 2, then stage 3.
+    let no_bridge = no_bridge_matrices();
+    let mut prover_tables = ProverTables::new(tables, &no_bridge);
+    prover_tables.set_keccak(&keccak_prover);
+    let (piop, run) = prove_piop_with(
+        manifest,
+        tables,
+        Some(prover_tables),
+        &no_bridge,
+        PiopPublic::Rows(public),
+        &mut transcript,
+        hooks.unchecked,
+        hooks.swap_join,
+        false,
+    )?;
+    drop(keccak_prover);
+    timings.lookup = run.lookup;
+    timings.prestage = run.prestage;
+    timings.stage1 = run.stage1;
+    timings.stage2 = run.stage2;
+    timings.stage3 = run.stage3;
+    clock.lap();
+
+    // One Akita opening of the eleven groups.
+    let claims = opening_claims_for(manifest, &run.r3, &piop.stage3.claims, &run.pi_m, &piop.multiplicities)?;
+    let mut commitments = Vec::with_capacity(manifest.groups().len());
+    commitments.extend([main16_round1, main_round1]);
+    commitments.extend(keccak_round1);
+    commitments.extend(round2);
+    let prepared = committer.prepare_open_claims(commitments, &claims)?;
+    phase_stamp("opening-prepare");
+    let FinishedOpening {
+        session,
+        work,
+        opening,
+        threads: opening_threads,
+        time: opening_time,
+    } = finish_opening(
+        &committer,
+        tables,
+        &mut transcript,
+        &claims,
+        prepared,
+        opening_pool_threads(),
+        hooks.unchecked,
+    )?;
+    timings.opening_threads = opening_threads;
+    timings.opening = opening_time;
+    let proof = AggregateProof {
+        set: manifest.set(),
+        relation: manifest.relation(),
+        records: n,
+        hash_field: HashField::Fp,
+        c_tilde: records.iter().map(|r| r.2.to_vec()).collect(),
+        main16_commitment,
+        main_commitment,
+        keccak_commitments,
+        flock_commitments: Vec::new(),
+        bridge_commitments,
+        final_vectors: Vec::new(),
+        flock_shares: Vec::new(),
+        flock_proofs: Vec::new(),
+        lookup: piop.lookup,
+        multiplicities: piop.multiplicities,
+        prestage: piop.prestage,
+        stage1: piop.stage1,
+        stage2: piop.stage2,
+        stage3: piop.stage3,
+        work,
+        opening,
+    };
+    timings.total = total.elapsed();
+    Ok(ProverOutput {
+        proof,
+        bridge_seed: [0; 32],
+        psi,
+        flock_seeds: Vec::new(),
         session,
         points: (run.points, run.r3),
         pi_m: run.pi_m,

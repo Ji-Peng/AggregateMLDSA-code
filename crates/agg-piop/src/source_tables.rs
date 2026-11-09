@@ -1745,6 +1745,32 @@ impl BridgeGroupTables {
         Self::from_witness(manifest, main, witness, hint_slack.into_iter().collect(), proj, psi)
     }
 
+    /// The round-2 tables under `HashField::Fp`: the projection digits of the committed `v`
+    /// under `psi` and the multiplicities of the main-domain and projection stacks. There is
+    /// no bridge, so the carries, the parities and the public `Y` are empty.
+    pub fn build_fp(manifest: &CommitmentManifest, main: &MainTables, psi: &[u8]) -> Result<Self, SourceTableError> {
+        assert_eq!(manifest.hash_field(), crate::manifest::HashField::Fp, "the Fp round-2 tables");
+        let lanes = 0..manifest.shape().lanes_k as u8;
+        let v_lo: Vec<&[i32]> = lanes.clone().map(|lane| main.column(manifest, Column::V_LO.in_lane(lane)).wide()).collect();
+        let v_hi: Vec<&[i32]> = lanes.map(|lane| main.column(manifest, Column::V_HI.in_lane(lane)).wide()).collect();
+        let mut tables = Self {
+            parity1: None,
+            level1: Vec::new(),
+            parities: Vec::new(),
+            level2: Vec::new(),
+            level3: Vec::new(),
+            y: Vec::new(),
+            proj: ProjectionTables::build(manifest, &v_lo, &v_hi, psi)?,
+            psi: psi.to_vec(),
+            zeros: Vec::new(),
+            multiplicity: Vec::new(),
+            digits: Vec::new(),
+        };
+        tables.recount(manifest, main)?;
+        tables.validate(manifest)?;
+        Ok(tables)
+    }
+
     /// The tables of a general-path parity witness: the carries stacked in their lookup
     /// stacks' slots (`extra_level2` after the level-2 carries: H-FIPS's hint slack), the
     /// level-1 parities cached.
@@ -1810,8 +1836,14 @@ impl BridgeGroupTables {
     }
 
     /// The shape and alphabet self-check of the five round-2 groups (`G_1`, `G_2`, `G_3`,
-    /// `G_k`, `G_m`).
+    /// `G_k`, `G_m`; `G_k` and `G_m` under `HashField::Fp`).
     pub fn validate(&self, manifest: &CommitmentManifest) -> Result<(), SourceTableError> {
+        if manifest.hash_field() == crate::manifest::HashField::Fp {
+            for role in [GroupRole::Proj, GroupRole::Mult] {
+                validate_group(manifest.group(role), &self.group(manifest, role))?;
+            }
+            return Ok(());
+        }
         for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Proj, GroupRole::Mult] {
             validate_group(manifest.group(role), &self.group(manifest, role))?;
         }

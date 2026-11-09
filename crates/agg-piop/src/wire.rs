@@ -10,6 +10,12 @@
 //! 1 = ML-DSA-65, 2 = ML-DSA-87), so an ML-DSA-44 header is unchanged. The parser reads the
 //! relation and the set from the header; a verifier MUST compare both with the ones it
 //! expects before using the proof.
+//!
+//! A `HashField::Fp` proof has the same header and `c~` list, then the round-1 commitments
+//! of `G_main16`, `G_main4` and the seven Keccak groups, the round-2 commitments of `G_k`
+//! and `G_m`, the lookup and the stages without pre-stage claims, the nonce stream and the
+//! opening: no Flock items, no final vectors. The header does not yet name the hash field,
+//! so the caller states it ([`AggregateProof::from_bytes_for`]).
 
 use agg_witness::dispatch_set;
 use agg_witness::params::{ParamSet, Set};
@@ -18,7 +24,7 @@ use crate::claims::{
     Kappa1Claims, MultiplicityClaims, PreStageClaims, Stage1Claims, Stage2Claims, Stage3Claims,
 };
 use crate::lookup::{LookupProof, LookupShape, SessionProof, DEGREE as LOOKUP_DEGREE};
-use crate::manifest::{CommitmentManifest, Relation, WIRE_VERSION};
+use crate::manifest::{CommitmentManifest, HashField, Relation, WIRE_VERSION};
 use crate::stage1::Stage1Proof;
 use crate::stage2::Stage2Proof;
 use crate::stage3::Stage3Proof;
@@ -63,16 +69,23 @@ pub struct AggregateProof {
     pub relation: Relation,
     /// Live records `N`.
     pub records: usize,
+    /// The field the commitment hash is proven in. The header does not carry it: the
+    /// parser takes it from the caller ([`AggregateProof::from_bytes_for`]).
+    pub hash_field: HashField,
     /// `c~_i` per live record ([`c_tilde_bytes`] each).
     pub c_tilde: Vec<Vec<u8>>,
     /// The round-1 Akita commitment of `G_main16`.
     pub main16_commitment: Vec<u8>,
     /// The round-1 Akita commitment of `G_main4`.
     pub main_commitment: Vec<u8>,
-    /// `S` Flock commitments.
+    /// The round-1 Akita commitments of the seven Keccak groups (`HashField::Fp`; empty
+    /// under `HashField::Gf2`).
+    pub keccak_commitments: Vec<Vec<u8>>,
+    /// `S` Flock commitments (empty under `HashField::Fp`).
     pub flock_commitments: Vec<Vec<u8>>,
-    /// The round-2 Akita commitments (`G_1, G_2, G_3, G_k, G_m`).
-    pub bridge_commitments: [Vec<u8>; 5],
+    /// The round-2 Akita commitments: `G_1, G_2, G_3, G_k, G_m` under `HashField::Gf2`,
+    /// `G_k, G_m` under `HashField::Fp`.
+    pub bridge_commitments: Vec<Vec<u8>>,
     /// `Y_sigma`, 4,096 bits packed least significant first.
     pub final_vectors: Vec<[u8; FINAL_VECTOR_BYTES]>,
     /// `S` share items of the Keccak side (mode A: the shares of a segment's parts
@@ -201,6 +214,10 @@ impl AggregateProof {
         }
         w.framed(&self.main16_commitment);
         w.framed(&self.main_commitment);
+        if self.hash_field == HashField::Fp {
+            self.write_fp(&mut w);
+            return w.0;
+        }
         w.bytes(&(self.flock_commitments.len() as u32).to_le_bytes());
         for item in &self.flock_commitments {
             w.framed(item);
@@ -214,6 +231,29 @@ impl AggregateProof {
         for item in &self.flock_shares {
             w.framed(item);
         }
+        self.write_piop(&mut w, true);
+        for item in &self.flock_proofs {
+            w.framed(item);
+        }
+        w.bytes(&self.work);
+        w.framed(&self.opening);
+        w.0
+    }
+
+    /// The rest of an `HashField::Fp` proof after the round-1 lattice commitments: the
+    /// Keccak commitments, the round-2 commitments, the lookup and the stages (no pre-stage
+    /// claims, no Flock items, no final vectors), the nonce stream and the opening.
+    fn write_fp(&self, w: &mut Writer) {
+        for item in self.keccak_commitments.iter().chain(&self.bridge_commitments) {
+            w.framed(item);
+        }
+        self.write_piop(w, false);
+        w.bytes(&self.work);
+        w.framed(&self.opening);
+    }
+
+    /// The lookup and the stages; `prestage` writes the pre-stage claims before stage 1.
+    fn write_piop(&self, w: &mut Writer, prestage: bool) {
         for layer in &self.lookup.layer1 {
             w.elements(layer);
         }
@@ -223,7 +263,9 @@ impl AggregateProof {
             w.elements(&session.leaves.concat());
         }
         w.elements(&self.multiplicities.0);
-        w.elements(&self.prestage.to_vec());
+        if prestage {
+            w.elements(&self.prestage.to_vec());
+        }
         w.rounds(&self.stage1.rounds);
         w.elements(&self.stage1.claims.to_vec());
         w.elements(&self.stage2.kappa1.to_vec());
@@ -232,16 +274,16 @@ impl AggregateProof {
         w.elements(&[self.stage2.projection]);
         w.rounds(&self.stage3.rounds);
         w.elements(&self.stage3.claims.0);
-        for item in &self.flock_proofs {
-            w.framed(item);
-        }
-        w.bytes(&self.work);
-        w.framed(&self.opening);
-        w.0
     }
 
-    /// Parse; the shapes follow from the header's `N`.
+    /// Parse a `HashField::Gf2` proof; the shapes follow from the header's `N`.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, WireError> {
+        Self::from_bytes_for(bytes, HashField::Gf2)
+    }
+
+    /// Parse a proof of `hash_field` (the caller's: the header does not name it); the
+    /// shapes follow from the header's `N`.
+    pub fn from_bytes_for(bytes: &[u8], hash_field: HashField) -> Result<Self, WireError> {
         let mut r = Reader { bytes, at: 0 };
         let version = u16::from_le_bytes(r.array()?);
         if version != WIRE_VERSION {
@@ -259,37 +301,35 @@ impl AggregateProof {
             .ok()
             // Sets with polynomial lanes need a main domain that covers the bridge domains.
             .filter(|&n| set == Set::S44 || n >= crate::prover::LANE_MIN_RECORDS)
-            .and_then(|n| CommitmentManifest::for_set(set, n, relation).ok())
+            .and_then(|n| CommitmentManifest::for_hash_field(set, n, relation, hash_field).ok())
             .ok_or(WireError::Records(records))?;
         let records = manifest.records();
         let segments = manifest.segments();
-        let rounds = manifest.d_main();
+        let rounds = manifest.d_stage();
         let width = c_tilde_bytes(set);
         let c_tilde = (0..records)
             .map(|_| r.take(width).map(<[u8]>::to_vec))
             .collect::<Result<Vec<_>, _>>()?;
         let main16_commitment = r.framed()?;
         let main_commitment = r.framed()?;
-        let count = u32::from_le_bytes(r.array()?) as usize;
-        if count != segments {
-            return Err(WireError::Shape("flock commitment count"));
-        }
-        let flock_commitments = (0..segments)
-            .map(|_| r.framed())
-            .collect::<Result<Vec<_>, _>>()?;
-        let bridge_commitments = [r.framed()?, r.framed()?, r.framed()?, r.framed()?, r.framed()?];
-        let final_vectors = (0..segments)
-            .map(|_| r.array::<FINAL_VECTOR_BYTES>())
-            .collect::<Result<Vec<_>, _>>()?;
-        let flock_shares = (0..segments)
-            .map(|_| r.framed())
-            .collect::<Result<Vec<_>, _>>()?;
+        let fp = hash_field == HashField::Fp;
+        let framed_list = |r: &mut Reader<'_>, count: usize| (0..count).map(|_| r.framed()).collect::<Result<Vec<_>, _>>();
+        let (keccak_commitments, flock_commitments, bridge_commitments, final_vectors, flock_shares) = if fp {
+            let keccak = framed_list(&mut r, crate::manifest::KECCAK_GROUP_COUNT)?;
+            (keccak, Vec::new(), framed_list(&mut r, 2)?, Vec::new(), Vec::new())
+        } else {
+            Self::read_flock_round(&mut r, segments)?
+        };
         let lookup = read_lookup(&mut r, &manifest.lookup_shape())?;
         let multiplicities = MultiplicityClaims::from_slice(&r.elements(MultiplicityClaims::LEN)?)
             .ok_or(WireError::Shape("multiplicity claims"))?;
         let degrees = stage_degrees(&manifest);
-        let prestage = PreStageClaims::from_slice_for(&manifest, &r.elements(PreStageClaims::len(&manifest))?)
-            .ok_or(WireError::Shape("pre-stage claims"))?;
+        let prestage = if fp {
+            PreStageClaims::none()
+        } else {
+            PreStageClaims::from_slice_for(&manifest, &r.elements(PreStageClaims::len(&manifest))?)
+                .ok_or(WireError::Shape("pre-stage claims"))?
+        };
         let stage1 = Stage1Proof {
             rounds: r.rounds(rounds, degrees[0])?,
             claims: Stage1Claims::from_slice_for(&manifest, &r.elements(Stage1Claims::len(&manifest))?)
@@ -308,9 +348,7 @@ impl AggregateProof {
             claims: Stage3Claims::from_slice(&manifest, &r.elements(Stage3Claims::len(&manifest))?)
                 .ok_or(WireError::Shape("stage 3 claims"))?,
         };
-        let flock_proofs = (0..segments)
-            .map(|_| r.framed())
-            .collect::<Result<Vec<_>, _>>()?;
+        let flock_proofs = if fp { Vec::new() } else { framed_list(&mut r, segments)? };
         let work = r.take(work_bytes(&manifest))?.to_vec();
         let opening = r.framed()?;
         if r.at != bytes.len() {
@@ -320,9 +358,11 @@ impl AggregateProof {
             set,
             relation,
             records,
+            hash_field,
             c_tilde,
             main16_commitment,
             main_commitment,
+            keccak_commitments,
             flock_commitments,
             bridge_commitments,
             final_vectors,
@@ -339,6 +379,30 @@ impl AggregateProof {
         })
     }
 
+    /// The `HashField::Gf2` items between the round-1 lattice commitments and the lookup:
+    /// the Flock commitments, the round-2 commitments, the final vectors and the share items.
+    #[allow(clippy::type_complexity)]
+    fn read_flock_round(
+        r: &mut Reader<'_>,
+        segments: usize,
+    ) -> Result<(Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<[u8; FINAL_VECTOR_BYTES]>, Vec<Vec<u8>>), WireError> {
+        let count = u32::from_le_bytes(r.array()?) as usize;
+        if count != segments {
+            return Err(WireError::Shape("flock commitment count"));
+        }
+        let flock_commitments = (0..segments)
+            .map(|_| r.framed())
+            .collect::<Result<Vec<_>, _>>()?;
+        let bridge_commitments = (0..5).map(|_| r.framed()).collect::<Result<Vec<_>, _>>()?;
+        let final_vectors = (0..segments)
+            .map(|_| r.array::<FINAL_VECTOR_BYTES>())
+            .collect::<Result<Vec<_>, _>>()?;
+        let flock_shares = (0..segments)
+            .map(|_| r.framed())
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((Vec::new(), flock_commitments, bridge_commitments, final_vectors, flock_shares))
+    }
+
     /// The lookup part of the proof in bytes (layer 1, the sessions and the
     /// multiplicity-digit claims).
     #[must_use]
@@ -350,7 +414,9 @@ impl AggregateProof {
     #[must_use]
     pub fn piop_bytes(&self) -> usize {
         let width = |rounds: &[Vec<E>]| rounds.iter().map(Vec::len).sum::<usize>();
-        16 * (self.prestage.to_vec().len()
+        // A `HashField::Fp` proof carries no pre-stage claims.
+        let prestage = if self.hash_field == HashField::Fp { 0 } else { self.prestage.to_vec().len() };
+        16 * (prestage
             + self.stage1.claims.to_vec().len()
             + self.stage2.kappa1.0.len()
             + self.stage2.claims.to_vec().len()
@@ -415,8 +481,10 @@ impl AggregateProof {
             akita_commitments: 8
                 + self.main16_commitment.len()
                 + self.main_commitment.len()
+                + framed(&self.keccak_commitments)
                 + framed(&self.bridge_commitments),
-            keccak_commitments: 4 + framed(&self.flock_commitments),
+            // The Flock commitment count (`LE32`) is written under `HashField::Gf2` only.
+            keccak_commitments: if self.hash_field == HashField::Fp { 0 } else { 4 } + framed(&self.flock_commitments),
             final_vectors: FINAL_VECTOR_BYTES * self.final_vectors.len(),
             keccak_proofs: framed(&self.flock_shares) + framed(&self.flock_proofs),
             lookup: self.lookup_bytes(),
@@ -506,11 +574,13 @@ mod tests {
             set,
             relation,
             records,
+            hash_field: HashField::Gf2,
             c_tilde: (0..records).map(|i| vec![i as u8; c_tilde_bytes(set)]).collect(),
             main16_commitment: vec![1, 2],
             main_commitment: vec![1, 2, 3],
+            keccak_commitments: Vec::new(),
             flock_commitments: vec![vec![4; 10]; segments],
-            bridge_commitments: [vec![5], vec![], vec![6, 7], vec![10, 11, 12], vec![8]],
+            bridge_commitments: vec![vec![5], vec![], vec![6, 7], vec![10, 11, 12], vec![8]],
             final_vectors: vec![[8; 512]; segments],
             flock_shares: vec![vec![]; segments],
             flock_proofs: vec![vec![3; 5]; segments],

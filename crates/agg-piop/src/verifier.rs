@@ -41,18 +41,20 @@ use agg_witness::instance::InstanceError;
 use agg_witness::padding::Geometry;
 use agg_witness::params::{ParamSet, Set, Set65, Set87, C_TILDE_BYTES, TR_BYTES, W1_BITS};
 use akita_types::Commitment;
+use jolt_field::Zero;
 
 use crate::binding::{instance_record, public_records_binding, FlockProfile};
 use crate::lookup::{verify_in, LookupError};
-use crate::manifest::{Column, CommitmentManifest, GroupRole, Relation, GROUP_COUNT};
-use crate::opening::{opening_claims, parse_commitment};
+use crate::manifest::{Column, CommitmentManifest, GroupRole, HashField, Relation, GROUP_COUNT};
+use crate::opening::{opening_claims, opening_claims_for, parse_commitment};
 use crate::pcs::{verifier_for, PcsError};
 use crate::pow::{KeccakPlan, PowPlan};
-use crate::prover::{BridgeDerivation, PiopProof};
+use crate::prover::{no_bridge_matrices, BridgeDerivation, PiopProof};
 use crate::lane_public::{LaneKeyCache, LaneStreamedPublic};
 use crate::public_data::KeyCache;
 use crate::public_stream::StreamedPublic;
 use crate::stage::{suffix, Points, StageError};
+use crate::stage1::KeccakPublicInputs;
 use crate::stage3::{LookupInputs, Stage3Output};
 use crate::transcript::{
     commitment_site, flock_record_digest, Transcript, TranscriptError, BRIDGE_SEED_SITE,
@@ -148,6 +150,23 @@ impl KeccakVerifier for NoKeccakVerifier {
     }
 }
 
+/// The Keccak side of the all-prime-field aggregate (Flock profile `FpKeccak`): the Keccak
+/// chain is checked inside the PIOP, so there is nothing per segment to verify (test
+/// stand-in: unit tests and the `test-hooks` feature).
+#[cfg(any(test, feature = "test-hooks"))]
+pub struct FpKeccakVerifier;
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl KeccakVerifier for FpKeccakVerifier {
+    fn profile(&self) -> FlockProfile {
+        FlockProfile::FpKeccak
+    }
+
+    fn verify(&self, _segment: &SegmentContext<'_>) -> bool {
+        false
+    }
+}
+
 /// A verifier configuration under which acceptance would not establish the relation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfigurationError {
@@ -166,6 +185,8 @@ pub enum ConfigurationError {
     /// Mode B (public bits) for a parameter set other than ML-DSA-44: its direct bit check
     /// reads ML-DSA-44's six `w_1` bits per coefficient.
     PublicBitsSet(Set),
+    /// The all-prime-field aggregate (`FpKeccak`) for a parameter set other than ML-DSA-44.
+    FpKeccakSet(Set),
 }
 
 impl std::fmt::Display for ConfigurationError {
@@ -186,6 +207,11 @@ impl std::fmt::Display for ConfigurationError {
             Self::PublicBitsSet(set) => write!(
                 f,
                 "mode B (public bits) is defined for ML-DSA-44 only, not ML-DSA-{}",
+                set.name()
+            ),
+            Self::FpKeccakSet(set) => write!(
+                f,
+                "the all-prime-field aggregate is defined for ML-DSA-44 only, not ML-DSA-{}",
                 set.name()
             ),
         }
@@ -642,6 +668,9 @@ fn run(
     if set != Set::S44 && flock == FlockProfile::PublicBits {
         return Err(VerifyError::Configuration(ConfigurationError::PublicBitsSet(set)));
     }
+    if flock.hash_field() == HashField::Fp {
+        return run_fp(set, records, proof_bytes, keccak, flock, relation, keys, timings);
+    }
     let mut clock = Lap(Instant::now());
 
     // Parse: the header's relation must be the caller's, and the manifest (the instance record, the
@@ -888,6 +917,149 @@ fn run(
     })
 }
 
+/// [`run`] for the all-prime-field aggregate (`HashField::Fp`, ML-DSA-44): parse the proof
+/// as an `Fp` proof, replay the round-1 commitments (`G_main16`, `G_main4`, the seven Keccak
+/// groups), `Psi` and the round-2 commitments (`G_k`, `G_m`), verify the PIOP with the public
+/// `mu` and `c~` tables, and verify one Akita opening of the eleven groups. There is no bridge
+/// seed and no Flock item, so no step runs beside the PIOP.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn run_fp(
+    set: Set,
+    records: &[(&[u8], &[u8])],
+    proof_bytes: &[u8],
+    keccak: &impl KeccakVerifier,
+    flock: FlockProfile,
+    relation: Relation,
+    keys: Keys<'_>,
+    timings: &mut VerifyTimings,
+) -> Result<VerifiedAggregate, VerifyError> {
+    let Keys::Rows(cache) = keys else {
+        return Err(VerifyError::Configuration(ConfigurationError::FpKeccakSet(set)));
+    };
+    if set != Set::S44 {
+        return Err(VerifyError::Configuration(ConfigurationError::FpKeccakSet(set)));
+    }
+    let mut clock = Lap(Instant::now());
+    let proof = AggregateProof::from_bytes_for(proof_bytes, HashField::Fp)?;
+    if proof.set != set {
+        return Err(VerifyError::ParamSet {
+            expected: set,
+            found: proof.set,
+        });
+    }
+    if proof.relation != relation {
+        return Err(VerifyError::Relation {
+            expected: relation,
+            found: proof.relation,
+        });
+    }
+    let n = proof.records;
+    let width = crate::wire::c_tilde_bytes(set);
+    if records.len() != n || proof.c_tilde.len() != n || proof.c_tilde.iter().any(|c| c.len() != width) {
+        return Err(VerifyError::RecordCount);
+    }
+    let manifest = CommitmentManifest::for_set_fp(set, n, relation)
+        .map_err(|e| VerifyError::Opening(PcsError::Plan(e)))?;
+    timings.parse = clock.lap();
+
+    let (pcs, prepared) = rayon::join(
+        || verifier_for(&manifest),
+        || prepare_public(set, n, records, &proof.c_tilde, Keys::Rows(cache)),
+    );
+    let pcs = pcs.map_err(VerifyError::Opening)?;
+    let plan = pcs.plan();
+    let (public, geometry, digest, mu) = prepared?;
+    let Public::Rows(public, mut cache) = public else {
+        unreachable!("ML-DSA-44 is verified on its rows")
+    };
+    timings.public_data = clock.lap();
+
+    // The transcript through round 2: no Flock commitments, no bridge seed, no final vectors.
+    let keccak_plan = keccak.plan(&geometry, &[]).ok_or(VerifyError::Plan)?;
+    let pow_plan = PowPlan::new(&manifest, flock, &keccak_plan);
+    let record = instance_record(&manifest, &digest, flock, &pow_plan.digest());
+    let mut transcript = Transcript::replay(&manifest, &record, &proof.work)?;
+    let mut commitments: Vec<Commitment<BaseField>> = Vec::with_capacity(manifest.groups().len());
+    let mut absorb = |transcript: &mut Transcript, role: GroupRole, bytes: &[u8]| -> Result<(), VerifyError> {
+        let commitment =
+            parse_commitment(plan, role, bytes).map_err(|_| VerifyError::Commitment(role))?;
+        transcript.absorb(commitment_site(role), 1, bytes)?;
+        commitments.push(commitment);
+        Ok(())
+    };
+    absorb(&mut transcript, GroupRole::Main16, &proof.main16_commitment)?;
+    absorb(&mut transcript, GroupRole::Main, &proof.main_commitment)?;
+    for (role, bytes) in GroupRole::KECCAK.into_iter().zip(&proof.keccak_commitments) {
+        absorb(&mut transcript, role, bytes)?;
+    }
+    transcript.challenge_psi()?;
+    for (role, bytes) in [GroupRole::Proj, GroupRole::Mult].into_iter().zip(&proof.bridge_commitments) {
+        absorb(&mut transcript, role, bytes)?;
+    }
+    timings.transcript = clock.lap();
+
+    let piop = PiopProof {
+        lookup: proof.lookup.clone(),
+        multiplicities: proof.multiplicities.clone(),
+        prestage: proof.prestage.clone(),
+        stage1: proof.stage1.clone(),
+        stage2: proof.stage2.clone(),
+        stage3: proof.stage3.clone(),
+    };
+    let keccak_public = KeccakPublicInputs {
+        mu: &mu,
+        c_tilde: &proof.c_tilde,
+    };
+    let no_bridge = no_bridge_matrices();
+    let mut pass_window = None;
+    let mut pass_result: Option<(Duration, Duration, usize)> = None;
+    let verified = verify_piop_with(
+        &manifest,
+        &no_bridge,
+        &[],
+        Some(keccak_public),
+        &piop,
+        &mut transcript,
+        timings,
+        |r2, r3, _| {
+            let started = Instant::now();
+            let pass = public.pass(r2, r3, cache.as_deref_mut());
+            pass_window = Some((started, Instant::now()));
+            pass_result = Some((pass.t_time, pass.a_time, pass.expanded));
+            (vec![pass.t_at_r2], vec![pass.ring_weight])
+        },
+    );
+    clock.0 = verified.stage3_end;
+    match (pass_window, pass_result) {
+        (Some((started, finished)), Some((t_time, a_time, _))) => {
+            timings.stage3_rounds = started - verified.stage3_start;
+            timings.public_t = t_time;
+            timings.public_a = a_time;
+            timings.stage3_terminal = verified.stage3_end - finished;
+        }
+        _ => timings.stage3_rounds = verified.stage3_end - verified.stage3_start,
+    }
+    let expanded_keys = pass_result.map_or(0, |pass| pass.2);
+    let (_, stage3, pi_m) = verified.outcome?;
+    drop(public);
+
+    // One opening of the eleven groups: the lattice and Keccak claims at the suffixes of
+    // r^(3), the multiplicity digits at pi_m.
+    let session = transcript.pcs_session()?;
+    transcript.ensure_complete()?;
+    let claims = opening_claims_for(&manifest, &stage3.point, &stage3.claims, &pi_m, &proof.multiplicities)
+        .map_err(VerifyError::Opening)?;
+    pcs.verify(&commitments, &claims, &proof.opening, &session)
+        .map_err(|e| VerifyError::Opening(PcsError::Commit(e)))?;
+    timings.opening = clock.lap();
+    Ok(VerifiedAggregate {
+        records: n,
+        bridge_seed: [0; 32],
+        session,
+        expanded_keys,
+    })
+}
+
 /// What [`verify_piop`] returns: the outcome (`(tau, r^(1), r^(2), lookup points)`, the
 /// stage-3 output and the table point `pi_m`) and the stage-3 window for the timings.
 pub struct PiopVerified {
@@ -917,7 +1089,7 @@ pub fn verify_piop(
     timings: &mut VerifyTimings,
     public_pass: impl FnOnce(&[E], &[E]) -> (E, E),
 ) -> PiopVerified {
-    verify_piop_with(manifest, matrices, y_table, proof, transcript, timings, |r2, r3, _| {
+    verify_piop_with(manifest, matrices, y_table, None, proof, transcript, timings, |r2, r3, _| {
         let (t, w) = public_pass(r2, r3);
         (vec![t], vec![w])
     })
@@ -938,14 +1110,18 @@ pub fn verify_piop_lanes(
     timings: &mut VerifyTimings,
     public_pass: impl FnOnce(&[E], &[E], &[E]) -> (Vec<E>, Vec<E>),
 ) -> PiopVerified {
-    verify_piop_with(manifest, matrices, y_table, proof, transcript, timings, public_pass)
+    verify_piop_with(manifest, matrices, y_table, None, proof, transcript, timings, public_pass)
 }
 
+/// The PIOP verifier of both hash fields. Under `HashField::Fp` there is no bridge: no
+/// pre-stage claims and no `Y`, and stage 1 evaluates the public `mu` and `c~` tables from
+/// `keccak_public`.
 #[allow(clippy::too_many_arguments)]
 fn verify_piop_with(
     manifest: &CommitmentManifest,
     matrices: &BridgeMatrices,
     y_table: &[u8],
+    keccak_public: Option<KeccakPublicInputs<'_>>,
     proof: &PiopProof,
     transcript: &mut Transcript,
     timings: &mut VerifyTimings,
@@ -984,17 +1160,24 @@ fn verify_piop_with(
         // Branch S: tau, the pre-stage claims, Y(tau_3), stages 1 and 2.
         let transcript_s = &mut stages_transcript;
         let mut points = Points {
-            tau: transcript_s.challenge_extensions(TAU_SITE, manifest.d_main())?,
+            tau: transcript_s.challenge_extensions(TAU_SITE, manifest.d_stage())?,
             ..Points::default()
         };
-        if proof.prestage.y2.len() != manifest.shape().w1_bits || proof.prestage.kappa2.len() != manifest.shape().w1_bits {
-            return Err(VerifyError::Stage(StageError::Shape("pre-stage claims".into())));
-        }
-        transcript_s.absorb_extensions(PRESTAGE_SITE, &proof.prestage.to_vec())?;
-        let y_at_tau3 = agg_bridge::final_vector::evaluate(
-            y_table,
-            &suffix(&points.tau, manifest.group(GroupRole::Level3).logical_vars),
-        );
+        let y_at_tau3 = if manifest.hash_field() == HashField::Gf2 {
+            if proof.prestage.y2.len() != manifest.shape().w1_bits || proof.prestage.kappa2.len() != manifest.shape().w1_bits {
+                return Err(VerifyError::Stage(StageError::Shape("pre-stage claims".into())));
+            }
+            transcript_s.absorb_extensions(PRESTAGE_SITE, &proof.prestage.to_vec())?;
+            agg_bridge::final_vector::evaluate(
+                y_table,
+                &suffix(&points.tau, manifest.group(GroupRole::Level3).logical_vars),
+            )
+        } else {
+            if keccak_public.is_none() {
+                return Err(VerifyError::Stage(StageError::Shape("the public Keccak inputs".into())));
+            }
+            E::zero()
+        };
         timings.prestage = clock.lap();
 
         let stage1 = stage1::verify(
@@ -1003,7 +1186,7 @@ fn verify_piop_with(
             &points,
             &proof.prestage,
             y_at_tau3,
-            None,
+            keccak_public,
             &proof.stage1,
             transcript_s,
         )?;

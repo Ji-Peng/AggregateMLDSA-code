@@ -115,6 +115,7 @@ impl Fixture {
             unchecked: true,
             tamper_bridge: tamper,
             swap_join: false,
+            tamper_keccak: None,
         };
         prove_with_tables(
             &prover_inputs,

@@ -50,6 +50,17 @@ pub struct PreStageClaims {
 }
 
 impl PreStageClaims {
+    /// The empty claims of a batch without the bridge (`HashField::Fp`), which carries no
+    /// pre-stage claims.
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            y2: Vec::new(),
+            kappa2: Vec::new(),
+            kappa3: E::zero(),
+        }
+    }
+
     /// Wire length of ML-DSA-44.
     pub const LEN: usize = 2 * W1_BITS + 1;
 

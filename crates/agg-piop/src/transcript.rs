@@ -40,7 +40,7 @@ use sha3::{CShake256, CShake256Core};
 use spongefish::{DomainSeparator, DuplexSpongeInterface, Encoding, VerifierState, WithoutInstance};
 
 use crate::lookup::{LookupError, LookupSite, LookupTranscript, DEGREE as LOOKUP_DEGREE};
-use crate::manifest::{CommitmentManifest, GroupRole};
+use crate::manifest::{CommitmentManifest, GroupRole, HashField};
 use crate::pow::{SiteClass, WorkReader, WorkSite, WorkStreamError, WorkWriter};
 use crate::{BaseField, OpeningField};
 
@@ -330,9 +330,15 @@ impl Registry {
     /// `|K|`, a merge `1 / |K|`, the point `tau` `d_main / |K|`); `X` carries none, its
     /// joint bound is `((L + M - 1) / |K|)^2`; the byte site `psi` carries one bit, chosen
     /// by policy because its bound is not a field numerator.
+    ///
+    /// Under `HashField::Fp` the Keccak chain is part of the PIOP: round 1 commits the seven
+    /// Keccak groups after `G_main16` and `G_main4`, `Psi` follows them directly (no Flock
+    /// items and no bridge seed), round 2 commits `G_k` and `G_m` only, and branch S has no
+    /// pre-stage claims (there is no bridge level to reduce).
     #[must_use]
     pub fn new(manifest: &CommitmentManifest) -> Self {
-        let rounds = manifest.d_main();
+        let fp = manifest.hash_field() == HashField::Fp;
+        let rounds = manifest.d_stage();
         let segments = manifest.segments();
         let mut b = Builder(Vec::with_capacity(32 + 6 * rounds + 4 * rounds * rounds));
         let elements = |count: usize| PayloadSize::Exact(16 * count);
@@ -341,26 +347,39 @@ impl Registry {
         for role in [GroupRole::Main16, GroupRole::Main] {
             b.push(commitment_site(role), PROOF_KIND, 1, PayloadSize::Variable);
         }
-        b.push(FLOCK_COMMIT_SITE, PROOF_KIND, segments, PayloadSize::Variable);
-        b.push(BRIDGE_SEED_SITE, CHALLENGE_KIND, 1, PayloadSize::Exact(32));
+        if fp {
+            for role in GroupRole::KECCAK {
+                b.push(commitment_site(role), PROOF_KIND, 1, PayloadSize::Variable);
+            }
+        } else {
+            b.push(FLOCK_COMMIT_SITE, PROOF_KIND, segments, PayloadSize::Variable);
+            b.push(BRIDGE_SEED_SITE, CHALLENGE_KIND, 1, PayloadSize::Exact(32));
+        }
         b.push(PROJ_SITE, PUBLIC_KIND, 1, PayloadSize::Exact(PROJ_SITE.len()));
         b.challenge_bits(PROJ_SITE, proj_atoms(manifest), SiteClass::ProjPsi, PROJ_PSI_BITS);
-        for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Proj, GroupRole::Mult] {
+        let round2: &[GroupRole] = if fp {
+            &[GroupRole::Proj, GroupRole::Mult]
+        } else {
+            &[GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Proj, GroupRole::Mult]
+        };
+        for &role in round2 {
             b.push(commitment_site(role), PROOF_KIND, 1, PayloadSize::Variable);
         }
-        b.push(
-            FLOCK_SEEDS_SITE,
-            CHALLENGE_KIND,
-            segments,
-            PayloadSize::Exact(32 * segments),
-        );
-        b.push(
-            FINAL_VECTORS_SITE,
-            PROOF_KIND,
-            segments,
-            PayloadSize::Exact(FINAL_VECTOR_BYTES * segments),
-        );
-        b.push(FLOCK_SHARES_SITE, PROOF_KIND, segments, PayloadSize::Variable);
+        if !fp {
+            b.push(
+                FLOCK_SEEDS_SITE,
+                CHALLENGE_KIND,
+                segments,
+                PayloadSize::Exact(32 * segments),
+            );
+            b.push(
+                FINAL_VECTORS_SITE,
+                PROOF_KIND,
+                segments,
+                PayloadSize::Exact(FINAL_VECTOR_BYTES * segments),
+            );
+            b.push(FLOCK_SHARES_SITE, PROOF_KIND, segments, PayloadSize::Variable);
+        }
         // Branch L: its label, then the lookup: X, layer 1, mu_1, the sessions, then the
         // multiplicity-digit claims.
         let fork_lookup = b.0.len();
@@ -403,8 +422,10 @@ impl Registry {
         let fork_stages = b.0.len();
         b.push(FORK_STAGES_SITE, BRANCH_KIND, 1, PayloadSize::Exact(FORK_STAGES_SITE.len()));
         b.challenge(TAU_SITE, rounds, SiteClass::Tau, 0, 0, count(rounds));
-        let prestage = crate::claims::PreStageClaims::len(manifest);
-        b.push(PRESTAGE_SITE, PROOF_KIND, prestage, PayloadSize::Exact(16 * prestage));
+        if !fp {
+            let prestage = crate::claims::PreStageClaims::len(manifest);
+            b.push(PRESTAGE_SITE, PROOF_KIND, prestage, PayloadSize::Exact(16 * prestage));
+        }
         let kappa1 = crate::claims::Kappa1Claims::len(manifest);
         let degrees = stage_degrees(manifest);
         let (stage_gammas, stage_terminals) = (stage_gammas(manifest), stage_terminals(manifest));
@@ -1002,6 +1023,35 @@ mod tests {
     fn lookup_events(manifest: &CommitmentManifest) -> usize {
         let shape = manifest.lookup_shape();
         3 + (2..=shape.max_depth()).map(|s| 4 + 2 * (s - 1)).sum::<usize>() + 1
+    }
+
+    #[test]
+    fn fp_registry_has_no_bridge_or_flock_events() {
+        let manifest = CommitmentManifest::for_batch_fp(8).unwrap();
+        let registry = Registry::new(&manifest);
+        let sites: Vec<&str> = registry.events.iter().map(|e| e.site.as_str()).collect();
+        // Instance, nine round-1 commitments, the projection label and Psi, two round-2
+        // commitments, then branch L.
+        let leading = 1 + 9 + 2 + 2;
+        assert_eq!(registry.fork[0], leading);
+        assert_eq!(sites[1..10], [
+            "agg-mldsa/v1/commit/main16",
+            "agg-mldsa/v1/commit/main",
+            "agg-mldsa/v1/commit/keccak-a0",
+            "agg-mldsa/v1/commit/keccak-a1",
+            "agg-mldsa/v1/commit/keccak-a2",
+            "agg-mldsa/v1/commit/keccak-a3",
+            "agg-mldsa/v1/commit/keccak-a4",
+            "agg-mldsa/v1/commit/keccak-c",
+            "agg-mldsa/v1/commit/keccak-c-prime",
+        ]);
+        assert_eq!(sites[10..leading], [PROJ_SITE, PROJ_SITE, "agg-mldsa/v1/commit/proj", "agg-mldsa/v1/commit/mult"]);
+        for absent in [FLOCK_COMMIT_SITE, BRIDGE_SEED_SITE, FLOCK_SEEDS_SITE, FINAL_VECTORS_SITE, FLOCK_SHARES_SITE, PRESTAGE_SITE] {
+            assert!(!sites.contains(&absent), "{absent}");
+        }
+        let stages = registry.fork[1];
+        assert_eq!(sites[stages..stages + 3], [FORK_STAGES_SITE, TAU_SITE, "agg-mldsa/v1/stage1/gamma"]);
+        assert_eq!(registry.events[stages + 1].atoms, manifest.d_stage());
     }
 
     #[test]

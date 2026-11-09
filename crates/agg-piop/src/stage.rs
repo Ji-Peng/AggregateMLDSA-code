@@ -1865,11 +1865,7 @@ mod tests {
 
     #[test]
     fn masked_stage_group_round_trip() {
-        use crate::claims::PreStageClaims;
-        use crate::transcript::{
-            commitment_site, BRIDGE_SEED_SITE, FINAL_VECTORS_SITE, FINAL_VECTOR_BYTES,
-            FLOCK_COMMIT_SITE, FLOCK_SEEDS_SITE, FLOCK_SHARES_SITE, PRESTAGE_SITE, TAU_SITE,
-        };
+        use crate::transcript::{commitment_site, TAU_SITE};
 
         let manifest = CommitmentManifest::for_batch_fp(8).expect("fp manifest");
         let col0 = Column::KeccakA { x: 0, y: 0, q: 0 };
@@ -1918,30 +1914,18 @@ mod tests {
         let mut cells1 = make_cells(&mut rng);
 
         let stage1_transcript = || -> (Transcript, Points) {
+            // The `HashField::Fp` events through round 2: the lattice and Keccak
+            // commitments, Psi, G_k and G_m; branch S has no pre-stage claims.
             let mut trunk = Transcript::new(&manifest, &manifest.binding_bytes()).unwrap();
-            for role in [GroupRole::Main16, GroupRole::Main] {
+            for role in [GroupRole::Main16, GroupRole::Main].into_iter().chain(GroupRole::KECCAK) {
                 trunk.absorb(commitment_site(role), 1, &[0]).unwrap();
             }
-            trunk.absorb_items(FLOCK_COMMIT_SITE, &[vec![]]).unwrap();
-            trunk.challenge_bytes(BRIDGE_SEED_SITE, 1).unwrap();
             trunk.challenge_psi().unwrap();
-            for role in [
-                GroupRole::Level1,
-                GroupRole::Level2,
-                GroupRole::Level3,
-                GroupRole::Proj,
-                GroupRole::Mult,
-            ] {
+            for role in [GroupRole::Proj, GroupRole::Mult] {
                 trunk.absorb(commitment_site(role), 1, &[0]).unwrap();
             }
-            trunk.challenge_bytes(FLOCK_SEEDS_SITE, 1).unwrap();
-            trunk.absorb(FINAL_VECTORS_SITE, 1, &[0; FINAL_VECTOR_BYTES]).unwrap();
-            trunk.absorb_items(FLOCK_SHARES_SITE, &[vec![]]).unwrap();
             let (_lookup, mut stages) = trunk.fork().unwrap();
             let tau = stages.challenge_extensions(TAU_SITE, manifest.d_stage()).unwrap();
-            stages
-                .absorb_extensions(PRESTAGE_SITE, &vec![E::zero(); PreStageClaims::len(&manifest)])
-                .unwrap();
             (
                 stages,
                 Points {

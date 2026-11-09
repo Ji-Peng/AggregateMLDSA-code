@@ -1787,6 +1787,7 @@ impl Aggregator {
             unchecked: hooks.tamper_main.is_some() || hooks.tamper_bridge.is_some() || hooks.stale_bridge,
             tamper_bridge: if hooks.stale_bridge { Some(&stale) } else { hooks.tamper_bridge },
             swap_join: false,
+            tamper_keccak: None,
         };
         let (committer, public) = early_setup
             .and_then(|handle| handle.join().ok())
@@ -1938,6 +1939,7 @@ impl Aggregator {
                 hooks.tamper_bridge
             },
             swap_join: false,
+            tamper_keccak: None,
         };
         let (committer, public) = early_setup
             .and_then(|handle| handle.join().ok())
