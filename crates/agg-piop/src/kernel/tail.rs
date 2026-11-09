@@ -19,6 +19,7 @@ use agg_simd::pattern::Columns;
 use akita_algebra::split_eq::GruenSplitEq;
 use jolt_field::{One, Zero};
 
+use super::arena::{give_planes, take_planes, SharedArena};
 use super::plan::{Pieces, PolyKind};
 use crate::OpeningField as E;
 
@@ -164,14 +165,15 @@ impl TailTerms {
 }
 
 /// The dense table of a group in lane-major planes (`rows` words per coordinate plane, the
-/// two planes of lane `l` at word offsets `2 l rows` and `(2 l + 1) rows`), with the buffer
-/// the next fold writes into.
+/// two planes of lane `l` at word offsets `2 l rows` and `(2 l + 1) rows`). Its buffers come
+/// from the plane pool of the group's arena and return there when a fold replaces them, so
+/// the groups of a stage reuse mapped pages instead of faulting fresh ones.
 pub(super) struct Tail {
     terms: TailTerms,
     width: usize,
     rows: usize,
     table: AlignedVec<u64>,
-    spare: Option<AlignedVec<u64>>,
+    arena: SharedArena,
     /// The challenge whose fold the next pass performs.
     pending: Option<E>,
     /// The slot sums of the next round, when the pass that built the table evaluated them,
@@ -185,9 +187,15 @@ impl Tail {
     /// pairs in the same pass, block by block while they are in cache, and
     /// [`Self::message`] then returns the cached sums (it must be called with the same
     /// `full`); `None` builds the table of the last variable, after which no round follows.
-    pub fn from_rows(terms: TailTerms, challenge: E, source: &dyn RowSource, eval: Option<(&GruenSplitEq<E>, bool)>) -> Self {
+    pub fn from_rows(
+        terms: TailTerms,
+        challenge: E,
+        source: &dyn RowSource,
+        eval: Option<(&GruenSplitEq<E>, bool)>,
+        arena: SharedArena,
+    ) -> Self {
         let (width, rows) = (source.width(), source.rows() / 2);
-        let buffer = AlignedVec::<u64>::uninit(2 * width * rows);
+        let buffer = take_planes(&arena, 2 * width * rows);
         let fill = Fill::Computed(Some(challenge), source);
         let input: [Planes<'_>; 0] = [];
         let (table, cached) = match eval {
@@ -205,7 +213,7 @@ impl Tail {
             }
             None => (fused::fused_pass_into::<Columns>(buffer, width, rows, &input, fill, None).0, None),
         };
-        Self { terms, width, rows, table, spare: None, pending: None, cached }
+        Self { terms, width, rows, table, arena, pending: None, cached }
     }
 
     fn lanes(&self) -> Vec<Planes<'_>> {
@@ -231,17 +239,14 @@ impl Tail {
             return fused::fused_pass(None, &input, None::<Fill<'_, Columns>>, eval);
         };
         let rows_out = self.rows / 2;
-        // The first fold allocates only its output size and writes every word before
-        // reading it; subsequent folds reuse an initialized buffer.
-        let (out, total) = if let Some(mut out) = self.spare.take() {
+        // The fold writes every word of the new table before reading it, so a pooled buffer
+        // of any earlier contents serves; the replaced table returns to the pool.
+        let buffer = take_planes(&self.arena, 2 * self.width * rows_out);
+        let (out, total) = {
             let input = self.lanes();
-            let total = fused::fused_pass(Some((&mut out[..], self.width, rows_out)), &input, Some(Fill::<Columns>::Fold(r, &input)), eval);
-            (out, total)
-        } else {
-            let input = self.lanes();
-            fused::fold_new(r, &input, rows_out, eval)
+            fused::fused_pass_into(buffer, self.width, rows_out, &input, Fill::<Columns>::Fold(r, &input), eval)
         };
-        self.spare = Some(std::mem::replace(&mut self.table, out));
+        give_planes(&self.arena, std::mem::replace(&mut self.table, out));
         self.rows = rows_out;
         total
     }
@@ -285,5 +290,13 @@ impl Tail {
         if last {
             self.pass(None);
         }
+    }
+}
+
+impl Drop for Tail {
+    /// The last table returns to the pool for the groups that are still running.
+    fn drop(&mut self) {
+        let table = std::mem::replace(&mut self.table, AlignedVec::fill_par(0, 1, |_| 0));
+        give_planes(&self.arena, table);
     }
 }

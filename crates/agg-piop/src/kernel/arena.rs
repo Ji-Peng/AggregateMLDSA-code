@@ -20,6 +20,21 @@ pub(crate) fn lock_arena(arena: &SharedArena) -> MutexGuard<'_, TableArena> {
 pub(crate) struct TableArena {
     a: Vec<E>,
     b: Vec<E>,
+    /// Spare plane buffers of the groups' plane tails.
+    planes: agg_simd::buf::Pool,
+}
+
+/// A plane buffer of at least `len` words from the arena's pool, else a new one. The lock is
+/// released before the buffer is prepared (the poison fill of `AGG_ALLOC_POISON=1` runs
+/// on the thread pool, whose tasks may take the same lock).
+pub(crate) fn take_planes(arena: &SharedArena, len: usize) -> agg_simd::buf::AlignedVec<std::mem::MaybeUninit<u64>> {
+    let spare = lock_arena(arena).planes.take_spare(len);
+    agg_simd::buf::Pool::ready(spare, len)
+}
+
+/// Return a plane buffer to the arena's pool.
+pub(crate) fn give_planes(arena: &SharedArena, buffer: agg_simd::buf::AlignedVec<u64>) {
+    lock_arena(arena).planes.give(buffer.into_uninit());
 }
 
 impl TableArena {

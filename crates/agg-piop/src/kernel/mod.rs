@@ -2077,7 +2077,9 @@ impl<'a> Group<'a> {
         // After the last bind no round follows, so nothing is evaluated.
         let eval = (!last).then(|| (eq, !eq.can_recover_linear_q_term_from_claim()));
         let source = FoldedRows { inner: self.level2_rows(), r };
-        let table = Tail::from_rows(terms, challenge, &source, eval);
+        // A group outside a stage driver has no arena: its tail recycles within itself.
+        let arena = self.arena.clone().unwrap_or_else(TableArena::shared);
+        let table = Tail::from_rows(terms, challenge, &source, eval, arena);
         drop(source);
         self.tail = Some(table);
         self.dense = Vec::new();
