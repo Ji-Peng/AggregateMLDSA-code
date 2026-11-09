@@ -310,10 +310,12 @@ A self-check compares the final claim with `eq` times the summand at the termina
   ML-DSA-87). `AGG_TAIL_MAX_SLOTS` and `AGG_TAIL_MAX_LANES` lower these caps (for A/B runs;
   a group over a cap runs the row-major dense rounds, with the same messages), and
   `AGG_STAGE_TRACE` prints, per group, whether its tail is on with its lane and slot counts.
-  A tail group also runs its third active round on the fused kernels (its level-2 quartet,
-  pair-fold and table values gathered block by block as the rows of `Fill::Computed`), and
-  its third bind folds the same gathered rows into the first plane table while evaluating the
-  fourth round in the same pass; its quartet lanes need no Taylor tables.
+  A tail group also runs its third and fourth active rounds on the fused kernels without a
+  stored table: its level-2 quartet, pair-fold and table values are gathered block by block
+  as the rows of `Fill::Computed` (`LevelRows`), and for the fourth round folded by the third
+  challenge as they are gathered (`FoldedRows`). Its fourth bind gathers and folds them twice
+  into the first plane table, a sixteenth of the domain, while evaluating the fifth round in
+  the same pass; no level-3 table is written. Its quartet lanes need no Taylor tables.
 - A projection weight kept as its two factors (`RankOneGroup`) folds only the combination
   `g = V_lo + 2^16 V_hi + 2^15` by the low challenges (one integer dot per high row) for the
   high rounds.

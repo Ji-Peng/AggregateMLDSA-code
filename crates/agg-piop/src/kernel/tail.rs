@@ -1,15 +1,16 @@
 //! The dense rounds of a generic [`super::Group`] on lane-major `K` planes.
 //!
-//! From the third bind on, a generic group holds every lane as a table of `K` values. When
-//! all of the group's pieces are at most quadratic in the lanes, the summand is the bilinear
-//! form with coefficient slots of `agg_simd::fused`, and a round is one fused pass: fold
-//! every lane by the previous challenge into the spare buffer and evaluate the round on the
-//! just-written pairs. This replaces the row-major table with its separate evaluation and
-//! fold passes. The round before the table (level 2) runs on the same kernels: the lanes'
-//! compact states are gathered block by block and evaluated, and the third bind folds the
-//! gathered rows into the first table while it evaluates the next round. The round
-//! polynomial is unique, so the messages equal those of the scalar dense rounds byte for
-//! byte.
+//! When all of a generic group's pieces are at most quadratic in the lanes, the summand is
+//! the bilinear form with coefficient slots of `agg_simd::fused`, and the dense rounds run
+//! on lane-major `K` planes: a round is one fused pass that folds every lane by the previous
+//! challenge into the spare buffer and evaluates the round on the just-written pairs. This
+//! replaces the row-major table with its separate evaluation and fold passes. The two
+//! rounds before the table (levels 2 and 3) run on the same kernels without a stored table:
+//! the lanes' compact level-2 states are gathered block by block and evaluated (level 2), or
+//! gathered, folded by the challenge of bind 2 and evaluated (level 3). Bind 3 gathers
+//! and folds them twice into the first table, a sixteenth of the domain, while it evaluates
+//! the next round. The round polynomial is unique, so the messages equal those of the
+//! scalar dense rounds byte for byte.
 
 use agg_simd::buf::{AlignedVec, KPlanes};
 use agg_simd::fused::{self, Eval, Fill, RowSource, Terms, MAX_LANES, MAX_SLOTS};
@@ -180,24 +181,31 @@ pub(super) struct Tail {
 
 impl Tail {
     /// Build the table by folding the rows of `source` (twice the table's rows) by
-    /// `challenge`, and evaluate the next round on the new pairs in the same pass, block by
-    /// block while they are in cache. [`Self::message`] then returns the cached sums when
-    /// it is called with the same `full`.
-    pub fn from_rows(terms: TailTerms, challenge: E, source: &dyn RowSource, eq: &GruenSplitEq<E>, full: bool) -> Self {
+    /// `challenge`. With `eval = Some((eq, full))`, the next round is evaluated on the new
+    /// pairs in the same pass, block by block while they are in cache, and
+    /// [`Self::message`] then returns the cached sums (it must be called with the same
+    /// `full`); `None` builds the table of the last variable, after which no round follows.
+    pub fn from_rows(terms: TailTerms, challenge: E, source: &dyn RowSource, eval: Option<(&GruenSplitEq<E>, bool)>) -> Self {
         let (width, rows) = (source.width(), source.rows() / 2);
         let buffer = AlignedVec::<u64>::uninit(2 * width * rows);
-        let (first, second) = eq.remaining_eq_tables();
-        let first_planes = KPlanes::from_fn(first.len(), |i| first[i]);
-        let eval = Eval {
-            terms: terms.as_terms(),
-            first: first_planes.planes(),
-            second,
-            full,
-        };
+        let fill = Fill::Computed(Some(challenge), source);
         let input: [Planes<'_>; 0] = [];
-        let (table, total) =
-            fused::fused_pass_into::<Columns>(buffer, width, rows, &input, Fill::Computed(Some(challenge), source), Some(eval));
-        Self { terms, width, rows, table, spare: None, pending: None, cached: Some((full, total)) }
+        let (table, cached) = match eval {
+            Some((eq, full)) => {
+                let (first, second) = eq.remaining_eq_tables();
+                let first_planes = KPlanes::from_fn(first.len(), |i| first[i]);
+                let eval = Eval {
+                    terms: terms.as_terms(),
+                    first: first_planes.planes(),
+                    second,
+                    full,
+                };
+                let (table, total) = fused::fused_pass_into::<Columns>(buffer, width, rows, &input, fill, Some(eval));
+                (table, Some((full, total)))
+            }
+            None => (fused::fused_pass_into::<Columns>(buffer, width, rows, &input, fill, None).0, None),
+        };
+        Self { terms, width, rows, table, spare: None, pending: None, cached }
     }
 
     fn lanes(&self) -> Vec<Planes<'_>> {
