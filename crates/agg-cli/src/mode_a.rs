@@ -1596,6 +1596,30 @@ pub fn sponge_records_for<P: agg_witness::params::ParamSet>(
         .collect()
 }
 
+/// The Akita prover setup of `manifest` (warmed) beside the public data that `public` builds
+/// once the instance arrives, each on its own thread; `None` for a part that failed.
+fn early_setup_and_public<T: Send>(
+    manifest: impl FnOnce() -> Option<CommitmentManifest>,
+    public: impl FnOnce() -> Option<T> + Send,
+) -> (Option<agg_piop::pcs::TableCommitter>, Option<T>) {
+    std::thread::scope(|scope| {
+        let public = std::thread::Builder::new()
+            .name("agg-public".into())
+            .spawn_scoped(scope, || {
+                let public = public();
+                agg_piop::prover::phase_stamp("setup-public");
+                public
+            })
+            .ok();
+        let committer = manifest().and_then(|m| agg_piop::pcs::TableCommitter::new(m).ok());
+        if let Some(committer) = &committer {
+            let _ = committer.warm();
+        }
+        agg_piop::prover::phase_stamp("setup-committer");
+        (committer, public.and_then(|handle| handle.join().ok()).flatten())
+    })
+}
+
 /// The mode-A aggregator (holds the sponge gate, built once).
 pub struct Aggregator {
     gate: ChainGate,
@@ -1714,22 +1738,15 @@ impl Aggregator {
         if !relation.is_available(P::SET) {
             return Err(AggregateError::Relation(P::SET, relation));
         }
-        // The Akita setup and the lane public data on their own thread, as for ML-DSA-44.
+        // The Akita setup and the lane public data on their own threads, as for ML-DSA-44.
         let (public_tx, public_rx) = std::sync::mpsc::channel::<Arc<PublicInstance<P>>>();
         let early_setup = std::thread::Builder::new()
             .name("agg-setup".into())
             .spawn(move || {
-                let committer = CommitmentManifest::for_set(P::SET, n, relation)
-                    .ok()
-                    .and_then(|m| agg_piop::pcs::TableCommitter::new(m).ok());
-                if let Some(committer) = &committer {
-                    let _ = committer.warm();
-                }
-                let public = public_rx
-                    .recv()
-                    .ok()
-                    .map(|instance| LanePublicData::from_instance(&instance));
-                (committer, public)
+                early_setup_and_public(
+                    || CommitmentManifest::for_set(P::SET, n, relation).ok(),
+                    move || public_rx.recv().ok().map(|instance| LanePublicData::from_instance(&instance)),
+                )
             })
             .ok();
         for (i, (pk, _, sig)) in records.iter().enumerate() {
@@ -1843,24 +1860,18 @@ impl Aggregator {
         }
         // The Akita prover setup and the public data depend only on the record count, the
         // relation and the instance: the setup is built on its own thread while the instance
-        // is computed, then the same thread builds the public data while the tables are
-        // computed. Any failure here leaves both to `prove_with_tables_using`.
+        // is computed, and the public data on a second one as soon as the instance is
+        // ready (the setup outlasts the instance, so built after it the public data would
+        // delay the join). Any failure here leaves both to `prove_with_tables_using`.
         let relation = self.config.relation;
         let (public_tx, public_rx) = std::sync::mpsc::channel::<Arc<PublicInstance>>();
         let early_setup = std::thread::Builder::new()
             .name("agg-setup".into())
             .spawn(move || {
-                let committer = CommitmentManifest::for_relation(n, relation)
-                    .ok()
-                    .and_then(|m| agg_piop::pcs::TableCommitter::new(m).ok());
-                if let Some(committer) = &committer {
-                    let _ = committer.warm();
-                }
-                let public = public_rx
-                    .recv()
-                    .ok()
-                    .map(|instance| PublicData::from_instance(&instance));
-                (committer, public)
+                early_setup_and_public(
+                    || CommitmentManifest::for_relation(n, relation).ok(),
+                    move || public_rx.recv().ok().map(|instance| PublicData::from_instance(&instance)),
+                )
             })
             .ok();
         for (i, (pk, _, sig)) in records.iter().enumerate() {

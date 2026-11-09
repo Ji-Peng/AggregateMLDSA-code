@@ -373,6 +373,10 @@ of every prover step. `scripts/cpusample.py` samples the busy share of all vCPUs
 share (medians over several runs). "Busy" counts SMT siblings: 100% busy is not twice the
 throughput of 50%.
 
+The Akita prover setup and the public data are built beside the instance and the tables, on
+the `agg-setup` and `agg-public` threads; they stamp `setup-committer` and `setup-public` when
+done (out of step order), and the `setup` stamp follows the join that waits for both.
+
 The `opening` step covers only the finish part of the Akita opening. Its prepare part runs on
 the PIOP branch, so it appears in the `opening-prepare` to `join` interval and in the
 fork-join wall when the fork runs; `AGG_OPENING_THREADS` sizes the finish pool only. Opening
