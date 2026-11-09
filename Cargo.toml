@@ -5,6 +5,7 @@ members = [
   "crates/agg-pcs-config",
   "crates/agg-piop",
   "crates/agg-keccak",
+  "crates/agg-fpkeccak",
   "crates/agg-bridge",
   "crates/agg-cli",
   "crates/agg-bench",
@@ -42,6 +43,7 @@ agg-witness = { path = "crates/agg-witness" }
 agg-pcs-config = { path = "crates/agg-pcs-config" }
 agg-piop = { path = "crates/agg-piop" }
 agg-keccak = { path = "crates/agg-keccak" }
+agg-fpkeccak = { path = "crates/agg-fpkeccak" }
 agg-bridge = { path = "crates/agg-bridge" }
 agg-mldsa-simd = { path = "crates/agg-mldsa-simd" }
 agg-mldsa-cref = { path = "crates/agg-mldsa-cref" }

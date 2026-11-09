@@ -158,6 +158,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "agg-fpkeccak"
+version = "0.1.0"
+dependencies = [
+ "agg-witness",
+ "rayon",
+ "sha3 0.10.9",
+]
+
+[[package]]
 name = "agg-keccak"
 version = "0.1.0"
 dependencies = [
