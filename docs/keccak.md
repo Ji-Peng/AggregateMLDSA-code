@@ -422,7 +422,7 @@ Mode A end to end (`agg bench --keys 16 --warmup 1 --reps 3 --flock-profile slim
 verifier's peak RSS, `VmHWM` maxima over the runs of one process, were 1,780 / 891 -> 2,109 /
 978 MiB at 1,024 and 1,791 / 1,087 -> 2,094 / 1,612 MiB at 2,048; the per-phase trace of the
 tied part shows the same peak, 1,257 vs 1,259 MiB at 2,048; see below.) CLI round trips (`agg aggregate` then `agg verify`, `keygen-batch --count 64`) at 256
-and 1,024 records accept under H-u and H-exact (300,425 / 300,424 B and 339,252 / 339,258 B);
+and 1,024 records accept under H-u (since removed) and H-exact (300,425 / 300,424 B and 339,252 / 339,258 B);
 each aggregate verified under the other relation, and one with a flipped middle byte, is
 rejected.
 

@@ -111,9 +111,9 @@ over tampered round-1 bits).
 A=target/release/agg
 taskset -c 0,1,3-15 $A keygen-batch [--params 44|65|87] --count 16 --seed 1 --out keys.bin
 taskset -c 0,1,3-15 $A sign-batch [--params 44|65|87] --keys keys.bin --count 256 --seed 1 --out records.bin
-taskset -c 0,1,3-15 $A aggregate [--params 44|65|87] --records records.bin --out aggregate.bin [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-u|h-exact|h-fips]
-taskset -c 0,1,3-15 $A verify [--params 44|65|87] --records records.bin --aggregate aggregate.bin [--cache keys.cache] [--flock-profile fast|slim|slim8] [--relation h-u|h-exact|h-fips]
-AGG_GIT_REV=$(git rev-parse HEAD) taskset -c 0,1,3-15 $A bench [--params 44|65|87] --count 256 [--keys K] [--seed S] [--warmup 1] [--reps 5] [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-u|h-exact|h-fips] [--json PATH]
+taskset -c 0,1,3-15 $A aggregate [--params 44|65|87] --records records.bin --out aggregate.bin [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-fips|h-exact]
+taskset -c 0,1,3-15 $A verify [--params 44|65|87] --records records.bin --aggregate aggregate.bin [--cache keys.cache] [--flock-profile fast|slim|slim8] [--relation h-fips|h-exact]
+AGG_GIT_REV=$(git rev-parse HEAD) taskset -c 0,1,3-15 $A bench [--params 44|65|87] --count 256 [--keys K] [--seed S] [--warmup 1] [--reps 5] [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-fips|h-exact] [--json PATH]
 ```
 
 Environment knobs (all optional; none changes the proof bytes):
@@ -159,15 +159,15 @@ backends and the SIMD environment knobs. ML-DSA-65 and ML-DSA-87 take
 every relation and at least 17 records.
 
 `--relation` selects the relation (`docs/h-exact.md`, spec Section 3.1, Appendix A and
-"ML-DSA-65 and ML-DSA-87 parameters"): `h-u` (default, relation byte 0: ML-DSA-44
-`z in [-2^17, 2^17)`, `|u| <= 190,465`; ML-DSA-65/87 `z in [-2^19, 2^19)`,
-`|u| <= 523,777`), `h-exact` (relation byte 1: also the FIPS 204 bound
-`|z| <= gamma1 - beta - 1`, that is 130,993, 524,091 or 524,167; one more committed column
-for ML-DSA-44, none for 65/87) or `h-fips` (relation byte 2: also the hint, so the
-extracted `(c~, z, h)` is a FIPS 204 signature; `docs/h-exact.md` 10 and 11.2). `aggregate` and `bench` prove the chosen relation
+"ML-DSA-65 and ML-DSA-87 parameters"): `h-fips` (default, relation byte 2: the FIPS 204
+bounds and the hint, so the extracted `(c~, z, h)` is a FIPS 204 signature;
+`docs/h-exact.md` 10 and 11.2) or `h-exact` (relation byte 1: the FIPS 204 bounds
+`|z| <= gamma1 - beta - 1`, that is 130,993, 524,091 or 524,167, and `|u| <= 2 gamma2 + 1`,
+that is 190,465 or 523,777, without the hint; a reference relation, slightly faster).
+Relation byte 0 (the former relaxed relation H-u) is rejected as unknown. `aggregate` and `bench` prove the chosen relation
 (`AggregatorConfig::relation`); `verify` verifies under the chosen relation
 (`AggregateVerifier::relation`) and rejects an aggregate whose header names another one
-("the proof claims relation H-exact, the verifier expects H-u"), so verifying an aggregate
+("the proof claims relation H-exact, the verifier expects H-FIPS"), so verifying an aggregate
 needs the `--relation` it was made with. The prover and verifier reports and the `bench`
 header print the relation. The Keccak side does not depend on it.
 
@@ -264,7 +264,7 @@ workers: single noisy runs, not benchmarks):
 
 | Relation | Aggregate | PIOP rounds and claims | Work nonces | Akita opening | Prove | Stage 2 / stage 3 | Verify uncached / cached |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| H-u | 522,138 B (509.9 B/sig) | 4,736 B | 391 B | 60,994 B | 2,901 ms | 67.5 / 181.1 ms | 352 / 296 ms |
+| H-u (removed) | 522,138 B (509.9 B/sig) | 4,736 B | 391 B | 60,994 B | 2,901 ms | 67.5 / 181.1 ms | 352 / 296 ms |
 | H-exact | 522,154 B (509.9 B/sig) | 4,736 B | 391 B | 61,010 B | 2,981 ms | 60.9 / 198.0 ms | 316 / 290 ms |
 
 Every other part is equal (lookup 21,344 B, Flock proofs 398,518 B). The PIOP bytes agree
@@ -273,8 +273,8 @@ with `16 (81 + 11 d_main)` at `d_main = 20` for both relations (9 + 1 + 34 claim
 ML-DSA-65 and ML-DSA-87 at 1K (revision `1c5516d`, all 16 CPUs of the WSL box with turbo
 and HT on; not benchmarks). Sizes: the artifact gate records (keys seed 42, records seed
 43, `agg aggregate --params P`), byte-identical under `AGG_ISA=avx512ifma|avx512|avx2|scalar`
-and with `RAYON_NUM_THREADS=1` and 16 (H-u; `artifact/expected/hashes.json` pins the 1K
-digest of every set and relation). Times: in-process
+and with `RAYON_NUM_THREADS=1` and 16 (measured under the former default H-u;
+`artifact/expected/hashes.json` pins the 1K digest of every set under H-FIPS and H-exact). Times: in-process
 medians of `agg bench --params P --count 1024 --warmup 1 --reps 2` (1,024 keys; verify with
 uncached and with cached keys):
 

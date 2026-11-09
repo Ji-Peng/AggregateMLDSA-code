@@ -7,7 +7,8 @@ recorded in their patch records. The protocol itself is specified in `docs/spec.
 vendored changes are recorded in `vendor/akita/PATCH.md` and
 `vendor/flock-core/PATCH.md`.
 
-Unless a different condition is stated, timings refer to relation H-u, 32K signatures,
+Unless a different condition is stated, timings refer to relation H-u (the default when
+they were measured; it has since been removed, and H-FIPS is the default), 32K signatures,
 median of five cold runs, at 49.2 B/sig. The reference run was taken on the two builds that
 run-time ISA dispatch has since replaced: 2.76 s on the AVX-512IFMA build and 2.98 s on the
 general build (PCLMULQDQ baseline, no IFMA kernels). The single release build measures
@@ -372,7 +373,7 @@ and the dispatch:
 
 - `crates/agg-cli/tests/all/simd_backends.rs` runs `keygen-batch`, `sign-batch`,
   `aggregate` and `verify` for scalar, AVX2 and AVX-512 and for one and sixteen threads. It
-  covers H-u at 1,024 records over 64 and over 1,024 keys, H-exact at 256 records and
+  covers H-FIPS at 1,024 records over 64 and over 1,024 keys, H-exact at 256 records and
   H-FIPS at 256 records, and compares the aggregate and the key-cache bytes across every
   combination.
 - `scripts/simd-ab.sh` builds `origin/main` as a baseline and compares a 1K aggregate of

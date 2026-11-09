@@ -388,7 +388,7 @@ least the 512 that five classes with inner rings `(2048, 2048, 2048, 512, 2048)`
 
 For the checked-in ML-DSA-44 rows nothing changes: they are not re-planned, and the
 catalog bytes and the aggregate are unchanged. If a 44 row were re-planned, the three
-rows whose product at `d_d` of 64 or 128 is 360 (`2^11` signatures under H-u and
-H-exact, `2^12` under H-FIPS) would now also search those openings; the rows at 540 to
+rows whose product at `d_d` of 64 or 128 is 360 (`2^11` signatures under H-exact, `2^12`
+under H-FIPS) would now also search those openings; the rows at 540 to
 900 would not. Planner time grows with the product; the ML-DSA-65 row at `2^15`
 signatures planned in 67 s on an idle local machine, against 173 s for the ML-DSA-44 row.

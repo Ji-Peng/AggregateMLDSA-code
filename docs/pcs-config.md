@@ -2,8 +2,9 @@
 
 Akita commitment presets, generated fold-schedule catalogs, work plan and two-round
 commit driver for the seven witness groups of spec Section 4.1 (lookup layout L16 with the
-projection of `v`, `docs/lookup.md`, deviation K24; H-u rows `mldsa-<set>-p16-*`, H-exact
-rows `mldsa-<set>-p16x-*`, H-FIPS rows `mldsa-<set>-p16f-*`; Section 3 and the planning runs
+projection of `v`, `docs/lookup.md`, deviation K24; H-exact
+rows `mldsa-<set>-p16x-*`, H-FIPS rows `mldsa-<set>-p16f-*`, and for ML-DSA-65 and ML-DSA-87
+the rows `mldsa-<set>-p16-*` planned for the removed relation H-u, which H-exact resolves to; Section 3 and the planning runs
 of Section 4 that name `l16*` rows describe the six-group layout before K24, which 4.1
 amends). Akita and Aerie pins as in `README.md` (Akita
 `e023b6a`, the revision Aerie `49b6c21` pins, with the `dev-protocol` feature the
@@ -91,7 +92,8 @@ the base-16 layout; deviation L3).
 
 The table below is ML-DSA-44's six-group base layout; 4.1 adds `G_k` and gives `G_3` the
 layout of `G_2` (seven groups: `G_3` then holds 12 polynomials and `G_k` 4, 53 in total under
-H-u). The other sets: the last section.
+the removed relation H-u, whose `G_main4` of 8 polynomials the table shows; 54 under H-exact
+and 59 under H-FIPS). The other sets: the last section.
 
 Physical layouts `(num_vars, num_polynomials)` in wire and catalog order; `G_m` is the
 final group, the others are precommitted. Logical domains below `2^13` cells are
@@ -116,11 +118,14 @@ table point.
 
 ## 4. Catalog status
 
-All thirteen batch sizes of the wire version, `N* = 2^3` to `2^15`, are ready for the three
-relations (`CATALOG_D_SIG` for H-u, `CATALOG_D_SIG_H_EXACT` for H-exact,
-`CATALOG_D_SIG_H_FIPS` for H-FIPS; rows are keyed by `(d_sig, relation)`,
-`catalogs::catalog_batches`); none is pending. Two artifacts hold the rows of all three
-parameter sets (width 16: 610,544 B with 65 rows; width 4: 2,275,269 B with 166 rows). The
+All thirteen batch sizes of the wire version, `N* = 2^3` to `2^15`, are ready for both
+relations (`CATALOG_D_SIG_H_EXACT` for H-exact, `CATALOG_D_SIG_H_FIPS` for H-FIPS; rows are
+keyed by `(d_sig, relation)`, `catalogs::catalog_batches`); none is pending. Two artifacts
+hold the rows of all three parameter sets (width 16: 610,544 B with 65 rows; width 4:
+1,927,484 B with 140 rows). Relation H-u has been removed: its 26 ML-DSA-44 rows (`G_main4` with 8 polynomials and
+the grouped rows `mldsa-44-p16-batch-<N*>-mult-final`) were pruned from the width-4 artifact,
+which held 166 rows in 2,275,269 B before. The comparisons with H-u rows below are planning
+records from before the removal. The
 ML-DSA-44 rows are described below, its H-FIPS rows at the end of this section and the
 ML-DSA-65 and ML-DSA-87 rows in the last section:
 
@@ -130,11 +135,10 @@ ML-DSA-65 and ML-DSA-87 rows in the last section:
   `G_k` layouts coincide with `G_main16` rows);
 - `crates/agg-pcs-config/src/schedules/agg_mldsa_fp64_signed_width4.aks`: per relation 13
   scalar producer rows (`G_main4` at 13..=25
-  variables with 8 polynomials for H-u, 9 for H-exact) and 13 grouped rows, one per batch
-  size, named `mldsa-44-p16-batch-<N*>-mult-final` (H-u) and
-  `mldsa-44-p16x-batch-<N*>-mult-final` (H-exact), each keyed by `G_m = (16, 7)` and the
+  variables with 9 polynomials for H-exact) and 13 grouped rows, one per batch
+  size, named `mldsa-44-p16x-batch-<N*>-mult-final` (H-exact), each keyed by `G_m = (16, 7)` and the
   six precommitted profiles in wire order (two families). The width-16 rows are shared:
-  H-exact changes only `G_main4` (`docs/h-exact.md` 2.2).
+  H-exact changed only `G_main4` against H-u (`docs/h-exact.md` 2.2).
 
 Every width-4 group uses one balanced base-16 inner digit and every width-16 group one
 balanced base-`2^16` digit; no row needs a setup prefix (checked by
@@ -243,7 +247,7 @@ opens with the claims it already holds (the stage-3 terminal values and the mult
 digit claims).
 
 Test `tests/all/commit_open.rs` (release, 7 cores): dummy tables in each group's honest
-alphabet (16-bit balanced values, the base-4 and base-8 digits (relaxed H; H-u's base 6 lies inside), Booleans, multiplicity
+alphabet (16-bit balanced values, the base-4 and base-8 digits (relaxed H; the base 6 of `U_hi` lies inside), Booleans, multiplicity
 digits; padded signatures carry the digits of zero), random claims in `K` at logical points
 (both main groups at one point), both rounds, one batched opening, verification by the
 seed-only and the prover-derived verifier, and rejection of a changed claim value, a
@@ -263,7 +267,7 @@ feature off, off CPU 2:
 
 ```sh
 # plan only missing rows of one or more batch sizes (keeps the others, of both relations;
-# saves after each row); AGG_CATALOG_RELATION = h-u, h-exact, h-fips or all (default),
+# saves after each row); AGG_CATALOG_RELATION = h-exact, h-fips or all (default),
 # AGG_CATALOG_SET = 44, 65, 87 or all (default)
 AGG_CATALOG_D_SIG=15 AGG_CATALOG_RELATION=h-exact taskset -c 0,1,3-15 cargo test \
     -p agg-pcs-config --release --no-default-features --test all \
@@ -277,8 +281,8 @@ AGG_CATALOG_D_SIG=8,10 taskset -c 0,1,3-15 cargo test -p agg-pcs-config --releas
 ```
 
 `AKITA_SCHEDULE_GEN_JOBS` bounds the parallel scalar planners (default 3; the search
-is memory bound). To add or change a layout: edit `Group`/`Relation`/`CATALOG_D_SIG`/
-`CATALOG_D_SIG_H_EXACT` in `src/catalogs.rs`, run `update_catalog_rows` for the new batches
+is memory bound). To add or change a layout: edit `Group`/`Relation`/`CATALOG_D_SIG_H_EXACT`/
+`CATALOG_D_SIG_H_FIPS` in `src/catalogs.rs`, run `update_catalog_rows` for the new batches
 (it keeps every row of `catalog_batches()` and of the requested batches and prunes the
 rest, so a new batch size is requested through the environment first and added to the
 constant once its rows exist), then `cargo test -p agg-pcs-config` (the default-feature
@@ -288,17 +292,17 @@ full `regenerate`.
 
 ## ML-DSA-65 and ML-DSA-87 catalog layouts
 
-The H-u catalog has 13 batch rows per set, with names `mldsa-65-p16-batch-<N*>-mult-final` and `mldsa-87-p16-batch-<N*>-mult-final`. Group counts in catalog order are listed below; `crates/agg-pcs-config/src/catalogs.rs` defines the domains and row selection.
+The rows planned for the removed relation H-u, now used by H-exact, are 13 batch rows per set, with names `mldsa-65-p16-batch-<N*>-mult-final` and `mldsa-87-p16-batch-<N*>-mult-final`. Group counts in catalog order are listed below; `crates/agg-pcs-config/src/catalogs.rs` defines the domains and row selection.
 
 | Set | main16 | main4 | level1 | level2 | level3 | projection | multiplicity | Total |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 65 | 23 | 46 | 4 | 8 | 8 | 5 | 7 | 101 |
-| 87 | 31 | 62 | 4 | 8 | 8 | 5 | 7 | 125 |
+| 65 H-exact | 23 | 46 | 4 | 8 | 8 | 5 | 7 | 101 |
+| 87 H-exact | 31 | 62 | 4 | 8 | 8 | 5 | 7 | 125 |
 | 65 H-FIPS | 23 | 64 | 4 | 9 | 9 | 5 | 7 | 121 |
 | 87 H-FIPS | 31 | 86 | 4 | 9 | 9 | 5 | 7 | 151 |
 
-H-exact has H-u's layouts, so its batches (row names `p16x`) resolve to the H-u rows; no row of
-its own is checked in. H-FIPS (`p16f`) adds per set 13 grouped rows (11 distinct, `d_sig` 3 to 5
+H-exact has the layouts that H-u had, so its batches (row names `p16x`) resolve to the `p16`
+rows; no row of its own is checked in. H-FIPS (`p16f`) adds per set 13 grouped rows (11 distinct, `d_sig` 3 to 5
 share their physical groups), the width-4 scalar rows of `G_main4` at `(13..23, 64)` and
 `(13..23, 86)`, and the width-16 rows of `G_2` at `(13|14|15, 9)` (shared by both sets), planned
 with `AGG_CATALOG_RELATION=h-fips update_catalog_rows` (4 workers on this box; the 32K grouped

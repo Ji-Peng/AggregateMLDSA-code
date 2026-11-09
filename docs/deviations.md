@@ -48,13 +48,13 @@ Code: no layout implements S1+S2; relation H-FIPS (L10) takes its place. Why: H-
 no `r1` (the `w1'` bits carry it) and replaces the cubic UseHint check by zero-checks of
 degree at most 3.
 
-## W2. Padded rows of relations H-u, H-exact and H-FIPS (spec Section 4.2, Appendix A)
+## W2. Padded rows of relations H-exact and H-FIPS (spec Section 4.2, Appendix A)
 
 Spec: "for i >= N every value is zero", with the digits of zero at -b_k/2.
 
 Code: padded rows hold the canonical encoding of the all-zero witness (z = 0, w' = 0, h = 0).
-For z and v under H-u this is exactly the spec (digits -b_k/2, top signed digit 0); u = 0
-takes the step form (B_ulo = 1,228, H_u = 3; spec 4.2). For H-exact, z = 0 is encoded
+For v (and for z under the removed H-u) this is exactly the spec (digits -b_k/2, top signed
+digit 0); u = 0 takes the step form (B_ulo = 1,228, H_u = 3; spec 4.2). For H-exact, z = 0 is encoded
 through the bit-slack form (a_z = 0, B_zhi = 1, B_zlo = 65,457; spec 4.3). For H-FIPS,
 w' = 0 with h = 0 is the coefficient `hfips::Coeff::PADDED` and the hint slack is
 u_h = omega = 80. Why: sum delta^2 + u_h = omega then holds on every row, so no live
@@ -1280,6 +1280,8 @@ seven claims of `G_m` at `pi_m`. No range check of the digits: Lemma 5 of LogUp 
 
 ## L8. Relation H-u replaces relaxed H; `u` by one six-valued digit (spec Sections 3, 4.3, 7.4, 10, 12; Appendix A; `docs/h-exact.md` step A)
 
+H-u itself was removed later (L11); its step form of `u` stays in H-exact.
+
 Spec (revision 4, wire version 2): the relaxed relation H with `(bar B_z, bar B_u) = (2^17,
 2^18)`, `u = U_lo + 2^16 U_hi + 2^15` with a base-8 `U_hi` on `leaf8` (degree 5), so
 `zeta' = 421,888`; Appendix A's H-exact `u` form `118,787 a_u + b_u - 190,465` needs two small
@@ -1372,3 +1374,22 @@ affine `r0` keeps the 16-bit `l_lo` lane on the kernel's linear fast path; the m
 reductions instead of new lanes; the stage-1 vector and the `tau` site stay as they are. No
 wire-version bump: H-u and H-exact proofs are byte-identical, and an H-FIPS proof differs in
 the relation byte and in counts the verifier derives from the manifest.
+
+## L11. Relation H-u removed; H-FIPS is the default (spec Sections 3.1, 10; Appendix A; `docs/h-exact.md`)
+
+Spec (before this change): H-u (relation byte 0) the default, H-exact (byte 1) and H-FIPS
+(byte 2) opt-in. Code: `manifest::Relation` has `HExact` (byte 1) and `HFips` (byte 2, the
+`#[default]`); byte 0 fails `Relation::from_id` and is rejected like any unknown relation
+byte. `agg --relation`, `AggregatorConfig::relation`, `AggregateVerifier::relation` and the
+`mode_b` bench (`AGG_RELATION`) default to H-FIPS. Removed with H-u: its `z` forms (the radix
+form `z + 2^17 = z_lo + 2^16 z_hi` of ML-DSA-44 and the relaxed digit-slack form
+`z + 2^19 = z_lo + 2^16 z_mid + 2^19 a_z` of ML-DSA-65 and ML-DSA-87), the SIMD digit kernel
+that wrote its columns unchecked, and the 26 ML-DSA-44 width-4 catalog rows (`G_main4` at
+`(13..25, 8)` and `mldsa-44-p16-batch-<N*>-mult-final`). Kept: the step form of `u` (L8),
+which H-exact uses, and the ML-DSA-65 and ML-DSA-87 rows `mldsa-<set>-p16-*`, which H-exact
+resolves to (equal layouts). No wire-version bump: H-exact and H-FIPS aggregates are
+byte-identical to those of the previous revision.
+
+Why: three relations made the results hard to follow. H-FIPS gives the strongest guarantee
+(the extracted `(c~, z, h)` is a FIPS 204 signature) at a small cost; H-exact stays as a
+reference relation that is slightly faster.

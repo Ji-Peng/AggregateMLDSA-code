@@ -4,6 +4,7 @@
 | --- | --- |
 | Applies to | ML-DSA-44 (ML-DSA-65 and ML-DSA-87: Section 11), lookup layout L16, modes A and B; relations H-u (byte 0, deviation L8, Section 8), H-exact (byte 1, deviation L9, Section 9) and H-FIPS (byte 2, deviation L10, Section 10) |
 | Replaces | spec Appendix A, paragraph "H-exact" |
+| Status | H-u has been removed from the code (deviation L11): relation byte 0 is rejected as unknown, H-FIPS (byte 2) is the default and H-exact (byte 1) an optional reference relation. The comparisons with H-u below are kept as the design rationale; Sections 8 and 9 record the code as it was built, with H-u present. |
 
 The uppercase terms MUST, SHOULD and MAY are normative as in BCP 14. Numbers not marked
 "estimate" were computed for this document with exact integer arithmetic (Section 4.4 lists
@@ -18,7 +19,7 @@ measurements.
    SelfTargetMSIS bound is `zeta' = max(130,993, 190,465 + 2^12 * 39) = 350,209 = zeta` of
    FIPS 204, so aggregate unforgeability rests on ML-DSA-44's own instance (core-SVP 123.5
    classical).
-2. **Flag.** Runtime relation id, byte `1` (H-u is `0`; byte `2` is H-FIPS, Section 10),
+2. **Flag.** Runtime relation id, byte `1` (byte `0` was H-u and is now rejected; byte `2` is H-FIPS, Section 10),
    carried in the proof header's flags byte and in the event-0 manifest bytes; the verifier
    accepts exactly the relation its caller configures (no downgrade to H-u).
 3. **Layout (recommended, "X1").** `z = B_zlo + 2^16 B_zhi + 130,915 a_z - 130,993` with
@@ -52,7 +53,7 @@ measurements.
    PIOP bytes 6,128 at `2^15`, as for H-u. Measured at `N = 1,024` (Section 9): the
    aggregate is 16 B longer than H-u's (the Akita opening), prove 2.98 s against 2.90 s.
 8. **H-u.** The SelfTargetMSIS bound does not depend on the `z` bound at all (`2^17 <
-   350,209`). Relation H-u (byte 0, the default, Section 8) keeps the `z` digits `Z_lo, Z_hi`
+   350,209`). Relation H-u (byte 0, the default until its removal, Section 8) kept the `z` digits `Z_lo, Z_hi`
    and makes only `u` exact with the six-valued digit: `zeta' = zeta = 350,209` with no extra
    column. H-exact adds only the exact `z` bound (the literal FIPS 204 line-13 bound) for
    +1,024 elements per signature.
@@ -70,11 +71,11 @@ measurements.
 
 | Relation | Id byte | Proven bounds `(B_z bar, B_u bar)` | `zeta'` | Status |
 | --- | ---: | --- | ---: | --- |
-| H-u (default) | 0 | `(2^17, 190,465)` (inclusive `[-2^17, 2^17 - 1]`, `[-190,465, 190,465]`) | 350,209 | implemented (step A, deviation L8), the default |
-| H-exact | 1 | `(130,993, 190,465)`, both symmetric and exact | 350,209 | implemented (step B, deviation L9) |
-| H-FIPS | 2 | `(130,993, 190,465)` and the hint: `sum h <= omega` and `UseHint(h, w') = w1'` (Section 10) | 350,209 (not needed: the extracted witness is a FIPS 204 signature) | implemented (Sections 10.5 to 10.7) |
+| H-u | 0 | `(2^17, 190,465)` (inclusive `[-2^17, 2^17 - 1]`, `[-190,465, 190,465]`) | 350,209 | removed (step A, deviations L8 and L11); byte 0 is rejected |
+| H-exact | 1 | `(130,993, 190,465)`, both symmetric and exact | 350,209 | implemented (step B, deviation L9), an optional reference relation |
+| H-FIPS | 2 | `(130,993, 190,465)` and the hint: `sum h <= omega` and `UseHint(h, w') = w1'` (Section 10) | 350,209 (not needed: the extracted witness is a FIPS 204 signature) | implemented (Sections 10.5 to 10.7), the default |
 
-The id equals `agg_pcs_config::catalogs::Relation::id()` (0 H-u, 1 H-exact, 2 H-FIPS), so one
+The id equals `agg_pcs_config::catalogs::Relation::id()` (1 H-exact, 2 H-FIPS; 0 was H-u), so one
 number names the relation everywhere.
 
 ### 1.2 Runtime parameter, not a cargo feature
@@ -86,7 +87,8 @@ checked-in catalogs hold the rows of every relation.
 ### 1.3 Where it is bound
 
 1. **Proof header** (`wire::AggregateProof`): the flags byte after the version is the relation
-   id. `from_bytes` accepts `0`, `1` and `2` and rejects any other value (`WireError::Flags`).
+   id. `from_bytes` accepts `1` and `2` and rejects any other value, `0` included since H-u was
+   removed (`WireError::Flags`).
 2. **Event 0** (`CommitmentManifest::binding_bytes`, absorbed through
    `binding::instance_record` before any commitment):
    * byte 3 is the relation id;
@@ -106,8 +108,8 @@ checked-in catalogs hold the rows of every relation.
    MUST NOT be read from the proof and trusted: `verifier::verify` takes the expected relation
    as an argument, rejects a header flag that differs from it before replaying event 0
    (`VerifyError::Relation`), and builds the manifest (hence event 0, the catalog row, the
-   plan) from that argument, not from the header. `agg verify --relation h-u|h-exact|h-fips`
-   (default `h-u`) prints the relation it verified; `agg aggregate` and `agg bench` take the
+   plan) from that argument, not from the header. `agg verify --relation h-fips|h-exact`
+   (default `h-fips`) prints the relation it verified; `agg aggregate` and `agg bench` take the
    same option.
 
 Every relation uses wire version 4. An H-exact proof differs from an H-u proof in the flags
@@ -582,7 +584,8 @@ Catalog: `checked_in_catalog_holds_exactly_the_requested_rows` with both relatio
 
 ## 8. Step A as implemented (relation H-u)
 
-H-u is the default relation.
+H-u was the default relation until it was removed (deviation L11); this section records it as
+built.
 
 * Relation byte 0 means H-u (`agg_piop::manifest::Relation::Hu`). It is bound in the proof
   header's flags byte and in byte 3 of the event-0 manifest bytes as Section 1.3 says; the
@@ -604,7 +607,8 @@ H-u is the default relation.
 Layout X1 as designed (Sections 1 to 4), on top of step A; the decisions below fill in or
 depart from the design.
 
-* **Relation type.** `Relation { Hu, HExact, HFips }` (ids 0, 1, 2) lives in
+* **Relation type.** `Relation { Hu, HExact, HFips }` (ids 0, 1, 2; now `{ HExact, HFips }`,
+  ids 1 and 2) lives in
   `agg_pcs_config::catalogs` (the lowest crate both use) and is re-exported by
   `agg_piop::manifest`; it also parses the command-line spelling (`h-u`, `h-exact`,
   `h-fips`).
@@ -624,8 +628,8 @@ depart from the design.
   an argument and return `VerifyError::Relation`
   for a header that names another one, before event 0; the manifest, hence event 0, the
   catalog row and the plan, comes from the argument. `ProverInputs::relation` selects the
-  prover's relation; `agg aggregate|verify|bench --relation h-u|h-exact|h-fips` (default
-  `h-u`) set them in the CLI, whose reports print the relation.
+  prover's relation; `agg aggregate|verify|bench --relation h-fips|h-exact` (default
+  `h-fips`; `h-u` until its removal) set them in the CLI, whose reports print the relation.
 * **Catalogs.** As 2.3: 26 new width-4 rows, generated in 1,617 s (`docs/pcs-config.md`
   Section 4); the H-u rows and the width-16 artifact are unchanged; the harness keeps every
   row of `catalog_batches()` (both relations) and takes `AGG_CATALOG_RELATION`. The planner's

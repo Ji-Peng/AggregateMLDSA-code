@@ -93,15 +93,16 @@ print("honest B_v",Bv,"<2^26:",Bv<2**26,"|k| max",1024*Bv,"<2^36:",1024*Bv<2**36
 # (11) committed elements per signature at N=2^15 (main 23 columns; D1 18; D2 24; D3 2)
 main=23*1024; d1=18*2**19/2**15; d2=24*2**15/2**15; d3=2*2**14/2**15
 print("elements/sig",main+d1+d2+d3,"main",main,"bridge",d1+d2+d3)
-# (12) relation H-u (default, docs/h-exact.md):
+# (12) the step form of u (relation H-exact; H-FIPS commits the magnitude L instead,
+# docs/h-exact.md):
 # u = B_ulo + 63,079 H_u - B_u, B_ulo in [0,2^16), H_u in [0,6); stored U_lo = B_ulo - 2^15,
 # U_hi = H_u - 3, so u = U_lo + 63,079 U_hi + 31,540. Exact reachable set, constant, padding,
-# boundaries, the unique single-digit base c <= 16, and zeta'.
+# boundaries and the unique single-digit base c <= 16.
 Bu=2*g2+1; A=63079
 reach=set()
 for H in range(6):
     reach.update(range(A*H-Bu, A*H+2**16-Bu))
-print("H-u u blocks cover exactly [-B_u,B_u]:", reach==set(range(-Bu,Bu+1)), "5A+2^16=2B_u+1:", 5*A+2**16==2*Bu+1)
+print("step-form u blocks cover exactly [-B_u,B_u]:", reach==set(range(-Bu,Bu+1)), "5A+2^16=2B_u+1:", 5*A+2**16==2*Bu+1)
 Cu=2**15+3*A-Bu
 def enc_u(u):
     H=min((u+Bu)//A,5); H=max(H,0); return (u+Bu-A*H-2**15, H-3)
@@ -110,7 +111,7 @@ print("C_u",Cu,"(31,540)","canonical round trip",ok,"padding (U_lo,U_hi)",enc_u(
 print("+-190,466 unreachable:", (Bu+1) not in reach and -(Bu+1) not in reach)
 sols=[c for c in range(2,17) if (2*Bu+1-2**16)%(c-1)==0 and (2*Bu+1-2**16)//(c-1)<=2**16]
 print("single-digit bases c<=16:",sols)
-print("zeta' H-u",max(2**17,Bu+2**(d-1)*tau),"zeta",max(g1-beta,2*g2+1+2**(d-1)*tau))
+print("zeta",max(g1-beta,2*g2+1+2**(d-1)*tau))
 # (13) relation H-exact (docs/h-exact.md): z = B_zlo + 2^16 B_zhi + 130,915 a_z - B_z,
 # B_zlo in [0,2^16), B_zhi, a_z bits; stored S_zlo = B_zlo - 2^15, so z = S_zlo + 2^16 B_zhi
 # + 130,915 a_z - 98,225. Exact reachable set, constant, canonical choice a_z = [z >= 79],
@@ -211,4 +212,4 @@ print("H-FIPS corner (q - gamma2, h = 0): sigma, L, delta, e =", -1, (q-g2)-(q-g
 # F4 and F5 merge into F45 = 2 e w1' + 43 e^2 - 43 e once e in {-1, 0, 1} (the PIOP's form).
 ok=all(((e*(e+1)*w==0) and (e*(e-1)*(w-43)==0))==(2*e*w+43*e*e-43*e==0) for e in (-1,0,1) for w in range(64))
 print("H-FIPS F45 equivalent to F4 and F5 for e in {-1,0,1}, w1' in [0,64):", ok)
-print("H-FIPS u_h and weight: u_h = omega - sum delta^2 in [0, 80] subset of [0, 2^16); committed elements/sig at 2^15:", 16*1024+640+0.5+1, "(H-u 12,288+640 = 12,928, where 640 = bridge levels 96+12+0.5, G_3's 11 zero polynomials 5.5, projection digits 512 and multiplicities 14; H-FIPS has 16 main columns and adds 0.5 for G_3's twelfth zero polynomial and 1 for u_h)")
+print("H-FIPS u_h and weight: u_h = omega - sum delta^2 in [0, 80] subset of [0, 2^16); committed elements/sig at 2^15:", 16*1024+640+0.5+1, "(H-exact 13,312+640 = 13,952, where 640 = bridge levels 96+12+0.5, G_3's 11 zero polynomials 5.5, projection digits 512 and multiplicities 14; H-FIPS has 16 main columns and adds 0.5 for G_3's twelfth zero polynomial and 1 for u_h)")

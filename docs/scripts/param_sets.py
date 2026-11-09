@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Parameters and derived constants for ML-DSA-44, ML-DSA-65, and ML-DSA-87.
 
-Recomputes parameter values from FIPS 204 Tables 1 and 2, the H-u digit forms,
-and the integer lift and projection bounds for aggregation.
+Recomputes parameter values from FIPS 204 Tables 1 and 2 and the integer lift and
+projection bounds for aggregation.
 """
 
 import math
@@ -49,11 +49,6 @@ def compute_param_set(name: str, k: int, l: int, tau: int, lambda_bits: int,
     # SelfTargetMSIS bound
     zeta_msis = max(gamma1 - beta, 2 * gamma2 + 1 + (1 << (d - 1)) * tau)
 
-    # H-u bounds
-    bar_b_z = gamma1  # relaxed bound: 2^17 for 44, 2^19 for 65 and 87
-    bar_b_u = b_u
-    zeta_prime = max(bar_b_z, bar_b_u + (1 << (d - 1)) * tau)
-
     # Bridge and hypercube geometry
     p_positions = 256 * k
     p_pad = 1 << math.ceil(math.log2(p_positions))
@@ -71,8 +66,10 @@ def compute_param_set(name: str, k: int, l: int, tau: int, lambda_bits: int,
     proj_atoms = 128 * p_positions // 256
     proj_bytes = 128 * p_positions // 8
 
-    az = (l * 256) * ((q - 1) // 2) * bar_b_z
-    delta_z = az + b_t + 2 * gamma2 * (m_w - 1) + bar_b_u + q * 2 * proj_bound
+    # The lift bounds |z| by gamma1 > B_z (a loose bound that every relation implies) and
+    # |u| by B_u.
+    az = (l * 256) * ((q - 1) // 2) * gamma1
+    delta_z = az + b_t + 2 * gamma2 * (m_w - 1) + b_u + q * 2 * proj_bound
     lift_margin = p_half / delta_z
 
     return {
@@ -101,9 +98,6 @@ def compute_param_set(name: str, k: int, l: int, tau: int, lambda_bits: int,
         "delta0_max": delta0_max,
         "b_v": b_v,
         "zeta_msis": zeta_msis,
-        "bar_b_z": bar_b_z,
-        "bar_b_u": bar_b_u,
-        "zeta_prime": zeta_prime,
         "d_vec": d_vec,
         "lanes_k": lanes_k,
         "lanes_l": lanes_l,
@@ -152,9 +146,6 @@ def print_param_set(p):
     print(f"  Delta0_max: {p['delta0_max']} (2^{math.log2(p['delta0_max']):.2f})")
     print(f"  B_v = Delta0_max / q: {p['b_v']} (2^{math.log2(p['b_v']):.2f})")
     print(f"  zeta (FIPS): {p['zeta_msis']}")
-    print(f"  bar B_z (H-u): {p['bar_b_z']}")
-    print(f"  bar B_u (H-u): {p['bar_b_u']}")
-    print(f"  zeta' (H-u): {p['zeta_prime']}")
     print(f"Geometry and lanes:")
     print(f"  D_VEC: {p['d_vec']}, LANES_K: {p['lanes_k']}, LANES_L: {p['lanes_l']}")
     print(f"  D_POS: {p['d_pos']}, Positions: {p['positions']}")

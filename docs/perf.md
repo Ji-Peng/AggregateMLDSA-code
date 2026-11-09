@@ -4,6 +4,7 @@
 | --- | --- |
 | Status | informative; a local profile, **direction only**. No number here is a benchmark result: the development box was shared with other agents' builds (load average 2 to 10), and figures marked "est." are estimates. |
 | Profiled code | the code before the proof-of-work schedule and the speed levers of Section 0 |
+| Relation | numbers labelled H-u were measured under the relaxed relation H-u, the default at the time; H-u has since been removed, and H-FIPS is the default |
 
 ## 0. What happened since the profile
 
@@ -718,14 +719,14 @@ bytes are unchanged across engines.
 
 Run `scripts/simd-ab.sh` for the local comparison against a detached `main` checkout under
 `target/main-wt`. Both binaries take their flags from `.cargo/config.toml` (the script unsets
-`RUSTFLAGS`). It compares 1K H-u aggregates under every ML-DSA engine at one and sixteen
+`RUSTFLAGS`). It compares 1K H-FIPS aggregates under every ML-DSA engine at one and sixteen
 threads, then measures 1,024 records over 1,024 and 16 keys with one warmup and two
 repetitions. Runtime gates use the shared benchmark lock and CPUs 0,1,3-15; the thread count
 is left at its default. Logs, revisions and the table are retained under
 `target/simd-ab-logs`. Ratios above 1.05 are flagged for review, including RSS. These shared-host
 measurements indicate local direction only; they do not replace the 32K cloud measurements.
 
-The longer backend equality test covers H-u at 1024 records over 64 and 1024 keys,
+The longer backend equality test covers H-FIPS at 1024 records over 64 and 1024 keys,
 and H-exact/H-FIPS at 256 records. It verifies uncached, fills a fresh cache, verifies a cache
 hit, and compares aggregate and cache bytes across every available engine at 1/16 threads:
 

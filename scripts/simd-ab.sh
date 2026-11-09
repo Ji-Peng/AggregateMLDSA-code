@@ -60,19 +60,19 @@ gate() {
 }
 gate "$CURRENT_BIN" keygen-batch --count 64 --seed 42 --out "$TMP_DIR/keys.bin"
 gate "$CURRENT_BIN" sign-batch --keys "$TMP_DIR/keys.bin" --count 1024 --seed 42 --out "$TMP_DIR/records.bin"
-gate "$MAIN_BIN" aggregate --records "$TMP_DIR/records.bin" --out "$TMP_DIR/main.bin" --relation h-u
+gate "$MAIN_BIN" aggregate --records "$TMP_DIR/records.bin" --out "$TMP_DIR/main.bin" --relation h-fips
 for b in "${BACKENDS[@]}"; do
     for threads in 1 16; do
-        gate env AGG_MLDSA_SIMD="$b" RAYON_NUM_THREADS="$threads" "$CURRENT_BIN" aggregate --records "$TMP_DIR/records.bin" --out "$TMP_DIR/current.bin" --relation h-u
+        gate env AGG_MLDSA_SIMD="$b" RAYON_NUM_THREADS="$threads" "$CURRENT_BIN" aggregate --records "$TMP_DIR/records.bin" --out "$TMP_DIR/current.bin" --relation h-fips
         cmp "$TMP_DIR/main.bin" "$TMP_DIR/current.bin"
         echo "IDENTICAL main/$b threads=$threads" | tee -a "$LOG_DIR/equality.log"
     done
 done
 # Local runs stay at 1K records; larger batches belong on the cluster (printed below).
 for keys in 1024 16; do
-    gate env AGG_GIT_REV="$BASE_REV" "$MAIN_BIN" bench --count 1024 --keys "$keys" --warmup 1 --reps 2 --relation h-u > "$LOG_DIR/main_${keys}.log" 2>&1
+    gate env AGG_GIT_REV="$BASE_REV" "$MAIN_BIN" bench --count 1024 --keys "$keys" --warmup 1 --reps 2 --relation h-fips > "$LOG_DIR/main_${keys}.log" 2>&1
     for b in "${BACKENDS[@]}"; do
-        gate env AGG_GIT_REV="$(git rev-parse HEAD)" AGG_MLDSA_SIMD="$b" "$CURRENT_BIN" bench --count 1024 --keys "$keys" --warmup 1 --reps 2 --relation h-u > "$LOG_DIR/${b}_${keys}.log" 2>&1
+        gate env AGG_GIT_REV="$(git rev-parse HEAD)" AGG_MLDSA_SIMD="$b" "$CURRENT_BIN" bench --count 1024 --keys "$keys" --warmup 1 --reps 2 --relation h-fips > "$LOG_DIR/${b}_${keys}.log" 2>&1
     done
 done
 python3 - <<'PY' | tee "$LOG_DIR/table.md"
@@ -91,7 +91,7 @@ metrics = [
     ('prover RSS MiB', r'prover peak RSS'), ('verifier RSS MiB', r'verifier peak RSS'),
 ]
 for keys in (1024, 16):
-    print(f'\nLocal direction only: N=1024, K={keys}, H-u, CPUs 0,1,3-15, default threads. Times in ms.')
+    print(f'\nLocal direction only: N=1024, K={keys}, H-FIPS, CPUs 0,1,3-15, default threads. Times in ms.')
     print('| Metric | ' + ' | '.join(backends) + ' |')
     print('|---|' + '---:|' * len(backends))
     texts = [(root / f'{b}_{keys}.log').read_text() for b in backends]
@@ -124,6 +124,6 @@ PY
 printf '%s\n' "Cluster only (do not run locally; an idle Zen 5 node, each supported backend):"
 for b in "${BACKENDS[@]}"; do
     for keys in 32768 16; do
-        printf "RAYON_NUM_THREADS=16 AGG_MLDSA_SIMD=%s cargo run --release -p agg-cli --bin agg -- bench --count 32768 --keys %s --warmup 1 --reps 5 --relation h-u\n" "$b" "$keys"
+        printf "RAYON_NUM_THREADS=16 AGG_MLDSA_SIMD=%s cargo run --release -p agg-cli --bin agg -- bench --count 32768 --keys %s --warmup 1 --reps 5 --relation h-fips\n" "$b" "$keys"
     done
 done

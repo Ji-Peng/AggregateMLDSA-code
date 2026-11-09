@@ -36,8 +36,9 @@ $agg verify       --params 44 --records records.bin --aggregate agg.bin   # exit
 $agg bench        --params 44 --count 1024 --warmup 1 --reps 5            # timings and size
 ```
 
-`--relation h-u|h-exact|h-fips` selects the proven relation (default `h-u`; `h-fips` makes
-the extracted witness a FIPS 204 signature). Running `agg` without arguments lists every
+`--relation h-fips|h-exact` selects the proven relation. The default `h-fips` makes the
+extracted witness a FIPS 204 signature; `h-exact` proves the FIPS 204 bounds on `z` and `u`
+without the hint, a reference relation that is slightly faster. Running `agg` without arguments lists every
 option; [`docs/cli.md`](docs/cli.md) describes the tool and the aggregate format.
 
 ## Reproducing the paper
