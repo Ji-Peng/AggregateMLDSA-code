@@ -6,17 +6,29 @@ use crate::common::{self, mle_i64, point, Batch};
 
 use agg_fpkeccak::{evaluate, KeccakLayout, KeccakPublics, KeccakTables, KECCAK_GROUPS};
 use agg_pcs_config::commit::{evaluate_signed_table, GroupClaim, GroupCommitment};
+use agg_piop::claims::{PreStageClaims, Stage1Claims};
 use agg_piop::keccak_fp::specs::{stage1_groups, stage2_groups};
 use agg_piop::keccak_fp::virtuals::{zero_message_c_tilde, KeccakProverTables};
 use agg_piop::kernel::{Lane, Source, Term};
 use agg_piop::manifest::{Column, CommitmentManifest, DigitValue, GroupRole, GROUP_COUNT_FP};
 use agg_piop::pcs::{group_points_fp, verifier_for, TableCommitter};
-use agg_piop::stage::{EqPoint, GroupSpec, StageSpec};
+use agg_piop::source_tables::SourceTables;
+use agg_piop::stage::{
+    check_terminal, prove_stage, prove_stage_unchecked, replay_stage, EqPoint, GroupSpec,
+    InstanceSpec, Points, StageError, StageSpec,
+};
+use agg_piop::stage1::{keccak_claim_lanes, resolve_keccak, KeccakPublicInputs};
+use agg_piop::tables::ProverTables;
+use agg_piop::transcript::{
+    commitment_site, terminal_site, Transcript, BRIDGE_SEED_SITE, FINAL_VECTORS_SITE,
+    FINAL_VECTOR_BYTES, FLOCK_COMMIT_SITE, FLOCK_SEEDS_SITE, FLOCK_SHARES_SITE, KAPPA1_SITE,
+    PRESTAGE_SITE, TAU_SITE,
+};
 use agg_piop::virtual_polys::{compose_table, w1_table, MainValues};
-use agg_piop::{BaseField, OpeningField};
+use agg_piop::{stage1, stage2, BaseField, OpeningField};
 use agg_witness::gen::SplitMix64;
 use agg_witness::params::{Set, K, N as POLY_N, TR_BYTES, W1_BITS, W1_ENCODE_BYTES};
-use jolt_field::{ExtField, Ring};
+use jolt_field::{ExtField, Ring, Zero};
 
 fn on_large_stack(f: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
@@ -437,4 +449,415 @@ fn keccak_specs_vanish_on_the_boolean_domain() {
             assert_eq!(count_nonzero_terms(&s2_groups, &dead_prover), 0);
         }
     }
+}
+
+fn stages_branch_transcript(manifest: &CommitmentManifest) -> (Transcript, Points) {
+    let mut trunk = Transcript::new(manifest, &manifest.binding_bytes()).expect("transcript");
+    for role in [GroupRole::Main16, GroupRole::Main] {
+        trunk.absorb(commitment_site(role), 1, &[0]).expect("round 1");
+    }
+    trunk
+        .absorb_items(FLOCK_COMMIT_SITE, &[vec![]])
+        .expect("flock commit");
+    trunk
+        .challenge_bytes(BRIDGE_SEED_SITE, 1)
+        .expect("bridge seed");
+    trunk.challenge_psi().expect("psi");
+    for role in [
+        GroupRole::Level1,
+        GroupRole::Level2,
+        GroupRole::Level3,
+        GroupRole::Proj,
+        GroupRole::Mult,
+    ] {
+        trunk.absorb(commitment_site(role), 1, &[0]).expect("round 2");
+    }
+    trunk
+        .challenge_bytes(FLOCK_SEEDS_SITE, 1)
+        .expect("flock seeds");
+    trunk
+        .absorb(FINAL_VECTORS_SITE, 1, &[0; FINAL_VECTOR_BYTES])
+        .expect("final vectors");
+    trunk
+        .absorb_items(FLOCK_SHARES_SITE, &[vec![]])
+        .expect("flock shares");
+    let (_lookup, mut stages) = trunk.fork().expect("fork");
+    let tau = stages
+        .challenge_extensions(TAU_SITE, manifest.d_stage())
+        .expect("tau");
+    stages
+        .absorb_extensions(
+            PRESTAGE_SITE,
+            &vec![OpeningField::zero(); PreStageClaims::len(manifest)],
+        )
+        .expect("prestage");
+    (
+        stages,
+        Points {
+            tau,
+            ..Points::default()
+        },
+    )
+}
+
+#[test]
+fn keccak_stage12_groups_prove_and_replay() {
+    on_large_stack(|| {
+        let seed = 0x512_u64;
+        let batch = Batch::build(common::records(seed, 6, 2), seed);
+        let n_records = batch.records.len();
+        assert_eq!(n_records, 8);
+        let manifest = CommitmentManifest::for_batch_fp(n_records).expect("fp manifest");
+        let n_star = manifest.padded_records();
+        assert_eq!(n_star, 8);
+
+        let k_layout = KeccakLayout::for_set(Set::S44);
+        let inputs = keccak_inputs_from_batch(&batch);
+        let keccak_tables = KeccakTables::build(&k_layout, &inputs, n_star);
+        let keccak_publics = KeccakPublics::from_records(&k_layout, &inputs, n_star);
+        let prover_tables = KeccakProverTables::build(&keccak_tables, &keccak_publics);
+
+        let mu_list: Vec<[u8; TR_BYTES]> = batch.instance.records.iter().map(|r| r.mu).collect();
+        let c_tilde_list: Vec<Vec<u8>> = batch
+            .instance
+            .records
+            .iter()
+            .map(|r| r.c_tilde.to_vec())
+            .collect();
+        let public_inputs = KeccakPublicInputs {
+            mu: &mu_list,
+            c_tilde: &c_tilde_list,
+        };
+
+        // 1. Keccak-only groups from stage1_groups(m, 0) and stage2_groups(m, 0) through
+        // prove_stage, replay_stage and check_terminal with resolve_keccak.
+        let s1_gamma_count = stage1::gamma_count(&manifest);
+        let (mut s1_groups, s1_used) = stage1_groups(&manifest, 0);
+        assert_eq!(s1_used, 719);
+        for gamma in s1_used..s1_gamma_count {
+            s1_groups[0].instances.push(InstanceSpec::new(gamma, Vec::new()));
+        }
+        let s1_spec = StageSpec {
+            stage: 1,
+            degree: stage1::DEGREE,
+            gamma_count: s1_gamma_count,
+            groups: s1_groups,
+        };
+        s1_spec.validate().expect("stage 1 Keccak spec validates");
+
+        let s2_gamma_count = stage2::gamma_count(&manifest);
+        let (mut s2_groups, s2_used) = stage2_groups(&manifest, 0);
+        assert_eq!(s2_used, 150);
+        for gamma in s2_used..s2_gamma_count {
+            s2_groups[0].instances.push(InstanceSpec::new(gamma, Vec::new()));
+        }
+        let s2_spec = StageSpec {
+            stage: 2,
+            degree: stage2::DEGREE,
+            gamma_count: s2_gamma_count,
+            groups: s2_groups,
+        };
+        s2_spec.validate().expect("stage 2 Keccak spec validates");
+
+        let s1_zero_claims = vec![OpeningField::zero(); s1_spec.gamma_count];
+        let s2_zero_claims = vec![OpeningField::zero(); s2_spec.gamma_count];
+
+        let (mut prover_tx, mut prover_points) = stages_branch_transcript(&manifest);
+        let (mut verifier_tx, mut verifier_points) = stages_branch_transcript(&manifest);
+
+        let s1_run = prove_stage(
+            &s1_spec,
+            &manifest,
+            &prover_points,
+            &s1_zero_claims,
+            |id| prover_tables.lane(id).expect("Keccak lane"),
+            &mut prover_tx,
+        )
+        .expect("honest stage 1 Keccak prove");
+        let s1_keccak_claims: Vec<OpeningField> = keccak_claim_lanes(&s1_spec)
+            .into_iter()
+            .map(|id| s1_run.value(&s1_spec, id))
+            .collect();
+        let s1_replay = replay_stage(
+            &s1_spec,
+            &manifest,
+            &s1_zero_claims,
+            &s1_run.messages,
+            &mut verifier_tx,
+        )
+        .expect("honest stage 1 Keccak replay");
+        check_terminal(&s1_spec, &manifest, &verifier_points, &s1_replay, |id| {
+            resolve_keccak(
+                &manifest,
+                &s1_spec,
+                &s1_replay.point,
+                &s1_keccak_claims,
+                Some(public_inputs),
+                id,
+            )
+        })
+        .expect("honest stage 1 Keccak terminal check accepts");
+
+        // Advance both transcripts to stage 2 using the stage-1 terminal point r^(1).
+        prover_points.r1 = s1_run.point.clone();
+        verifier_points.r1 = s1_replay.point.clone();
+        let dummy_s1_wire = Stage1Claims {
+            y1: Vec::new(),
+            y2: Vec::new(),
+            b: vec![OpeningField::zero(); W1_BITS],
+            keccak: s1_keccak_claims.clone(),
+        }
+        .to_vec();
+        prover_tx
+            .absorb_extensions(&terminal_site(1), &dummy_s1_wire)
+            .expect("prover absorb stage 1 terminal");
+        verifier_tx
+            .absorb_extensions(&terminal_site(1), &dummy_s1_wire)
+            .expect("verifier absorb stage 1 terminal");
+        prover_tx
+            .absorb_extensions(KAPPA1_SITE, &[])
+            .expect("prover absorb empty kappa1");
+        verifier_tx
+            .absorb_extensions(KAPPA1_SITE, &[])
+            .expect("verifier absorb empty kappa1");
+
+        let s2_run = prove_stage(
+            &s2_spec,
+            &manifest,
+            &prover_points,
+            &s2_zero_claims,
+            |id| prover_tables.lane(id).expect("Keccak lane"),
+            &mut prover_tx,
+        )
+        .expect("honest stage 2 Keccak prove");
+        let s2_keccak_claims: Vec<OpeningField> = keccak_claim_lanes(&s2_spec)
+            .into_iter()
+            .map(|id| s2_run.value(&s2_spec, id))
+            .collect();
+        let s2_replay = replay_stage(
+            &s2_spec,
+            &manifest,
+            &s2_zero_claims,
+            &s2_run.messages,
+            &mut verifier_tx,
+        )
+        .expect("honest stage 2 Keccak replay");
+        check_terminal(&s2_spec, &manifest, &verifier_points, &s2_replay, |id| {
+            resolve_keccak(
+                &manifest,
+                &s2_spec,
+                &s2_replay.point,
+                &s2_keccak_claims,
+                None,
+                id,
+            )
+        })
+        .expect("honest stage 2 Keccak terminal check accepts");
+
+        // Negative test: flip one A' bit at a live boundary slot (t = 24, live in stage 1 and
+        // a boundary slot in stage 2). Both prove_stage and prove_stage_unchecked +
+        // check_terminal must reject with StageError::Terminal.
+        let mut flipped = keccak_tables.clone();
+        flipped.flip_a_prime_bit(3, 24, 19, 1);
+        let bad_prover_tables = KeccakProverTables::build(&flipped, &keccak_publics);
+
+        let (mut checked_tx, _) = stages_branch_transcript(&manifest);
+        assert!(matches!(
+            prove_stage(
+                &s1_spec,
+                &manifest,
+                &prover_points,
+                &s1_zero_claims,
+                |id| bad_prover_tables.lane(id).expect("Keccak lane"),
+                &mut checked_tx,
+            ),
+            Err(StageError::Terminal(1))
+        ));
+
+        let (mut bad_p_tx, _) = stages_branch_transcript(&manifest);
+        let (mut bad_v_tx, _) = stages_branch_transcript(&manifest);
+        let bad_s1_run = prove_stage_unchecked(
+            &s1_spec,
+            &manifest,
+            &prover_points,
+            &s1_zero_claims,
+            |id| bad_prover_tables.lane(id).expect("Keccak lane"),
+            &mut bad_p_tx,
+        )
+        .expect("unchecked stage 1 prove");
+        let bad_s1_claims: Vec<OpeningField> = keccak_claim_lanes(&s1_spec)
+            .into_iter()
+            .map(|id| bad_s1_run.value(&s1_spec, id))
+            .collect();
+        let bad_s1_replay = replay_stage(
+            &s1_spec,
+            &manifest,
+            &s1_zero_claims,
+            &bad_s1_run.messages,
+            &mut bad_v_tx,
+        )
+        .expect("stage 1 replay of tampered proof");
+        assert!(matches!(
+            check_terminal(&s1_spec, &manifest, &verifier_points, &bad_s1_replay, |id| {
+                resolve_keccak(
+                    &manifest,
+                    &s1_spec,
+                    &bad_s1_replay.point,
+                    &bad_s1_claims,
+                    Some(public_inputs),
+                    id,
+                )
+            }),
+            Err(StageError::Terminal(1))
+        ));
+
+        // Advance the tampered transcripts to stage 2 and verify stage 2 also rejects.
+        bad_p_tx
+            .absorb_extensions(&terminal_site(1), &dummy_s1_wire)
+            .expect("absorb terminal 1");
+        bad_v_tx
+            .absorb_extensions(&terminal_site(1), &dummy_s1_wire)
+            .expect("absorb terminal 1");
+        bad_p_tx
+            .absorb_extensions(KAPPA1_SITE, &[])
+            .expect("absorb empty kappa1");
+        bad_v_tx
+            .absorb_extensions(KAPPA1_SITE, &[])
+            .expect("absorb empty kappa1");
+
+        let bad_s2_run = prove_stage_unchecked(
+            &s2_spec,
+            &manifest,
+            &prover_points,
+            &s2_zero_claims,
+            |id| bad_prover_tables.lane(id).expect("Keccak lane"),
+            &mut bad_p_tx,
+        )
+        .expect("unchecked stage 2 prove");
+        let bad_s2_claims: Vec<OpeningField> = keccak_claim_lanes(&s2_spec)
+            .into_iter()
+            .map(|id| bad_s2_run.value(&s2_spec, id))
+            .collect();
+        let bad_s2_replay = replay_stage(
+            &s2_spec,
+            &manifest,
+            &s2_zero_claims,
+            &bad_s2_run.messages,
+            &mut bad_v_tx,
+        )
+        .expect("stage 2 replay of tampered proof");
+        assert!(matches!(
+            check_terminal(&s2_spec, &manifest, &verifier_points, &bad_s2_replay, |id| {
+                resolve_keccak(
+                    &manifest,
+                    &s2_spec,
+                    &bad_s2_replay.point,
+                    &bad_s2_claims,
+                    None,
+                    id,
+                )
+            }),
+            Err(StageError::Terminal(2))
+        ));
+
+        // 2. Full stage1::{prove, verify} and stage2::{prove, verify} drivers under Fp with
+        // ProverTables::set_keccak (lattice + Keccak groups together).
+        let source_tables = SourceTables {
+            manifest: &manifest,
+            main: &batch.main,
+            bridge: &batch.bridge,
+        };
+        let mut full_tables = ProverTables::new(source_tables, &batch.matrices);
+        full_tables.set_keccak(&prover_tables);
+        let dummy_pre = PreStageClaims {
+            y2: Vec::new(),
+            kappa2: Vec::new(),
+            kappa3: OpeningField::zero(),
+        };
+        let (mut full_p_tx, mut full_p_pts) = stages_branch_transcript(&manifest);
+        let (mut full_v_tx, mut full_v_pts) = stages_branch_transcript(&manifest);
+        let (s1_proof, s1_out) = stage1::prove(
+            &manifest,
+            &full_tables,
+            &full_p_pts,
+            &dummy_pre,
+            OpeningField::zero(),
+            &mut full_p_tx,
+        )
+        .expect("full Fp stage 1 prove");
+        let s1_verified = stage1::verify(
+            &manifest,
+            &batch.matrices,
+            &full_v_pts,
+            &dummy_pre,
+            OpeningField::zero(),
+            Some(public_inputs),
+            &s1_proof,
+            &mut full_v_tx,
+        )
+        .expect("full Fp stage 1 verify");
+        assert_eq!(s1_out, s1_verified);
+
+        full_p_pts.r1 = s1_out.point.clone();
+        full_v_pts.r1 = s1_verified.point.clone();
+        let (s2_proof, s2_out) =
+            stage2::prove(&manifest, &full_tables, &full_p_pts, &s1_out, &mut full_p_tx)
+                .expect("full Fp stage 2 prove");
+        let s2_verified = stage2::verify(
+            &manifest,
+            &batch.matrices,
+            &full_v_pts,
+            &s1_verified,
+            &s2_proof,
+            &mut full_v_tx,
+        )
+        .expect("full Fp stage 2 verify");
+        assert_eq!(s2_out, s2_verified);
+
+        // 3. Padded batch (N = 6, N* = 8): exercises the zero_message_c_tilde padding path in
+        // resolve_keccak through stage1::{prove, verify}.
+        let pad_batch = Batch::build(common::records(0x516, 4, 2), 0x516);
+        let pad_manifest = CommitmentManifest::for_batch_fp(pad_batch.records.len()).expect("fp manifest");
+        assert_eq!((pad_manifest.records(), pad_manifest.padded_records()), (6, 8));
+        let pad_inputs = keccak_inputs_from_batch(&pad_batch);
+        let pad_ktables = KeccakTables::build(&k_layout, &pad_inputs, 8);
+        let pad_kpublics = KeccakPublics::from_records(&k_layout, &pad_inputs, 8);
+        let pad_kprover = KeccakProverTables::build(&pad_ktables, &pad_kpublics);
+        let pad_mu: Vec<[u8; TR_BYTES]> = pad_batch.instance.records.iter().map(|r| r.mu).collect();
+        let pad_ct: Vec<Vec<u8>> = pad_batch.instance.records.iter().map(|r| r.c_tilde.to_vec()).collect();
+        let pad_pub = KeccakPublicInputs {
+            mu: &pad_mu,
+            c_tilde: &pad_ct,
+        };
+        let pad_source = SourceTables {
+            manifest: &pad_manifest,
+            main: &pad_batch.main,
+            bridge: &pad_batch.bridge,
+        };
+        let mut pad_prover_tables = ProverTables::new(pad_source, &pad_batch.matrices);
+        pad_prover_tables.set_keccak(&pad_kprover);
+        let (mut pad_p_tx, pad_p_pts) = stages_branch_transcript(&pad_manifest);
+        let (mut pad_v_tx, pad_v_pts) = stages_branch_transcript(&pad_manifest);
+        let (pad_s1_proof, pad_s1_out) = stage1::prove(
+            &pad_manifest,
+            &pad_prover_tables,
+            &pad_p_pts,
+            &dummy_pre,
+            OpeningField::zero(),
+            &mut pad_p_tx,
+        )
+        .expect("padded Fp stage 1 prove");
+        let pad_s1_verified = stage1::verify(
+            &pad_manifest,
+            &pad_batch.matrices,
+            &pad_v_pts,
+            &dummy_pre,
+            OpeningField::zero(),
+            Some(pad_pub),
+            &pad_s1_proof,
+            &mut pad_v_tx,
+        )
+        .expect("padded Fp stage 1 verify");
+        assert_eq!(pad_s1_out, pad_s1_verified);
+    });
 }

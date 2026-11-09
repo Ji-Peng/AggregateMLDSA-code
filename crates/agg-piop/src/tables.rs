@@ -10,8 +10,9 @@
 
 use agg_witness::bridge::BridgeMatrices;
 
+use crate::keccak_fp::virtuals::KeccakProverTables;
 use crate::kernel::{Lane, Source};
-use crate::manifest::Column;
+use crate::manifest::{Column, HashField};
 use crate::public_data::PublicData;
 use crate::range::square_map;
 use crate::source_tables::SourceTables;
@@ -106,6 +107,8 @@ pub struct ProverTables<'a> {
     /// `W^(rho)` per polynomial lane of `v` (after `r^(2)`; the sets with lanes), as their
     /// factors: the in-lane factor per lane and the signature factor they share.
     pub wp_lanes: (Vec<Vec<E>>, Vec<E>),
+    /// The committed and virtual Keccak tables under `HashField::Fp`.
+    pub keccak: Option<&'a KeccakProverTables>,
 }
 
 impl<'a> ProverTables<'a> {
@@ -139,13 +142,24 @@ impl<'a> ProverTables<'a> {
             wp: None,
             wp_planes: None,
             wp_lanes: (Vec::new(), Vec::new()),
+            keccak: None,
         }
     }
 
-    /// Materialize the parities of the committed bits under the bridge matrices.
+    /// Attach the prime-field Keccak tables for resolving Keccak lanes.
+    pub fn set_keccak(&mut self, keccak: &'a KeccakProverTables) {
+        self.keccak = Some(keccak);
+    }
+
+    /// Materialize the parities of the committed bits under the bridge matrices (`Gf2`), or an
+    /// empty parity set under `Fp`.
     #[must_use]
     pub fn new(tables: SourceTables<'a>, matrices: &BridgeMatrices) -> Self {
-        Self::with_parity1(tables, Parity1::from_values(parity1_tables_for(tables, &matrices.m1)))
+        let parity1 = match tables.manifest.hash_field() {
+            HashField::Gf2 => Parity1::from_values(parity1_tables_for(tables, &matrices.m1)),
+            HashField::Fp => Parity1::Narrow(Vec::new()),
+        };
+        Self::with_parity1(tables, parity1)
     }
 
     /// True for a parameter set whose vector index is a polynomial lane.
@@ -268,6 +282,19 @@ impl<'a> ProverTables<'a> {
     pub fn lane(&self, id: LaneId) -> Lane<'_> {
         let column = |c: Column| self.tables.column(c);
         match id {
+            LaneId::Column(
+                Column::KeccakA { .. } | Column::KeccakC { .. } | Column::KeccakCPrime { .. },
+            )
+            | LaneId::KeccakRot(_)
+            | LaneId::KeccakPrev(_)
+            | LaneId::KeccakPrevIota(_)
+            | LaneId::KeccakBlk { .. }
+            | LaneId::KeccakMu(_)
+            | LaneId::KeccakCTilde(_) => self
+                .keccak
+                .unwrap_or_else(|| panic!("KeccakProverTables is not set on ProverTables for {id:?}"))
+                .lane(id)
+                .expect("Keccak lane"),
             LaneId::Column(c) => column(c).lane(),
             LaneId::DigitSquare(c) => Lane::mapped(column(c).narrow(), square_map()),
             LaneId::Parity1(t) => self.parity1.lane(usize::from(t)),
@@ -305,12 +332,6 @@ impl<'a> ProverTables<'a> {
                 Some(planes) => Lane::Source(Source::Planes(planes)),
                 None => Lane::Source(Source::Field(self.wp.as_deref().expect("W after r^(2)"))),
             },
-            LaneId::KeccakRot(_)
-            | LaneId::KeccakPrev(_)
-            | LaneId::KeccakPrevIota(_)
-            | LaneId::KeccakBlk { .. }
-            | LaneId::KeccakMu(_)
-            | LaneId::KeccakCTilde(_) => panic!("{id:?} is resolved by KeccakProverTables"),
         }
     }
 }
@@ -372,4 +393,17 @@ mod tests {
         assert_eq!(cached.parity1.value(0, 0), 2);
     }
 
+    #[test]
+    #[should_panic(expected = "KeccakProverTables is not set on ProverTables")]
+    fn keccak_lane_panics_when_keccak_prover_tables_not_set() {
+        use crate::manifest::CommitmentManifest;
+        use crate::source_tables::{BridgeGroupTables, MainTables, RecordValues};
+        let manifest = CommitmentManifest::for_batch(3).unwrap();
+        let main = MainTables::from_values(&manifest, &vec![RecordValues::zero(); 3]).unwrap();
+        let matrices = BridgeMatrices::random_for_tests(940);
+        let bridge = BridgeGroupTables::build(&manifest, &main, &matrices, &crate::projection::test_psi(1)).unwrap();
+        let tables = SourceTables { manifest: &manifest, main: &main, bridge: &bridge };
+        let prover = ProverTables::new(tables, &matrices);
+        let _ = prover.lane(LaneId::KeccakPrevIota(0));
+    }
 }

@@ -4,7 +4,7 @@ use agg_pcs_config::catalogs::MULTIPLICITY_DIGITS;
 use agg_witness::params::W1_BITS;
 use jolt_field::{Ring, Zero};
 
-use crate::manifest::{Column, CommitmentManifest, GroupRole, CARRY16_DIGITS};
+use crate::manifest::{Column, CommitmentManifest, GroupRole, HashField, CARRY16_DIGITS};
 use crate::source_tables::SourceTables;
 use crate::stage::suffix;
 use crate::virtual_polys::compose_digits;
@@ -130,15 +130,21 @@ impl Kappa1Claims {
     /// Wire length of ML-DSA-44.
     pub const LEN: usize = W1_BITS;
 
-    /// Wire length of the manifest's parameter set.
+    /// Wire length of the manifest's parameter set (`w` under `Gf2`, `0` under `Fp`).
     #[must_use]
     pub fn len(manifest: &CommitmentManifest) -> usize {
-        w1_bits(manifest)
+        match manifest.hash_field() {
+            HashField::Gf2 => w1_bits(manifest),
+            HashField::Fp => 0,
+        }
     }
 
-    /// The honest claims at the `D_1` suffix of `r1`.
+    /// The honest claims at the `D_1` suffix of `r1` (empty under `HashField::Fp`).
     #[must_use]
     pub fn evaluate(manifest: &CommitmentManifest, tables: SourceTables<'_>, r1: &[E]) -> Self {
+        if manifest.hash_field() == HashField::Fp {
+            return Self(Vec::new());
+        }
         let r1_1 = suffix(r1, manifest.group(GroupRole::Level1).logical_vars);
         Self(
             (0..w1_bits(manifest) as u8)
@@ -172,52 +178,81 @@ impl Kappa1Claims {
     }
 }
 
-/// The stage-1 terminal claims (18 for ML-DSA-44; `2 w + w k` with polynomial lanes):
-/// `y^(1)_t(r^(1)_1)`, `y^(2)_t(r^(1)_2)`, `b_t^(rho)(r^(1))` (bit-major, [`bit_columns`]).
+/// The stage-1 terminal claims (18 for ML-DSA-44 under `Gf2`; `2 w + w k` with polynomial
+/// lanes; under `Fp`, the `w k` bit claims followed by the non-public Keccak lane claims):
+/// `y^(1)_t(r^(1)_1)`, `y^(2)_t(r^(1)_2)`, `b_t^(rho)(r^(1))` (bit-major, [`bit_columns`]),
+/// and `keccak`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage1Claims {
-    /// `y^(1)_t(r^(1)_1)`.
+    /// `y^(1)_t(r^(1)_1)` (empty under `HashField::Fp`).
     pub y1: Vec<E>,
-    /// `y^(2)_t(r^(1)_2)`.
+    /// `y^(2)_t(r^(1)_2)` (empty under `HashField::Fp`).
     pub y2: Vec<E>,
     /// `b_t^(rho)(r^(1))` in the order of [`bit_columns`].
     pub b: Vec<E>,
+    /// Terminal evaluations of every non-public Keccak lane of stage 1 (`Column`, `Rot`,
+    /// `Prev`, `PrevIota`, `Blk`) in `spec.lane_ids()` order (empty under `HashField::Gf2`).
+    pub keccak: Vec<E>,
 }
 
 impl Stage1Claims {
-    /// Wire length of ML-DSA-44.
+    /// Wire length of ML-DSA-44 under `HashField::Gf2`.
     pub const LEN: usize = 3 * W1_BITS;
 
-    /// Wire length of the manifest's parameter set.
+    /// Parity claims per level (`w` under `Gf2`, `0` under `Fp`).
+    #[must_use]
+    pub fn y_len(manifest: &CommitmentManifest) -> usize {
+        match manifest.hash_field() {
+            HashField::Gf2 => w1_bits(manifest),
+            HashField::Fp => 0,
+        }
+    }
+
+    /// Non-public Keccak lane claims (`0` under `Gf2`).
+    #[must_use]
+    pub fn keccak_len(manifest: &CommitmentManifest) -> usize {
+        match manifest.hash_field() {
+            HashField::Gf2 => 0,
+            HashField::Fp => crate::stage1::keccak_claim_lanes(&crate::stage1::spec(manifest)).len(),
+        }
+    }
+
+    /// Wire length of the manifest's parameter set and hash field.
     #[must_use]
     pub fn len(manifest: &CommitmentManifest) -> usize {
-        2 * w1_bits(manifest) + bit_columns(manifest).len()
+        2 * Self::y_len(manifest) + bit_columns(manifest).len() + Self::keccak_len(manifest)
     }
 
     /// Wire order.
     #[must_use]
     pub fn to_vec(&self) -> Vec<E> {
-        let mut out = Vec::with_capacity(self.y1.len() + self.y2.len() + self.b.len());
+        let mut out = Vec::with_capacity(self.y1.len() + self.y2.len() + self.b.len() + self.keccak.len());
         out.extend_from_slice(&self.y1);
         out.extend_from_slice(&self.y2);
         out.extend_from_slice(&self.b);
+        out.extend_from_slice(&self.keccak);
         out
     }
 
-    /// Parse the wire order of ML-DSA-44.
+    /// Parse the wire order of ML-DSA-44 under `HashField::Gf2`.
     #[must_use]
     pub fn from_slice(values: &[E]) -> Option<Self> {
-        Self::from_slice_shape(values, W1_BITS, W1_BITS)
+        Self::from_slice_shape(values, W1_BITS, W1_BITS, 0)
     }
 
-    /// Parse the wire order of the manifest's parameter set.
+    /// Parse the wire order of the manifest's parameter set and hash field.
     #[must_use]
     pub fn from_slice_for(manifest: &CommitmentManifest, values: &[E]) -> Option<Self> {
-        Self::from_slice_shape(values, w1_bits(manifest), bit_columns(manifest).len())
+        Self::from_slice_shape(
+            values,
+            Self::y_len(manifest),
+            bit_columns(manifest).len(),
+            Self::keccak_len(manifest),
+        )
     }
 
-    fn from_slice_shape(values: &[E], bits: usize, bit_lanes: usize) -> Option<Self> {
-        if values.len() != 2 * bits + bit_lanes {
+    fn from_slice_shape(values: &[E], bits: usize, bit_lanes: usize, keccak_lanes: usize) -> Option<Self> {
+        if values.len() != 2 * bits + bit_lanes + keccak_lanes {
             return None;
         }
         let mut offset = 0;
@@ -225,29 +260,54 @@ impl Stage1Claims {
             y1: take(values, &mut offset, bits),
             y2: take(values, &mut offset, bits),
             b: take(values, &mut offset, bit_lanes),
+            keccak: take(values, &mut offset, keccak_lanes),
         })
     }
 }
 
-/// The stage-2 terminal claims: `b_t^(rho)(r^(2))` ([`bit_columns`]) and `P_Z(r^(2))` for
-/// each leaf-checked digit (10 under H-u: 6 bits, 4 squares; 9 under H-exact: 6 bits, 3
-/// squares); under H-FIPS 10 claims (6 bits, 2 squares for `K_2, K_3`, plus `delta(r^(2))`
-/// and `e(r^(2))`, `stage2::FIPS_TERMINALS`).
+/// The stage-2 terminal claims: `b_t^(rho)(r^(2))` ([`bit_columns`], empty under
+/// `HashField::Fp`), `P_Z(r^(2))` for each leaf-checked digit, H-FIPS's `delta(r^(2))` and
+/// `e(r^(2))` (`stage2::FIPS_TERMINALS`), and the non-public Keccak lane claims (empty under
+/// `HashField::Gf2`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage2Claims {
-    /// `b_t^(rho)(r^(2))`.
+    /// `b_t^(rho)(r^(2))` (empty under `HashField::Fp`).
     pub b: Vec<E>,
     /// `P_Z(r^(2))` per leaf-checked digit, in the order of `manifest.leaf_digits()`.
     pub squares: Vec<E>,
     /// H-FIPS: `delta(r^(2))`, `e(r^(2))` (empty otherwise).
     pub fips: Vec<E>,
+    /// Terminal evaluations of every non-public Keccak lane of stage 2 in `spec.lane_ids()`
+    /// order (empty under `HashField::Gf2`).
+    pub keccak: Vec<E>,
 }
 
 impl Stage2Claims {
-    /// Wire length under `manifest`'s parameter set and relation.
+    /// Bit claims (`w k` under `Gf2`, `0` under `Fp`).
+    #[must_use]
+    pub fn b_len(manifest: &CommitmentManifest) -> usize {
+        match manifest.hash_field() {
+            HashField::Gf2 => bit_columns(manifest).len(),
+            HashField::Fp => 0,
+        }
+    }
+
+    /// Non-public Keccak lane claims (`0` under `Gf2`).
+    #[must_use]
+    pub fn keccak_len(manifest: &CommitmentManifest) -> usize {
+        match manifest.hash_field() {
+            HashField::Gf2 => 0,
+            HashField::Fp => crate::stage1::keccak_claim_lanes(&crate::stage2::spec(manifest)).len(),
+        }
+    }
+
+    /// Wire length under `manifest`'s parameter set, relation and hash field.
     #[must_use]
     pub fn len(manifest: &CommitmentManifest) -> usize {
-        bit_columns(manifest).len() + manifest.leaf_digits().len() + Self::fips_len(manifest)
+        Self::b_len(manifest)
+            + manifest.leaf_digits().len()
+            + Self::fips_len(manifest)
+            + Self::keccak_len(manifest)
     }
 
     /// H-FIPS claims (`2 LANES_K` under H-FIPS: 2 for ML-DSA-44, 12 and 16 for ML-DSA-65 and
@@ -260,10 +320,12 @@ impl Stage2Claims {
     /// Wire order.
     #[must_use]
     pub fn to_vec(&self) -> Vec<E> {
-        let mut out = Vec::with_capacity(self.b.len() + self.squares.len() + self.fips.len());
+        let mut out =
+            Vec::with_capacity(self.b.len() + self.squares.len() + self.fips.len() + self.keccak.len());
         out.extend_from_slice(&self.b);
         out.extend_from_slice(&self.squares);
         out.extend_from_slice(&self.fips);
+        out.extend_from_slice(&self.keccak);
         out
     }
 
@@ -274,13 +336,22 @@ impl Stage2Claims {
             return None;
         }
         let mut offset = 0;
-        let b = take(values, &mut offset, bit_columns(manifest).len());
-        let squares_end = offset + manifest.leaf_digits().len();
+        let b = take(values, &mut offset, Self::b_len(manifest));
+        let squares = take(values, &mut offset, manifest.leaf_digits().len());
+        let fips = take(values, &mut offset, Self::fips_len(manifest));
+        let keccak = take(values, &mut offset, Self::keccak_len(manifest));
         Some(Self {
             b,
-            squares: values[offset..squares_end].to_vec(),
-            fips: values[squares_end..].to_vec(),
+            squares,
+            fips,
+            keccak,
         })
+    }
+
+    /// Parse the wire order of `manifest` (alias for [`Self::from_slice`]).
+    #[must_use]
+    pub fn from_slice_for(manifest: &CommitmentManifest, values: &[E]) -> Option<Self> {
+        Self::from_slice(manifest, values)
     }
 }
 
@@ -398,5 +469,27 @@ mod tests {
         let digits = MultiplicityClaims([3, -2, 0, 1, 0, 0, 7].map(E::from_i64));
         assert_eq!(digits.compose(), E::from_i64(3 - 32 + 4096 + 7 * (1 << 24)));
         assert_eq!(carry_value(E::from_i64(-(1 << 15))), E::from_i64(0));
+
+        // Under HashField::Fp: y1 and y2 are empty in Stage1Claims, b is empty in Stage2Claims,
+        // and keccak holds the non-public Keccak lane claims in spec.lane_ids() order.
+        let fp = CommitmentManifest::for_batch_fp(8).unwrap();
+        assert_eq!(Kappa1Claims::len(&fp), 0);
+        assert_eq!(Stage1Claims::y_len(&fp), 0);
+        assert_eq!(Stage1Claims::keccak_len(&fp), 740);
+        assert_eq!(Stage1Claims::len(&fp), 6 + 740);
+        let fp_s1 = Stage1Claims::from_slice_for(&fp, &point(&mut rng, Stage1Claims::len(&fp))).unwrap();
+        assert!(fp_s1.y1.is_empty() && fp_s1.y2.is_empty());
+        assert_eq!(fp_s1.b.len(), 6);
+        assert_eq!(fp_s1.keccak.len(), 740);
+        assert_eq!(Stage1Claims::from_slice_for(&fp, &fp_s1.to_vec()), Some(fp_s1));
+
+        assert_eq!(Stage2Claims::b_len(&fp), 0);
+        assert_eq!(Stage2Claims::keccak_len(&fp), 516);
+        assert_eq!(Stage2Claims::len(&fp), 4 + 516);
+        let fp_s2 = Stage2Claims::from_slice_for(&fp, &point(&mut rng, Stage2Claims::len(&fp))).unwrap();
+        assert!(fp_s2.b.is_empty() && fp_s2.fips.is_empty());
+        assert_eq!(fp_s2.squares.len(), 4);
+        assert_eq!(fp_s2.keccak.len(), 516);
+        assert_eq!(Stage2Claims::from_slice_for(&fp, &fp_s2.to_vec()), Some(fp_s2));
     }
 }

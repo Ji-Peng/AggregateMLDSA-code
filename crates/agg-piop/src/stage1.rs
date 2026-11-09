@@ -9,14 +9,17 @@
 //! instances and degree 4 (the range identity is cubic), ML-DSA-65 37 and ML-DSA-87 45, both
 //! of degree 3.
 
+use agg_fpkeccak::KeccakLayout;
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::padding::Geometry;
-use agg_witness::params::W1_BITS;
+use agg_witness::params::{TR_BYTES, W1_BITS};
 use jolt_field::Zero;
 
 use crate::claims::{bit_columns, PreStageClaims, Stage1Claims};
+use crate::keccak_fp::specs::stage1_groups;
+use crate::keccak_fp::virtuals::{c_tilde_mle_at, mu_mle_at};
 use crate::kernel::Term;
-use crate::manifest::{Column, CommitmentManifest, GroupRole};
+use crate::manifest::{Column, CommitmentManifest, GroupRole, HashField};
 use crate::stage::{
     check_terminal, prove_stage, prove_stage_unchecked, replay_stage, suffix, EqPoint, GroupSpec, InstanceSpec, LaneId,
     Points, StageError, StageSpec, WeightId,
@@ -30,7 +33,7 @@ use crate::OpeningField as E;
 pub const STAGE: usize = 1;
 /// Message degree of ML-DSA-44 ([`degree`]).
 pub const DEGREE: usize = 4;
-/// Batching coefficients of ML-DSA-44 ([`gamma_count`]).
+/// Batching coefficients of ML-DSA-44 under `HashField::Gf2` ([`gamma_count`]).
 pub const GAMMA_COUNT: usize = 26;
 
 /// True when the set checks `w_1' < m_w` by the cubic range identity (six bits).
@@ -38,10 +41,11 @@ fn has_range_w1(manifest: &CommitmentManifest) -> bool {
     manifest.shape().w1_bits == W1_BITS
 }
 
-/// The message degree: 4 with the range identity (ML-DSA-44), 3 otherwise.
+/// The message degree: 4 with the range identity (ML-DSA-44) or the cubic Keccak
+/// zero-checks (`HashField::Fp`), 3 otherwise.
 #[must_use]
 pub fn degree(manifest: &CommitmentManifest) -> usize {
-    if has_range_w1(manifest) {
+    if manifest.hash_field() == HashField::Fp || has_range_w1(manifest) {
         DEGREE
     } else {
         3
@@ -49,7 +53,8 @@ pub fn degree(manifest: &CommitmentManifest) -> usize {
 }
 
 /// The `gamma^(1)` layout of a parameter set: `w` bits of `w_1'` in `lanes` polynomial
-/// lanes each.
+/// lanes each, preceded by the bridge checks under `HashField::Gf2` or followed by the
+/// Keccak zero-check instances under `HashField::Fp`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Gammas {
     /// Bits of `w_1'`.
@@ -58,38 +63,58 @@ pub struct Gammas {
     pub lanes: usize,
     /// The range identity of ML-DSA-44.
     pub range_w1: bool,
+    /// Commitment-hash field (`Gf2` or `Fp`).
+    pub hash_field: HashField,
+    /// Keccak zero-check instances (`0` under `Gf2`, `65 Q + L` under `Fp`).
+    pub keccak: usize,
 }
 
 impl Gammas {
-    /// The layout of `manifest`'s parameter set.
+    /// The layout of `manifest`'s parameter set and hash field.
     #[must_use]
     pub fn new(manifest: &CommitmentManifest) -> Self {
+        let keccak = match manifest.hash_field() {
+            HashField::Gf2 => 0,
+            HashField::Fp => {
+                let layout = KeccakLayout::for_set(manifest.set());
+                65 * layout.slot_groups + layout.output_lanes
+            }
+        };
         Self {
             bits: manifest.shape().w1_bits,
             lanes: manifest.shape().lanes_k,
             range_w1: has_range_w1(manifest),
+            hash_field: manifest.hash_field(),
+            keccak,
         }
     }
 
-    /// Gamma index of `bool_y1[t]`.
+    const fn bridge_count(self) -> usize {
+        match self.hash_field {
+            HashField::Gf2 => 3 * self.bits + 1,
+            HashField::Fp => 0,
+        }
+    }
+
+    /// Gamma index of `bool_y1[t]` (`HashField::Gf2`).
     #[must_use]
     pub const fn bool_y1(self, t: usize) -> usize {
         t
     }
 
-    /// Gamma index of `level2[t]`.
+    /// Gamma index of `level2[t]` (`HashField::Gf2`).
     #[must_use]
     pub const fn level2(self, t: usize) -> usize {
         self.bits + t
     }
 
-    /// Gamma index of `level3`.
+    /// Gamma index of `level3` (`HashField::Gf2`).
     #[must_use]
     pub const fn level3(self) -> usize {
         2 * self.bits
     }
 
-    /// Gamma index of `bool_y2[t]`.
+    /// Gamma index of `bool_y2[t]` (`HashField::Gf2`).
     #[must_use]
     pub const fn bool_y2(self, t: usize) -> usize {
         2 * self.bits + 1 + t
@@ -98,23 +123,30 @@ impl Gammas {
     /// Gamma index of `bool_b[t, rho]` (bit-major).
     #[must_use]
     pub const fn bool_b(self, t: usize, lane: usize) -> usize {
-        3 * self.bits + 1 + t * self.lanes + lane
+        self.bridge_count() + t * self.lanes + lane
     }
 
     /// Gamma index of `range_w1` (ML-DSA-44 only).
     #[must_use]
     pub const fn range_w1(self) -> usize {
-        3 * self.bits + 1 + self.bits * self.lanes
+        self.bridge_count() + self.bits * self.lanes
+    }
+
+    /// First gamma index after the lattice checks (`bool_b` and `range_w1`).
+    #[must_use]
+    pub const fn keccak_offset(self) -> usize {
+        self.range_w1() + if self.range_w1 { 1 } else { 0 }
     }
 
     /// Batching coefficients.
     #[must_use]
     pub const fn count(self) -> usize {
-        self.range_w1() + if self.range_w1 { 1 } else { 0 }
+        self.keccak_offset() + self.keccak
     }
 }
 
-/// Batching coefficients of `manifest`'s parameter set (26, 37 or 45).
+/// Batching coefficients of `manifest`'s parameter set and hash field (under `Gf2`: 26, 37
+/// or 45; under `Fp`: 726 for ML-DSA-44).
 #[must_use]
 pub fn gamma_count(manifest: &CommitmentManifest) -> usize {
     Gammas::new(manifest).count()
@@ -170,74 +202,80 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
     let lanes = 0..gammas.bits;
     let bits = bit_columns(manifest);
     let mut groups = Vec::new();
-    // One equality group per domain, holding the Booleanity checks.
-    for domain in [GroupRole::Main, GroupRole::Level1, GroupRole::Level2] {
-        let mut lane_ids = Vec::new();
-        let mut instances = Vec::new();
-        match domain {
-            GroupRole::Main => {
-                lane_ids.extend(bits.iter().map(|&c| LaneId::Column(c)));
-                instances.extend(bits.iter().enumerate().map(|(lane, &column)| {
-                    let Column::W1Bit(t, rho) = column else { unreachable!("bit columns") };
-                    InstanceSpec::new(gammas.bool_b(usize::from(t), usize::from(rho)), vec![Term::Bool(lane)])
-                }));
-                if gammas.range_w1 {
-                    instances.push(InstanceSpec::new(gammas.range_w1(), vec![Term::RangeW1([5, 4, 3, 2])]));
-                }
-            }
-            GroupRole::Level1 => {
-                lane_ids.extend(lanes.clone().map(|t| LaneId::Parity1(t as u8)));
-                instances.extend(
-                    lanes
-                        .clone()
-                        .map(|t| InstanceSpec::new(gammas.bool_y1(t), vec![Term::Bool(t)])),
-                );
-            }
-            _ => {
-                lane_ids.extend(lanes.clone().map(|t| LaneId::Column(Column::Parity2(t as u8))));
-                instances.extend(
-                    lanes
-                        .clone()
-                        .map(|t| InstanceSpec::new(gammas.bool_y2(t), vec![Term::Bool(t)])),
-                );
-            }
-        }
-        groups.push(GroupSpec {
-            domain,
-            eq: EqPoint::Tau,
-            lanes: lane_ids,
-            instances,
-        });
+    let mut main_instances: Vec<InstanceSpec> = bits
+        .iter()
+        .enumerate()
+        .map(|(lane, &column)| {
+            let Column::W1Bit(t, rho) = column else { unreachable!("bit columns") };
+            InstanceSpec::new(gammas.bool_b(usize::from(t), usize::from(rho)), vec![Term::Bool(lane)])
+        })
+        .collect();
+    if gammas.range_w1 {
+        main_instances.push(InstanceSpec::new(gammas.range_w1(), vec![Term::RangeW1([5, 4, 3, 2])]));
     }
-    // level2[t] on D_1 with the weight w_2.
     groups.push(GroupSpec {
-        domain: GroupRole::Level1,
-        eq: EqPoint::None,
-        lanes: std::iter::once(LaneId::Weight(WeightId::Level2))
-            .chain(lanes.clone().map(|t| LaneId::Parity1(t as u8)))
-            .collect(),
-        instances: lanes
-            .clone()
-            .map(|t| InstanceSpec::new(gammas.level2(t), vec![Term::Product(vec![0, 1 + t])]))
-            .collect(),
+        domain: GroupRole::Main,
+        eq: EqPoint::Tau,
+        lanes: bits.iter().map(|&c| LaneId::Column(c)).collect(),
+        instances: main_instances,
     });
-    // level3 on D_2 summed over the bits with the weights w_{3,t}.
-    groups.push(GroupSpec {
-        domain: GroupRole::Level2,
-        eq: EqPoint::None,
-        lanes: lanes
-            .clone()
-            .map(|t| LaneId::Weight(WeightId::Level3(t as u8)))
-            .chain(lanes.clone().map(|t| LaneId::Column(Column::Parity2(t as u8))))
-            .collect(),
-        instances: vec![InstanceSpec::new(
-            gammas.level3(),
-            lanes
-                .clone()
-                .map(|t| Term::Product(vec![t, gammas.bits + t]))
-                .collect(),
-        )],
-    });
+    match manifest.hash_field() {
+        HashField::Gf2 => {
+            // Bridge Booleanity checks on D_1 and D_2.
+            groups.push(GroupSpec {
+                domain: GroupRole::Level1,
+                eq: EqPoint::Tau,
+                lanes: lanes.clone().map(|t| LaneId::Parity1(t as u8)).collect(),
+                instances: lanes
+                    .clone()
+                    .map(|t| InstanceSpec::new(gammas.bool_y1(t), vec![Term::Bool(t)]))
+                    .collect(),
+            });
+            groups.push(GroupSpec {
+                domain: GroupRole::Level2,
+                eq: EqPoint::Tau,
+                lanes: lanes.clone().map(|t| LaneId::Column(Column::Parity2(t as u8))).collect(),
+                instances: lanes
+                    .clone()
+                    .map(|t| InstanceSpec::new(gammas.bool_y2(t), vec![Term::Bool(t)]))
+                    .collect(),
+            });
+            // level2[t] on D_1 with the weight w_2.
+            groups.push(GroupSpec {
+                domain: GroupRole::Level1,
+                eq: EqPoint::None,
+                lanes: std::iter::once(LaneId::Weight(WeightId::Level2))
+                    .chain(lanes.clone().map(|t| LaneId::Parity1(t as u8)))
+                    .collect(),
+                instances: lanes
+                    .clone()
+                    .map(|t| InstanceSpec::new(gammas.level2(t), vec![Term::Product(vec![0, 1 + t])]))
+                    .collect(),
+            });
+            // level3 on D_2 summed over the bits with the weights w_{3,t}.
+            groups.push(GroupSpec {
+                domain: GroupRole::Level2,
+                eq: EqPoint::None,
+                lanes: lanes
+                    .clone()
+                    .map(|t| LaneId::Weight(WeightId::Level3(t as u8)))
+                    .chain(lanes.clone().map(|t| LaneId::Column(Column::Parity2(t as u8))))
+                    .collect(),
+                instances: vec![InstanceSpec::new(
+                    gammas.level3(),
+                    lanes
+                        .clone()
+                        .map(|t| Term::Product(vec![t, gammas.bits + t]))
+                        .collect(),
+                )],
+            });
+        }
+        HashField::Fp => {
+            let (keccak, used) = stage1_groups(manifest, gammas.keccak_offset());
+            debug_assert_eq!(used, gammas.keccak);
+            groups.extend(keccak);
+        }
+    }
     StageSpec {
         stage: STAGE,
         degree: degree(manifest),
@@ -247,21 +285,96 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
 }
 
 /// The claimed sums in gamma order: zero for the zero-checks, the level-2 and level-3 sums
-/// of the pre-stage claims for the level instances.
+/// of the pre-stage claims for the bridge level instances under `HashField::Gf2`.
 #[must_use]
 pub fn claimed_sums(manifest: &CommitmentManifest, prestage: &PreStageClaims, y_at_tau3: E) -> Vec<E> {
     let gammas = Gammas::new(manifest);
     let mut claims = vec![E::zero(); gammas.count()];
-    for t in 0..gammas.bits {
-        let kappa2 = prestage.kappa2_value(t);
-        claims[gammas.level2(t)] = prestage.y2[t] + kappa2 + kappa2;
+    if manifest.hash_field() == HashField::Gf2 {
+        for t in 0..gammas.bits {
+            let kappa2 = prestage.kappa2_value(t);
+            claims[gammas.level2(t)] = prestage.y2[t] + kappa2 + kappa2;
+        }
+        claims[gammas.level3()] =
+            agg_bridge::final_vector::level3_claimed_sum(y_at_tau3, prestage.kappa3_value());
     }
-    claims[gammas.level3()] =
-        agg_bridge::final_vector::level3_claimed_sum(y_at_tau3, prestage.kappa3_value());
     claims
 }
 
-/// Prove stage 1. `points.tau` is set; `tables` holds `w_2, w_{3,t}`.
+/// Public per-record hash inputs (`mu_i` and `c~_i`) for the verifier's evaluation of the
+/// `KeccakMu` and `KeccakCTilde` tables under `HashField::Fp`.
+#[derive(Clone, Copy, Debug)]
+pub struct KeccakPublicInputs<'a> {
+    /// `mu_i` per live record (padded records `i >= N` have `mu = 0`).
+    pub mu: &'a [[u8; TR_BYTES]],
+    /// `c~_i` per live record (padded records `i >= N` use `zero_message_c_tilde`).
+    pub c_tilde: &'a [Vec<u8>],
+}
+
+/// True for a committed or virtual Keccak lane whose terminal evaluation travels in the
+/// stage claims (`Column` on a Keccak group, `KeccakRot`, `KeccakPrev`, `KeccakPrevIota`,
+/// `KeccakBlk`).
+#[must_use]
+pub const fn is_keccak_claim_lane(id: LaneId) -> bool {
+    matches!(
+        id,
+        LaneId::Column(
+            Column::KeccakA { .. } | Column::KeccakC { .. } | Column::KeccakCPrime { .. }
+        ) | LaneId::KeccakRot(_)
+            | LaneId::KeccakPrev(_)
+            | LaneId::KeccakPrevIota(_)
+            | LaneId::KeccakBlk { .. }
+    )
+}
+
+/// True for any Keccak-domain lane (claimed or public).
+#[must_use]
+pub const fn is_keccak_lane(id: LaneId) -> bool {
+    is_keccak_claim_lane(id) || matches!(id, LaneId::KeccakMu(_) | LaneId::KeccakCTilde(_))
+}
+
+/// Every non-public Keccak lane of `spec` in `spec.lane_ids()` order.
+#[must_use]
+pub fn keccak_claim_lanes(spec: &StageSpec) -> Vec<LaneId> {
+    spec.lane_ids()
+        .into_iter()
+        .filter(|&id| is_keccak_claim_lane(id))
+        .collect()
+}
+
+/// Resolve a Keccak lane at the stage terminal `point`: non-public Keccak lanes are read
+/// from `keccak_claims` (in [`keccak_claim_lanes`] order) and the public `KeccakMu` and
+/// `KeccakCTilde` lanes are evaluated at the Keccak suffix of `point`.
+#[must_use]
+pub fn resolve_keccak(
+    manifest: &CommitmentManifest,
+    spec: &StageSpec,
+    point: &[E],
+    keccak_claims: &[E],
+    public: Option<KeccakPublicInputs<'_>>,
+    id: LaneId,
+) -> E {
+    if is_keccak_claim_lane(id) {
+        let index = keccak_claim_lanes(spec)
+            .into_iter()
+            .position(|lane| lane == id)
+            .unwrap_or_else(|| panic!("Keccak lane {id:?} is not read by stage {}", spec.stage));
+        return keccak_claims[index];
+    }
+    let r_k = suffix(point, manifest.d_keccak());
+    let public = public.unwrap_or_else(|| panic!("KeccakPublicInputs required to resolve {id:?}"));
+    match id {
+        LaneId::KeccakMu(lane_idx) => mu_mle_at(public.mu, &r_k, usize::from(lane_idx)),
+        LaneId::KeccakCTilde(out_lane) => {
+            let layout = KeccakLayout::for_set(manifest.set());
+            c_tilde_mle_at(&layout, public.c_tilde, &r_k, usize::from(out_lane))
+        }
+        other => panic!("{other:?} is not a Keccak lane"),
+    }
+}
+
+/// Prove stage 1. `points.tau` is set; `tables` holds `w_2, w_{3,t}` (under `Gf2`) or the
+/// Keccak prover tables (under `Fp`).
 pub fn prove(
     manifest: &CommitmentManifest,
     tables: &ProverTables<'_>,
@@ -304,10 +417,18 @@ fn prove_with(
     };
     let value = |id| run.value(&spec, id);
     let bits = 0..manifest.shape().w1_bits as u8;
+    let (y1, y2) = match manifest.hash_field() {
+        HashField::Gf2 => (
+            bits.clone().map(|t| value(LaneId::Parity1(t))).collect(),
+            bits.map(|t| value(LaneId::Column(Column::Parity2(t)))).collect(),
+        ),
+        HashField::Fp => (Vec::new(), Vec::new()),
+    };
     let claims = Stage1Claims {
-        y1: bits.clone().map(|t| value(LaneId::Parity1(t))).collect(),
-        y2: bits.map(|t| value(LaneId::Column(Column::Parity2(t)))).collect(),
+        y1,
+        y2,
         b: bit_columns(manifest).into_iter().map(|c| value(LaneId::Column(c))).collect(),
+        keccak: keccak_claim_lanes(&spec).into_iter().map(value).collect(),
     };
     transcript.absorb_extensions(&terminal_site(STAGE), &claims.to_vec())?;
     Ok((
@@ -354,43 +475,63 @@ impl BridgeWeightsAt {
 }
 
 /// The verifier's value of a stage-1 lane at the terminal.
-fn resolve(manifest: &CommitmentManifest, weights: &BridgeWeightsAt, claims: &Stage1Claims, id: LaneId) -> E {
+fn resolve(
+    manifest: &CommitmentManifest,
+    spec: &StageSpec,
+    point: &[E],
+    weights: Option<&BridgeWeightsAt>,
+    keccak_public: Option<KeccakPublicInputs<'_>>,
+    claims: &Stage1Claims,
+    id: LaneId,
+) -> E {
     match id {
         LaneId::Parity1(t) => claims.y1[usize::from(t)],
         LaneId::Column(Column::Parity2(t)) => claims.y2[usize::from(t)],
         LaneId::Column(Column::W1Bit(t, lane)) => {
             claims.b[usize::from(t) * manifest.shape().lanes_k + usize::from(lane)]
         }
-        LaneId::Weight(WeightId::Level2) => weights.level2,
-        LaneId::Weight(WeightId::Level3(t)) => weights.level3[usize::from(t)],
+        LaneId::Weight(WeightId::Level2) => weights.expect("Gf2 bridge weights").level2,
+        LaneId::Weight(WeightId::Level3(t)) => weights.expect("Gf2 bridge weights").level3[usize::from(t)],
+        other if is_keccak_lane(other) => {
+            resolve_keccak(manifest, spec, point, &claims.keccak, keccak_public, other)
+        }
         other => panic!("{other:?} is not a stage-1 lane"),
     }
 }
 
 /// Verify stage 1.
+#[allow(clippy::too_many_arguments)]
 pub fn verify(
     manifest: &CommitmentManifest,
     matrices: &BridgeMatrices,
     points: &Points,
     prestage: &PreStageClaims,
     y_at_tau3: E,
+    keccak_public: Option<KeccakPublicInputs<'_>>,
     proof: &Stage1Proof,
     transcript: &mut Transcript,
 ) -> Result<Stage1Output, StageError> {
     let spec = spec(manifest);
     let claims = claimed_sums(manifest, prestage, y_at_tau3);
-    if proof.claims.y1.len() != manifest.shape().w1_bits
-        || proof.claims.y2.len() != manifest.shape().w1_bits
+    let y_len = Stage1Claims::y_len(manifest);
+    if proof.claims.y1.len() != y_len
+        || proof.claims.y2.len() != y_len
         || proof.claims.b.len() != bit_columns(manifest).len()
+        || proof.claims.keccak.len() != Stage1Claims::keccak_len(manifest)
     {
         return Err(StageError::Shape("stage 1 claims".into()));
     }
     let replay = replay_stage(&spec, manifest, &claims, &proof.rounds, transcript)?;
     transcript.absorb_extensions(&terminal_site(STAGE), &proof.claims.to_vec())?;
-    let geom = Geometry::new(manifest.records()).map_err(|e| StageError::Internal(format!("{e:?}")))?;
-    let weights = BridgeWeightsAt::evaluate(manifest, &geom, matrices, &points.tau, &replay.point);
+    let weights = match manifest.hash_field() {
+        HashField::Gf2 => {
+            let geom = Geometry::new(manifest.records()).map_err(|e| StageError::Internal(format!("{e:?}")))?;
+            Some(BridgeWeightsAt::evaluate(manifest, &geom, matrices, &points.tau, &replay.point))
+        }
+        HashField::Fp => None,
+    };
     check_terminal(&spec, manifest, points, &replay, |id| {
-        resolve(manifest, &weights, &proof.claims, id)
+        resolve(manifest, &spec, &replay.point, weights.as_ref(), keccak_public, &proof.claims, id)
     })?;
     Ok(Stage1Output {
         point: replay.point,
@@ -459,6 +600,65 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn fp_stage_one_drops_bridge_and_appends_keccak_groups() {
+        let gf2 = CommitmentManifest::for_batch(8).unwrap();
+        assert_eq!(gamma_count(&gf2), 26);
+
+        let manifest = CommitmentManifest::for_batch_fp(8).unwrap();
+        let gammas = Gammas::new(&manifest);
+        assert_eq!(gammas.bool_b(0, 0), 0);
+        assert_eq!(gammas.bool_b(5, 0), 5);
+        assert_eq!(gammas.range_w1(), 6);
+        assert_eq!(gammas.keccak_offset(), 7);
+        assert_eq!(gammas.keccak, 719);
+        assert_eq!(gamma_count(&manifest), 726);
+        assert_eq!(degree(&manifest), DEGREE);
+
+        let spec = spec(&manifest);
+        spec.validate().unwrap();
+        assert_eq!(spec.gamma_count, 726);
+        assert_eq!(spec.degree, DEGREE);
+
+        let main = &spec.groups[0];
+        assert_eq!((main.domain, main.eq), (GroupRole::Main, EqPoint::Tau));
+        assert_eq!(main.lanes.len(), 6);
+        assert_eq!(main.instances.len(), 7);
+        assert_eq!(main.instances[6].gamma, 6);
+        assert_eq!(main.instances[6].terms, vec![Term::RangeW1([5, 4, 3, 2])]);
+
+        for group in &spec.groups[1..] {
+            assert_eq!(group.domain, GroupRole::KeccakA(0));
+            assert!(matches!(group.eq, EqPoint::Tau | EqPoint::TauMasked(_)));
+        }
+        for group in &spec.groups {
+            let inner = usize::from(group.eq != EqPoint::None);
+            for instance in &group.instances {
+                for term in &instance.terms {
+                    assert!(term.degree() + inner <= DEGREE);
+                }
+            }
+        }
+
+        let dummy_pre = PreStageClaims {
+            y2: Vec::new(),
+            kappa2: Vec::new(),
+            kappa3: E::zero(),
+        };
+        let sums = claimed_sums(&manifest, &dummy_pre, E::zero());
+        assert_eq!(sums.len(), 726);
+        assert!(sums.iter().all(|&c| c == E::zero()));
+
+        // Lane sets under Fp also validate and use degree 4 for the cubic Keccak terms.
+        use agg_witness::params::Set;
+        for (set, expected_gammas) in [(Set::S65, 24 + 721), (Set::S87, 32 + 918)] {
+            let m = CommitmentManifest::for_set_fp(set, 256, crate::manifest::Relation::Hu).unwrap();
+            let s = super::spec(&m);
+            s.validate().unwrap();
+            assert_eq!((gamma_count(&m), s.gamma_count, s.degree, degree(&m)), (expected_gammas, expected_gammas, DEGREE, DEGREE));
         }
     }
 }

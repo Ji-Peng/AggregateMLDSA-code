@@ -1003,6 +1003,7 @@ fn verify_piop_with(
             &points,
             &proof.prestage,
             y_at_tau3,
+            None,
             &proof.stage1,
             transcript_s,
         )?;

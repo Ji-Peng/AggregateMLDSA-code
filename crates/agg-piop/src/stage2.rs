@@ -25,20 +25,23 @@
 //! without `leaf8[U_mid^(rho)]` (the magnitude `L` has a looked-up low digit and two bits),
 //! and `F_e` is one instance per row lane `rho` after them, with the terminal claims
 //! `delta^(rho)(r^(2))` then `e^(rho)(r^(2))`.
+use agg_fpkeccak::KeccakLayout;
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::padding::Geometry;
 use agg_witness::params::W1_BITS;
 use jolt_field::Zero;
 
 use crate::claims::{bit_columns, Kappa1Claims, Stage1Claims, Stage2Claims};
+use crate::keccak_fp::specs::stage2_groups;
 use crate::kernel::{LeafPoly, Term};
-use crate::manifest::{Column, CommitmentManifest, FipsColumn, GroupRole};
+use crate::manifest::{Column, CommitmentManifest, FipsColumn, GroupRole, HashField};
 use crate::range::{digits, Digit};
 use crate::stage::{
     check_terminal, prove_stage_split, replay_stage, suffix, EqPoint, GroupSpec, InstanceSpec, LaneId,
     Points, StageError, StageSpec, WeightId,
 };
-use crate::stage1::Stage1Output;
+pub use crate::stage1::{keccak_claim_lanes, resolve_keccak, KeccakPublicInputs};
+use crate::stage1::{is_keccak_lane, Stage1Output};
 use crate::tables::ProverTables;
 use crate::transcript::{terminal_site, Transcript, KAPPA1_SITE, PROJ_CLAIM_SITE};
 use crate::weights::{level1_lane_weights_at, level1_weight_at};
@@ -62,22 +65,43 @@ pub fn fips_instances(manifest: &CommitmentManifest) -> usize {
     }
 }
 
-/// Batching coefficients: 10 under H-u, 9 under H-exact and H-FIPS (the leaves of `K_2`
-/// and `K_3` in each); 18 and 22 for ML-DSA-65 and ML-DSA-87.
-#[must_use]
-pub fn gamma_count(manifest: &CommitmentManifest) -> usize {
-    bits(manifest) + manifest.leaf_digits().len() + fips_instances(manifest)
+/// Bridge `def_y1` instances: `w_1'` bits under `HashField::Gf2`, none under `HashField::Fp`.
+fn def_y1_instances(manifest: &CommitmentManifest) -> usize {
+    match manifest.hash_field() {
+        HashField::Gf2 => manifest.shape().w1_bits,
+        HashField::Fp => 0,
+    }
 }
 
-/// Bits of `w_1'` (the `def_y1` instances).
-fn bits(manifest: &CommitmentManifest) -> usize {
-    manifest.shape().w1_bits
+/// Keccak boundary-link zero-check instances of stage 2 (`0` under `Gf2`,
+/// `25 (P - 1)` under `Fp`).
+fn keccak_instances(manifest: &CommitmentManifest) -> usize {
+    match manifest.hash_field() {
+        HashField::Gf2 => 0,
+        HashField::Fp => {
+            let layout = KeccakLayout::for_set(manifest.set());
+            agg_fpkeccak::LANES * (layout.perms - 1)
+        }
+    }
+}
+
+/// Batching coefficients before the Keccak boundary-link instances.
+fn keccak_offset(manifest: &CommitmentManifest) -> usize {
+    def_y1_instances(manifest) + manifest.leaf_digits().len() + fips_instances(manifest)
+}
+
+/// Batching coefficients: under `Gf2`, 10 under H-u, 9 under H-exact and H-FIPS (18 and 22
+/// for ML-DSA-65 and ML-DSA-87); under `Fp`, the leaf and H-FIPS checks plus the Keccak
+/// boundary-link checks (154 under H-u for ML-DSA-44).
+#[must_use]
+pub fn gamma_count(manifest: &CommitmentManifest) -> usize {
+    keccak_offset(manifest) + keccak_instances(manifest)
 }
 
 /// Gamma index of H-FIPS's `F_e` (of row lane 0).
 #[must_use]
 pub fn gamma_fips(manifest: &CommitmentManifest) -> usize {
-    bits(manifest) + manifest.leaf_digits().len()
+    def_y1_instances(manifest) + manifest.leaf_digits().len()
 }
 
 /// Gamma index of H-FIPS's `F_e` of row lane `rho`.
@@ -125,16 +149,17 @@ pub const fn gamma_def_y1(t: usize) -> usize {
     t
 }
 /// Gamma index of the leaf of the `k`-th leaf-checked digit (`manifest.leaf_digits()`) for
-/// ML-DSA-44 ([`gamma_leaf_for`]).
+/// ML-DSA-44 under `HashField::Gf2` ([`gamma_leaf_for`]).
 #[must_use]
 pub const fn gamma_leaf(k: usize) -> usize {
     W1_BITS + k
 }
 
-/// Gamma index of the leaf of the `k`-th leaf-checked digit of any parameter set.
+/// Gamma index of the leaf of the `k`-th leaf-checked digit of any parameter set and hash
+/// field.
 #[must_use]
 pub fn gamma_leaf_for(manifest: &CommitmentManifest, k: usize) -> usize {
-    bits(manifest) + k
+    def_y1_instances(manifest) + k
 }
 
 /// The stage-2 proof.
@@ -179,26 +204,28 @@ fn leaf_poly(digit: &Digit) -> LeafPoly {
 pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
     let all = digits(manifest);
     let mut groups = Vec::new();
-    // def_y1[t] on the main domain: the weights w_1^(rho), then the bits b_t^(rho)
-    // bit-major; instance t is sum_rho w_1^(rho) b_t^(rho).
-    let weight_lanes = manifest.shape().lanes_k;
-    let bit_lanes = bit_columns(manifest);
-    groups.push(GroupSpec {
-        domain: GroupRole::Main,
-        eq: EqPoint::None,
-        lanes: (0..weight_lanes as u8)
-            .map(|rho| LaneId::Weight(WeightId::Level1(rho)))
-            .chain(bit_lanes.iter().map(|&c| LaneId::Column(c)))
-            .collect(),
-        instances: (0..bits(manifest))
-            .map(|t| {
-                let terms = (0..weight_lanes)
-                    .map(|rho| Term::Product(vec![rho, weight_lanes + t * weight_lanes + rho]))
-                    .collect();
-                InstanceSpec::new(gamma_def_y1(t), terms)
-            })
-            .collect(),
-    });
+    if manifest.hash_field() == HashField::Gf2 {
+        // def_y1[t] on the main domain: the weights w_1^(rho), then the bits b_t^(rho)
+        // bit-major; instance t is sum_rho w_1^(rho) b_t^(rho).
+        let weight_lanes = manifest.shape().lanes_k;
+        let bit_lanes = bit_columns(manifest);
+        groups.push(GroupSpec {
+            domain: GroupRole::Main,
+            eq: EqPoint::None,
+            lanes: (0..weight_lanes as u8)
+                .map(|rho| LaneId::Weight(WeightId::Level1(rho)))
+                .chain(bit_lanes.iter().map(|&c| LaneId::Column(c)))
+                .collect(),
+            instances: (0..def_y1_instances(manifest))
+                .map(|t| {
+                    let terms = (0..weight_lanes)
+                        .map(|rho| Term::Product(vec![rho, weight_lanes + t * weight_lanes + rho]))
+                        .collect();
+                    InstanceSpec::new(gamma_def_y1(t), terms)
+                })
+                .collect(),
+        });
+    }
     // The leaves, one group per domain (the main domain: Z_hi, U_hi; the projection domain:
     // K_2, K_3), each at the domain's suffix of r^(1).
     for domain in [GroupRole::Main, GroupRole::Proj] {
@@ -232,6 +259,11 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
                 .collect(),
         });
     }
+    if manifest.hash_field() == HashField::Fp {
+        let (keccak, used) = stage2_groups(manifest, keccak_offset(manifest));
+        debug_assert_eq!(used, keccak_instances(manifest));
+        groups.extend(keccak);
+    }
     StageSpec {
         stage: STAGE,
         degree: DEGREE,
@@ -240,19 +272,20 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
     }
 }
 
-/// The claimed sums in gamma order: the level-1 sum for `def_y1`, zero for the leaves and
-/// H-FIPS's `F_e`.
+/// The claimed sums in gamma order: the level-1 sum for `def_y1` under `Gf2`, zero for the
+/// leaves, H-FIPS's `F_e` and the Keccak boundary-link checks.
 #[must_use]
 pub fn claimed_sums(manifest: &CommitmentManifest, stage1: &Stage1Claims, kappa1: &Kappa1Claims) -> Vec<E> {
     let mut claims = vec![E::zero(); gamma_count(manifest)];
-    for t in 0..bits(manifest) {
+    for t in 0..def_y1_instances(manifest) {
         let kappa = kappa1.value(t);
         claims[gamma_def_y1(t)] = stage1.y1[t] + kappa + kappa;
     }
     claims
 }
 
-/// Prove stage 2. `points.tau, points.r1` are set; `tables` holds `w_1`.
+/// Prove stage 2. `points.tau, points.r1` are set; `tables` holds `w_1` (under `Gf2`) or the
+/// Keccak prover tables (under `Fp`).
 pub fn prove(
     manifest: &CommitmentManifest,
     tables: &ProverTables<'_>,
@@ -293,13 +326,18 @@ fn prove_with(
         prove_stage_split(&spec, manifest, points, &claims, |id| tables.lane(id), tables.level1_split(), transcript, false)?
     };
     let value = |id| run.value(&spec, id);
+    let b = match manifest.hash_field() {
+        HashField::Gf2 => bit_columns(manifest).into_iter().map(|c| value(LaneId::Column(c))).collect(),
+        HashField::Fp => Vec::new(),
+    };
     let claims = Stage2Claims {
-        b: bit_columns(manifest).into_iter().map(|c| value(LaneId::Column(c))).collect(),
+        b,
         squares: digits(manifest)
             .iter()
             .map(|digit| value(LaneId::DigitSquare(digit.column)))
             .collect(),
         fips: fips_terminals(manifest).into_iter().map(|c| value(LaneId::Column(c))).collect(),
+        keccak: keccak_claim_lanes(&spec).into_iter().map(value).collect(),
     };
     transcript.absorb_extensions(&terminal_site(STAGE), &claims.to_vec())?;
     let projection = crate::projection::claim(
@@ -324,6 +362,36 @@ fn prove_with(
     ))
 }
 
+/// The verifier's value of a stage-2 lane at the terminal.
+#[allow(clippy::too_many_arguments)]
+fn resolve(
+    manifest: &CommitmentManifest,
+    spec: &StageSpec,
+    point: &[E],
+    all: &[Digit],
+    fips: &[Column],
+    level1: &[E],
+    claims: &Stage2Claims,
+    id: LaneId,
+) -> E {
+    let lanes = manifest.shape().lanes_k;
+    match id {
+        LaneId::Column(Column::W1Bit(t, lane)) => claims.b[usize::from(t) * lanes + usize::from(lane)],
+        LaneId::Column(c) if fips.contains(&c) => {
+            claims.fips[fips.iter().position(|&f| f == c).expect("listed")]
+        }
+        LaneId::DigitSquare(c) => {
+            let k = all.iter().position(|d| d.column == c).expect("a digit");
+            claims.squares[k]
+        }
+        LaneId::Weight(WeightId::Level1(lane)) => level1[usize::from(lane)],
+        other if is_keccak_lane(other) => {
+            resolve_keccak(manifest, spec, point, &claims.keccak, None, other)
+        }
+        other => panic!("{other:?} is not a stage-2 lane"),
+    }
+}
+
 /// Verify stage 2.
 pub fn verify(
     manifest: &CommitmentManifest,
@@ -333,7 +401,9 @@ pub fn verify(
     proof: &Stage2Proof,
     transcript: &mut Transcript,
 ) -> Result<Stage2Output, StageError> {
-    if proof.kappa1.0.len() != Kappa1Claims::len(manifest) || proof.claims.b.len() != bit_columns(manifest).len() {
+    if proof.kappa1.0.len() != Kappa1Claims::len(manifest)
+        || proof.claims.b.len() != Stage2Claims::b_len(manifest)
+    {
         return Err(StageError::Shape("stage 2 bit claims".into()));
     }
     transcript.absorb_extensions(KAPPA1_SITE, &proof.kappa1.to_vec())?;
@@ -342,28 +412,28 @@ pub fn verify(
     let replay = replay_stage(&spec, manifest, &claims, &proof.rounds, transcript)?;
     let all = digits(manifest);
     let fips = fips_terminals(manifest);
-    if proof.claims.squares.len() != all.len() || proof.claims.fips.len() != fips.len() {
+    if proof.claims.squares.len() != all.len()
+        || proof.claims.fips.len() != fips.len()
+        || proof.claims.keccak.len() != Stage2Claims::keccak_len(manifest)
+    {
         return Err(StageError::Shape("stage 2 claims".into()));
     }
     transcript.absorb_extensions(&terminal_site(STAGE), &proof.claims.to_vec())?;
     transcript.absorb_extensions(PROJ_CLAIM_SITE, &[proof.projection])?;
-    let r1_1 = suffix(&stage1.point, manifest.group(GroupRole::Level1).logical_vars);
-    let level1 = if manifest.has_lanes() {
-        level1_lane_weights_at(manifest, &matrices.m1, &r1_1, &replay.point)
-    } else {
-        let geom = Geometry::new(manifest.records()).map_err(|e| StageError::Internal(format!("{e:?}")))?;
-        vec![level1_weight_at(&geom, &matrices.m1, &r1_1, &replay.point)]
-    };
-    let lanes = manifest.shape().lanes_k;
-    check_terminal(&spec, manifest, points, &replay, |id| match id {
-        LaneId::Column(Column::W1Bit(t, lane)) => proof.claims.b[usize::from(t) * lanes + usize::from(lane)],
-        LaneId::Column(c) if fips.contains(&c) => proof.claims.fips[fips.iter().position(|&f| f == c).expect("listed")],
-        LaneId::DigitSquare(c) => {
-            let k = all.iter().position(|d| d.column == c).expect("a digit");
-            proof.claims.squares[k]
+    let level1 = match manifest.hash_field() {
+        HashField::Gf2 => {
+            let r1_1 = suffix(&stage1.point, manifest.group(GroupRole::Level1).logical_vars);
+            if manifest.has_lanes() {
+                level1_lane_weights_at(manifest, &matrices.m1, &r1_1, &replay.point)
+            } else {
+                let geom = Geometry::new(manifest.records()).map_err(|e| StageError::Internal(format!("{e:?}")))?;
+                vec![level1_weight_at(&geom, &matrices.m1, &r1_1, &replay.point)]
+            }
         }
-        LaneId::Weight(WeightId::Level1(lane)) => level1[usize::from(lane)],
-        other => panic!("{other:?} is not a stage-2 lane"),
+        HashField::Fp => Vec::new(),
+    };
+    check_terminal(&spec, manifest, points, &replay, |id| {
+        resolve(manifest, &spec, &replay.point, &all, &fips, &level1, &proof.claims, id)
     })?;
     Ok(Stage2Output {
         point: replay.point,
@@ -462,5 +532,61 @@ mod tests {
         // The degree is tight: leaf8[K_2] reaches it.
         assert_eq!(max, DEGREE);
         assert_eq!(DEGREE, crate::transcript::STAGE_DEGREES[STAGE - 1]);
+    }
+
+    #[test]
+    fn fp_stage_two_drops_def_y1_and_appends_keccak_groups() {
+        let gf2 = CommitmentManifest::for_batch(8).unwrap();
+        assert_eq!(gamma_count(&gf2), 10);
+
+        let manifest = CommitmentManifest::for_batch_fp(8).unwrap();
+        assert_eq!(gamma_count(&manifest), 154);
+        let spec = spec(&manifest);
+        spec.validate().unwrap();
+        assert_eq!(spec.gamma_count, 154);
+        assert_eq!(spec.degree, DEGREE);
+
+        // Groups 0 and 1 are the main-domain and projection-domain leaves at gammas 0..4;
+        // groups 2 and 3 are the two boundary slot-mask groups (s = 8 and s = 0) at gammas 4..154.
+        assert_eq!(spec.groups.len(), 2 + 2);
+        assert_eq!((spec.groups[0].domain, spec.groups[0].eq), (GroupRole::Main, EqPoint::R1));
+        assert_eq!(spec.groups[0].instances[0].gamma, 0);
+        assert_eq!(spec.groups[0].instances[1].gamma, 1);
+        assert_eq!((spec.groups[1].domain, spec.groups[1].eq), (GroupRole::Proj, EqPoint::R1));
+        assert_eq!(spec.groups[1].instances[0].gamma, 2);
+        assert_eq!(spec.groups[1].instances[1].gamma, 3);
+        for group in &spec.groups[2..] {
+            assert_eq!(group.domain, GroupRole::KeccakA(0));
+            assert!(group.eq.mask().is_some());
+        }
+        for group in &spec.groups {
+            let inner = usize::from(group.eq != EqPoint::None);
+            for instance in &group.instances {
+                for term in &instance.terms {
+                    assert!(term.degree() + inner <= DEGREE);
+                }
+            }
+        }
+
+        let dummy_s1 = Stage1Claims {
+            y1: Vec::new(),
+            y2: Vec::new(),
+            b: Vec::new(),
+            keccak: Vec::new(),
+        };
+        let sums = claimed_sums(&manifest, &dummy_s1, &Kappa1Claims(Vec::new()));
+        assert_eq!(sums.len(), 154);
+        assert!(sums.iter().all(|&c| c == E::zero()));
+
+        // H-exact and H-FIPS under Fp drop def_y1 and keep their leaves and F_e.
+        for (rel, expected) in [
+            (crate::manifest::Relation::HExact, 3 + 150),
+            (crate::manifest::Relation::HFips, 2 + 1 + 150),
+        ] {
+            let m = CommitmentManifest::for_relation_fp(8, rel).unwrap();
+            let s = super::spec(&m);
+            s.validate().unwrap();
+            assert_eq!((gamma_count(&m), s.gamma_count), (expected, expected));
+        }
     }
 }
