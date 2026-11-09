@@ -208,12 +208,19 @@ impl Stage1Claims {
         }
     }
 
-    /// Non-public Keccak lane claims (`0` under `Gf2`).
+    /// Non-public Keccak lane claims (`0` under `Gf2`; under `Fp`, `66 Q + |t0_w1| + |out_rot|`
+    /// from [`agg_fpkeccak::KeccakLayout`]).
     #[must_use]
     pub fn keccak_len(manifest: &CommitmentManifest) -> usize {
         match manifest.hash_field() {
             HashField::Gf2 => 0,
-            HashField::Fp => crate::stage1::keccak_claim_lanes(&crate::stage1::spec(manifest)).len(),
+            HashField::Fp => {
+                let layout = agg_fpkeccak::KeccakLayout::for_set(manifest.set());
+                let per_slot_group = 2 * agg_fpkeccak::LANES + 3 * agg_fpkeccak::COLS + 1;
+                per_slot_group * layout.slot_groups
+                    + crate::keccak_fp::masks::t0_w1_lanes(&layout).len()
+                    + crate::keccak_fp::masks::output_rot_columns(&layout).len()
+            }
         }
     }
 
@@ -292,12 +299,17 @@ impl Stage2Claims {
         }
     }
 
-    /// Non-public Keccak lane claims (`0` under `Gf2`).
+    /// Non-public Keccak lane claims (`0` under `Gf2`; under `Fp`, `86 (P - 1)` from
+    /// [`agg_fpkeccak::KeccakLayout`]).
     #[must_use]
     pub fn keccak_len(manifest: &CommitmentManifest) -> usize {
         match manifest.hash_field() {
             HashField::Gf2 => 0,
-            HashField::Fp => crate::stage1::keccak_claim_lanes(&crate::stage2::spec(manifest)).len(),
+            HashField::Fp => {
+                let layout = agg_fpkeccak::KeccakLayout::for_set(manifest.set());
+                let per_boundary_group = 3 * agg_fpkeccak::LANES + 2 * agg_fpkeccak::COLS + 1;
+                per_boundary_group * crate::keccak_fp::masks::boundary_slot_groups(&layout).len()
+            }
         }
     }
 
@@ -491,5 +503,26 @@ mod tests {
         assert_eq!(fp_s2.squares.len(), 4);
         assert_eq!(fp_s2.keccak.len(), 516);
         assert_eq!(Stage2Claims::from_slice_for(&fp, &fp_s2.to_vec()), Some(fp_s2));
+
+        // Closed-form Keccak claim counts match the deduplicated stage spec lanes for every set
+        // and relation.
+        use crate::manifest::Relation;
+        use agg_witness::params::Set;
+        for (set, relation) in [Set::S44, Set::S65, Set::S87]
+            .into_iter()
+            .flat_map(|s| [Relation::Hu, Relation::HExact, Relation::HFips].map(|r| (s, r)))
+        {
+            let Ok(m) = CommitmentManifest::for_set_fp(set, 256, relation) else {
+                continue;
+            };
+            assert_eq!(
+                Stage1Claims::keccak_len(&m),
+                crate::stage1::keccak_claim_lanes(&crate::stage1::spec(&m)).len()
+            );
+            assert_eq!(
+                Stage2Claims::keccak_len(&m),
+                crate::stage1::keccak_claim_lanes(&crate::stage2::spec(&m)).len()
+            );
+        }
     }
 }

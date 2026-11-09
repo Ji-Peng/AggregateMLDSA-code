@@ -617,31 +617,56 @@ pub fn zero_message_c_tilde(layout: &KeccakLayout) -> Vec<u8> {
     })
 }
 
+/// Per-byte subset sums of `eq_z` (64 entries): entry `v` of table `b` is the sum of
+/// `eq_z[8 b + z]` over the set bits `z` of `v`, so the dot of a 64-bit word with `eq_z`
+/// costs eight lookups instead of up to 64 additions.
+fn byte_tables(eq_z: &[E]) -> Vec<[E; 256]> {
+    (0..LANE_BITS / 8)
+        .map(|b| {
+            let mut table = [E::zero(); 256];
+            for v in 1..256_usize {
+                // `v` is `v & (v - 1)` plus its lowest set bit.
+                table[v] = table[v & (v - 1)] + eq_z[8 * b + v.trailing_zeros() as usize];
+            }
+            table
+        })
+        .collect()
+}
+
+/// The dot of the bits of `word` with `eq_z`, read through [`byte_tables`].
+fn word_dot(tables: &[[E; 256]], word: u64) -> E {
+    tables
+        .iter()
+        .enumerate()
+        .fold(E::zero(), |acc, (b, table)| acc + table[((word >> (8 * b)) & 0xff) as usize])
+}
+
+/// Lane `lane` (8 bytes, little-endian) of a byte string.
+fn lane_word(bytes: &[u8], lane: usize) -> u64 {
+    u64::from_le_bytes(bytes[8 * lane..8 * (lane + 1)].try_into().expect("8-byte lane"))
+}
+
 /// Verifier evaluation of the public `KeccakMu(lane_idx)` table at a Keccak-domain point
 /// `r_k = (r_z, r_s, r_i)`.
 #[must_use]
 pub fn mu_mle_at(mu_records: &[[u8; TR_BYTES]], r_k: &[E], lane_idx: usize) -> E {
-    let eq_z = eq_table(&r_k[..6]);
+    mu_mle_at_lanes(mu_records, r_k, &[lane_idx])[0]
+}
+
+/// [`mu_mle_at`] for several lanes at once: one pass over the records shares the `eq`
+/// tables, which matters for large batches.
+#[must_use]
+pub fn mu_mle_at_lanes(mu_records: &[[u8; TR_BYTES]], r_k: &[E], lanes: &[usize]) -> Vec<E> {
+    let tables = byte_tables(&eq_table(&r_k[..6]));
     let eq_s0 = eq_table(&r_k[6..10])[0];
     let eq_i = eq_table(&r_k[10..]);
-    let sum_i = mu_records
-        .iter()
-        .enumerate()
-        .fold(E::zero(), |acc, (i, mu)| {
-            let word = u64::from_le_bytes(
-                mu[8 * lane_idx..8 * (lane_idx + 1)]
-                    .try_into()
-                    .expect("8-byte lane"),
-            );
-            let mut dot = E::zero();
-            for z in 0..LANE_BITS {
-                if (word >> z) & 1 == 1 {
-                    dot += eq_z[z];
-                }
-            }
-            acc + eq_i[i] * dot
-        });
-    eq_s0 * sum_i
+    let mut sums = vec![E::zero(); lanes.len()];
+    for (mu, &eq) in mu_records.iter().zip(&eq_i) {
+        for (sum, &lane) in sums.iter_mut().zip(lanes) {
+            *sum += eq * word_dot(&tables, lane_word(mu, lane));
+        }
+    }
+    sums.into_iter().map(|sum| eq_s0 * sum).collect()
 }
 
 /// Verifier evaluation of the public `KeccakCTilde(out_lane)` table at a Keccak-domain point
@@ -653,40 +678,39 @@ pub fn c_tilde_mle_at(
     r_k: &[E],
     out_lane: usize,
 ) -> E {
-    let eq_z = eq_table(&r_k[..6]);
+    c_tilde_mle_at_lanes(layout, c_tilde_records, r_k, &[out_lane])[0]
+}
+
+/// [`c_tilde_mle_at`] for several output lanes at once: one pass over the records and one
+/// zero-message hash for the padded records.
+#[must_use]
+pub fn c_tilde_mle_at_lanes(
+    layout: &KeccakLayout,
+    c_tilde_records: &[Vec<u8>],
+    r_k: &[E],
+    out_lanes: &[usize],
+) -> Vec<E> {
+    let tables = byte_tables(&eq_table(&r_k[..6]));
     let s_out = (layout.rounds - 1) % SLOTS;
     let eq_s_out = eq_table(&r_k[6..10])[s_out];
     let eq_i = eq_table(&r_k[10..]);
-    let word_dot = |bytes: &[u8]| -> E {
-        let word = u64::from_le_bytes(
-            bytes[8 * out_lane..8 * (out_lane + 1)]
-                .try_into()
-                .expect("8-byte lane"),
-        );
-        let mut dot = E::zero();
-        for z in 0..LANE_BITS {
-            if (word >> z) & 1 == 1 {
-                dot += eq_z[z];
-            }
+    let mut sums = vec![E::zero(); out_lanes.len()];
+    for (ct, &eq) in c_tilde_records.iter().zip(&eq_i) {
+        for (sum, &lane) in sums.iter_mut().zip(out_lanes) {
+            *sum += eq * word_dot(&tables, lane_word(ct, lane));
         }
-        dot
-    };
-    let live_sum = c_tilde_records
-        .iter()
-        .enumerate()
-        .fold(E::zero(), |acc, (i, ct)| acc + eq_i[i] * word_dot(ct));
-    let pad_sum = if c_tilde_records.len() < eq_i.len() {
+    }
+    if c_tilde_records.len() < eq_i.len() {
         let pad_ct = zero_message_c_tilde(layout);
-        let pad_dot = word_dot(&pad_ct);
         let pad_eq = eq_i[c_tilde_records.len()..]
             .iter()
             .copied()
             .fold(E::zero(), |a, b| a + b);
-        pad_eq * pad_dot
-    } else {
-        E::zero()
-    };
-    eq_s_out * (live_sum + pad_sum)
+        for (sum, &lane) in sums.iter_mut().zip(out_lanes) {
+            *sum += pad_eq * word_dot(&tables, lane_word(&pad_ct, lane));
+        }
+    }
+    sums.into_iter().map(|sum| eq_s_out * sum).collect()
 }
 
 /// Verifier evaluation of the round-constant offset of `Rot[(0, 0), Q - 1]` (output slot `s_out`,

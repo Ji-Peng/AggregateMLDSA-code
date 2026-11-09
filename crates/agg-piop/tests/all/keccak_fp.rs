@@ -17,7 +17,7 @@ use agg_piop::stage::{
     check_terminal, prove_stage, prove_stage_unchecked, replay_stage, EqPoint, GroupSpec,
     InstanceSpec, Points, StageError, StageSpec,
 };
-use agg_piop::stage1::{keccak_claim_lanes, resolve_keccak, KeccakPublicInputs};
+use agg_piop::stage1::{keccak_claim_lanes, resolve_keccak, KeccakPublicInputs, KeccakResolver};
 use agg_piop::tables::ProverTables;
 use agg_piop::transcript::{
     commitment_site, terminal_site, Transcript, BRIDGE_SEED_SITE, FINAL_VECTORS_SITE,
@@ -586,15 +586,15 @@ fn keccak_stage12_groups_prove_and_replay() {
             &mut verifier_tx,
         )
         .expect("honest stage 1 Keccak replay");
+        let s1_resolver = KeccakResolver::new(
+            &manifest,
+            &s1_spec,
+            &s1_replay.point,
+            &s1_keccak_claims,
+            Some(public_inputs),
+        );
         check_terminal(&s1_spec, &manifest, &verifier_points, &s1_replay, |id| {
-            resolve_keccak(
-                &manifest,
-                &s1_spec,
-                &s1_replay.point,
-                &s1_keccak_claims,
-                Some(public_inputs),
-                id,
-            )
+            resolve_keccak(&s1_resolver, id)
         })
         .expect("honest stage 1 Keccak terminal check accepts");
 
@@ -642,15 +642,15 @@ fn keccak_stage12_groups_prove_and_replay() {
             &mut verifier_tx,
         )
         .expect("honest stage 2 Keccak replay");
+        let s2_resolver = KeccakResolver::new(
+            &manifest,
+            &s2_spec,
+            &s2_replay.point,
+            &s2_keccak_claims,
+            None,
+        );
         check_terminal(&s2_spec, &manifest, &verifier_points, &s2_replay, |id| {
-            resolve_keccak(
-                &manifest,
-                &s2_spec,
-                &s2_replay.point,
-                &s2_keccak_claims,
-                None,
-                id,
-            )
+            resolve_keccak(&s2_resolver, id)
         })
         .expect("honest stage 2 Keccak terminal check accepts");
 
@@ -697,16 +697,16 @@ fn keccak_stage12_groups_prove_and_replay() {
             &mut bad_v_tx,
         )
         .expect("stage 1 replay of tampered proof");
+        let bad_s1_resolver = KeccakResolver::new(
+            &manifest,
+            &s1_spec,
+            &bad_s1_replay.point,
+            &bad_s1_claims,
+            Some(public_inputs),
+        );
         assert!(matches!(
             check_terminal(&s1_spec, &manifest, &verifier_points, &bad_s1_replay, |id| {
-                resolve_keccak(
-                    &manifest,
-                    &s1_spec,
-                    &bad_s1_replay.point,
-                    &bad_s1_claims,
-                    Some(public_inputs),
-                    id,
-                )
+                resolve_keccak(&bad_s1_resolver, id)
             }),
             Err(StageError::Terminal(1))
         ));
@@ -746,16 +746,16 @@ fn keccak_stage12_groups_prove_and_replay() {
             &mut bad_v_tx,
         )
         .expect("stage 2 replay of tampered proof");
+        let bad_s2_resolver = KeccakResolver::new(
+            &manifest,
+            &s2_spec,
+            &bad_s2_replay.point,
+            &bad_s2_claims,
+            None,
+        );
         assert!(matches!(
             check_terminal(&s2_spec, &manifest, &verifier_points, &bad_s2_replay, |id| {
-                resolve_keccak(
-                    &manifest,
-                    &s2_spec,
-                    &bad_s2_replay.point,
-                    &bad_s2_claims,
-                    None,
-                    id,
-                )
+                resolve_keccak(&bad_s2_resolver, id)
             }),
             Err(StageError::Terminal(2))
         ));

@@ -242,10 +242,12 @@ impl StageSpec {
     /// Every lane id of the stage, in group order, without repetition.
     #[must_use]
     pub fn lane_ids(&self) -> Vec<LaneId> {
+        // A hash set keeps this linear: Fp stages intern about a thousand lanes.
+        let mut seen = std::collections::HashSet::new();
         let mut out: Vec<LaneId> = Vec::new();
         for group in &self.groups {
             for &lane in &group.lanes {
-                if !out.contains(&lane) {
+                if seen.insert(lane) {
                     out.push(lane);
                 }
             }

@@ -40,7 +40,7 @@ use crate::stage::{
     check_terminal, prove_stage_split, replay_stage, suffix, EqPoint, GroupSpec, InstanceSpec, LaneId,
     Points, StageError, StageSpec, WeightId,
 };
-pub use crate::stage1::{keccak_claim_lanes, resolve_keccak, KeccakPublicInputs};
+pub use crate::stage1::{keccak_claim_lanes, resolve_keccak, KeccakPublicInputs, KeccakResolver};
 use crate::stage1::{is_keccak_lane, Stage1Output};
 use crate::tables::ProverTables;
 use crate::transcript::{terminal_site, Transcript, KAPPA1_SITE, PROJ_CLAIM_SITE};
@@ -363,14 +363,12 @@ fn prove_with(
 }
 
 /// The verifier's value of a stage-2 lane at the terminal.
-#[allow(clippy::too_many_arguments)]
 fn resolve(
     manifest: &CommitmentManifest,
-    spec: &StageSpec,
-    point: &[E],
     all: &[Digit],
     fips: &[Column],
     level1: &[E],
+    keccak: &KeccakResolver,
     claims: &Stage2Claims,
     id: LaneId,
 ) -> E {
@@ -385,9 +383,7 @@ fn resolve(
             claims.squares[k]
         }
         LaneId::Weight(WeightId::Level1(lane)) => level1[usize::from(lane)],
-        other if is_keccak_lane(other) => {
-            resolve_keccak(manifest, spec, point, &claims.keccak, None, other)
-        }
+        other if is_keccak_lane(other) => resolve_keccak(keccak, other),
         other => panic!("{other:?} is not a stage-2 lane"),
     }
 }
@@ -432,8 +428,9 @@ pub fn verify(
         }
         HashField::Fp => Vec::new(),
     };
+    let keccak = KeccakResolver::new(manifest, &spec, &replay.point, &proof.claims.keccak, None);
     check_terminal(&spec, manifest, points, &replay, |id| {
-        resolve(manifest, &spec, &replay.point, &all, &fips, &level1, &proof.claims, id)
+        resolve(manifest, &all, &fips, &level1, &keccak, &proof.claims, id)
     })?;
     Ok(Stage2Output {
         point: replay.point,

@@ -9,6 +9,8 @@
 //! instances and degree 4 (the range identity is cubic), ML-DSA-65 37 and ML-DSA-87 45, both
 //! of degree 3.
 
+use std::collections::HashMap;
+
 use agg_fpkeccak::KeccakLayout;
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::padding::Geometry;
@@ -17,7 +19,7 @@ use jolt_field::Zero;
 
 use crate::claims::{bit_columns, PreStageClaims, Stage1Claims};
 use crate::keccak_fp::specs::stage1_groups;
-use crate::keccak_fp::virtuals::{c_tilde_mle_at, mu_mle_at};
+use crate::keccak_fp::virtuals::{c_tilde_mle_at_lanes, mu_mle_at_lanes};
 use crate::kernel::Term;
 use crate::manifest::{Column, CommitmentManifest, GroupRole, HashField};
 use crate::stage::{
@@ -342,35 +344,85 @@ pub fn keccak_claim_lanes(spec: &StageSpec) -> Vec<LaneId> {
         .collect()
 }
 
-/// Resolve a Keccak lane at the stage terminal `point`: non-public Keccak lanes are read
-/// from `keccak_claims` (in [`keccak_claim_lanes`] order) and the public `KeccakMu` and
-/// `KeccakCTilde` lanes are evaluated at the Keccak suffix of `point`.
-#[must_use]
-pub fn resolve_keccak(
-    manifest: &CommitmentManifest,
-    spec: &StageSpec,
-    point: &[E],
-    keccak_claims: &[E],
-    public: Option<KeccakPublicInputs<'_>>,
-    id: LaneId,
-) -> E {
-    if is_keccak_claim_lane(id) {
-        let index = keccak_claim_lanes(spec)
-            .into_iter()
-            .position(|lane| lane == id)
-            .unwrap_or_else(|| panic!("Keccak lane {id:?} is not read by stage {}", spec.stage));
-        return keccak_claims[index];
-    }
-    let r_k = suffix(point, manifest.d_keccak());
-    let public = public.unwrap_or_else(|| panic!("KeccakPublicInputs required to resolve {id:?}"));
-    match id {
-        LaneId::KeccakMu(lane_idx) => mu_mle_at(public.mu, &r_k, usize::from(lane_idx)),
-        LaneId::KeccakCTilde(out_lane) => {
-            let layout = KeccakLayout::for_set(manifest.set());
-            c_tilde_mle_at(&layout, public.c_tilde, &r_k, usize::from(out_lane))
+/// Precomputed verifier table of the terminal evaluations of every Keccak lane read by a
+/// stage: non-public Keccak lanes are indexed from `keccak_claims` (in [`keccak_claim_lanes`]
+/// order) and every public `KeccakMu` and `KeccakCTilde` lane read by `spec` is evaluated
+/// once at the Keccak suffix of `point`.
+#[derive(Clone, Debug)]
+pub struct KeccakResolver {
+    stage: usize,
+    values: HashMap<LaneId, E>,
+}
+
+impl KeccakResolver {
+    /// Build the Keccak lane table for `spec` at the stage terminal `point`.
+    #[must_use]
+    pub fn new(
+        manifest: &CommitmentManifest,
+        spec: &StageSpec,
+        point: &[E],
+        keccak_claims: &[E],
+        public: Option<KeccakPublicInputs<'_>>,
+    ) -> Self {
+        let claim_lanes = keccak_claim_lanes(spec);
+        assert_eq!(
+            keccak_claims.len(),
+            claim_lanes.len(),
+            "stage {} expected {} Keccak lane claims, got {}",
+            spec.stage,
+            claim_lanes.len(),
+            keccak_claims.len()
+        );
+        let mut values = HashMap::with_capacity(claim_lanes.len() + 16);
+        for (id, &val) in claim_lanes.into_iter().zip(keccak_claims) {
+            values.insert(id, val);
         }
-        other => panic!("{other:?} is not a Keccak lane"),
+        let mut mu_lanes = Vec::new();
+        let mut c_tilde_lanes = Vec::new();
+        for id in spec.lane_ids() {
+            match id {
+                LaneId::KeccakMu(lane) => mu_lanes.push(lane),
+                LaneId::KeccakCTilde(lane) => c_tilde_lanes.push(lane),
+                _ => {}
+            }
+        }
+        if !mu_lanes.is_empty() || !c_tilde_lanes.is_empty() {
+            let public = public.unwrap_or_else(|| {
+                panic!("KeccakPublicInputs required for the public Keccak lanes of stage {}", spec.stage)
+            });
+            let r_k = suffix(point, manifest.d_keccak());
+            let as_index = |lanes: &[u8]| lanes.iter().map(|&l| usize::from(l)).collect::<Vec<_>>();
+            if !mu_lanes.is_empty() {
+                let vals = mu_mle_at_lanes(public.mu, &r_k, &as_index(&mu_lanes));
+                values.extend(mu_lanes.iter().map(|&l| LaneId::KeccakMu(l)).zip(vals));
+            }
+            if !c_tilde_lanes.is_empty() {
+                let layout = KeccakLayout::for_set(manifest.set());
+                let vals = c_tilde_mle_at_lanes(&layout, public.c_tilde, &r_k, &as_index(&c_tilde_lanes));
+                values.extend(c_tilde_lanes.iter().map(|&l| LaneId::KeccakCTilde(l)).zip(vals));
+            }
+        }
+        Self {
+            stage: spec.stage,
+            values,
+        }
     }
+
+    /// Look up the terminal evaluation of a Keccak lane `id`.
+    #[must_use]
+    pub fn resolve(&self, id: LaneId) -> E {
+        assert!(is_keccak_lane(id), "{id:?} is not a Keccak lane");
+        *self
+            .values
+            .get(&id)
+            .unwrap_or_else(|| panic!("Keccak lane {id:?} is not read by stage {}", self.stage))
+    }
+}
+
+/// Resolve a Keccak lane at the stage terminal from a precomputed [`KeccakResolver`].
+#[must_use]
+pub fn resolve_keccak(resolver: &KeccakResolver, id: LaneId) -> E {
+    resolver.resolve(id)
 }
 
 /// Prove stage 1. `points.tau` is set; `tables` holds `w_2, w_{3,t}` (under `Gf2`) or the
@@ -477,10 +529,8 @@ impl BridgeWeightsAt {
 /// The verifier's value of a stage-1 lane at the terminal.
 fn resolve(
     manifest: &CommitmentManifest,
-    spec: &StageSpec,
-    point: &[E],
     weights: Option<&BridgeWeightsAt>,
-    keccak_public: Option<KeccakPublicInputs<'_>>,
+    keccak: &KeccakResolver,
     claims: &Stage1Claims,
     id: LaneId,
 ) -> E {
@@ -492,9 +542,7 @@ fn resolve(
         }
         LaneId::Weight(WeightId::Level2) => weights.expect("Gf2 bridge weights").level2,
         LaneId::Weight(WeightId::Level3(t)) => weights.expect("Gf2 bridge weights").level3[usize::from(t)],
-        other if is_keccak_lane(other) => {
-            resolve_keccak(manifest, spec, point, &claims.keccak, keccak_public, other)
-        }
+        other if is_keccak_lane(other) => resolve_keccak(keccak, other),
         other => panic!("{other:?} is not a stage-1 lane"),
     }
 }
@@ -530,8 +578,9 @@ pub fn verify(
         }
         HashField::Fp => None,
     };
+    let keccak = KeccakResolver::new(manifest, &spec, &replay.point, &proof.claims.keccak, keccak_public);
     check_terminal(&spec, manifest, points, &replay, |id| {
-        resolve(manifest, &spec, &replay.point, weights.as_ref(), keccak_public, &proof.claims, id)
+        resolve(manifest, weights.as_ref(), &keccak, &proof.claims, id)
     })?;
     Ok(Stage1Output {
         point: replay.point,
@@ -651,6 +700,8 @@ mod tests {
         let sums = claimed_sums(&manifest, &dummy_pre, E::zero());
         assert_eq!(sums.len(), 726);
         assert!(sums.iter().all(|&c| c == E::zero()));
+
+        assert_eq!(keccak_claim_lanes(&spec).len(), Stage1Claims::keccak_len(&manifest));
 
         // Lane sets under Fp also validate and use degree 4 for the cubic Keccak terms.
         use agg_witness::params::Set;
