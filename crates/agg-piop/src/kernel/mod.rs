@@ -710,6 +710,9 @@ impl agg_simd::fused::RowSource for LevelRows<'_> {
 /// Cells `row0..row1` of one lane at level 2 as canonical coordinate planes `c0`, `c1`.
 #[inline]
 fn gather(reader: &Reader<'_>, row0: usize, row1: usize, c0: &mut [u64], c1: &mut [u64]) {
+    // A pair table holds level-1 values: at level 2 its generic arm would return them
+    // without the second fold.
+    debug_assert!(!matches!(reader, Reader::Pair { .. }), "level-2 lanes are folded twice");
     let mut put = |i: usize, x: E| {
         c0[i] = x.c0().to_canonical_u64();
         c1[i] = x.c1().to_canonical_u64();

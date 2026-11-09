@@ -271,11 +271,15 @@ fn every_path_matches_the_reference_on_an_equality_group_with_every_term_kind() 
 /// Quadratic equality groups run their dense rounds on the plane tail (with a vector
 /// backend), whose first table is built from the level-2 states of every kind (quartet and
 /// pair-fold tables, folded uncoded lanes) by one fused fold-and-evaluate pass. The domains
-/// cover one task and several parallel tasks of that pass.
+/// cover the smallest tails (at 4 variables the first table has a single pair and its bind
+/// is the last one; at 5 its round has two items), one task and several parallel tasks of
+/// that pass. A second equality point has zero coordinates at the variables of levels 2
+/// and 3: the linear factor then vanishes at one, so those rounds take `q(1)` from the
+/// evaluation instead of the running claim.
 #[test]
 fn plane_tail_groups_match_the_reference() {
     let mut rng = SplitMix64::new(15);
-    for vars in [6, 11, 16] {
+    for vars in [4, 5, 6, 11, 16] {
         let cells = eq_fixture(&mut rng, vars);
         let wide: Vec<E> = point(&mut rng, 1 << vars);
         let mut lanes = eq_lanes(&cells);
@@ -297,11 +301,31 @@ fn plane_tail_groups_match_the_reference() {
         ];
         for (rounds, degree) in [(vars, 3), (vars + 1, 4)] {
             let tau = point(&mut rng, vars);
-            let group = Group::new(lanes.clone(), instances.clone(), Some(&tau), rounds, degree).unwrap();
-            if layout() == Layout::Plane {
-                assert!(group.tail_terms.is_some(), "the tail is on");
+            let mut sparse = point(&mut rng, vars);
+            sparse[2] = E::zero();
+            sparse[3] = E::zero();
+            for tau in [tau, sparse] {
+                let group = Group::new(lanes.clone(), instances.clone(), Some(&tau), rounds, degree).unwrap();
+                if layout() == Layout::Plane {
+                    assert!(group.tail_terms.is_some(), "the tail is on");
+                }
+                check_all_paths(&lanes, &instances, Some(&tau), rounds, degree, 200 + vars as u64);
             }
-            check_all_paths(&lanes, &instances, Some(&tau), rounds, degree, 200 + vars as u64);
+        }
+        if vars == 16 {
+            // The pair-fold policy (one of the policies checked above) keeps the coded
+            // level-2 lanes as pair tables with the challenge: the gather's pair-fold arm
+            // runs on the parallel tasks of the level-2 and level-3 passes, beside uncoded
+            // tables in the same blocks.
+            let tau = point(&mut rng, vars);
+            let policy = Policy { quartet_lut: Choice::Forbid, ..AUTO };
+            let mut group = Group::with_policy(lanes.clone(), instances.clone(), Some(&tau), vars, 3, policy).unwrap();
+            for (round, r) in point(&mut rng, 2).into_iter().enumerate() {
+                group.round_message(round);
+                group.bind(round, r);
+            }
+            assert!(group.states.iter().any(|s| matches!(s, State::PairFold(..))));
+            assert!(group.states.iter().any(|s| matches!(s, State::Table(_))));
         }
     }
 }

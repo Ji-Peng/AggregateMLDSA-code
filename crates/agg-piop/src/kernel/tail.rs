@@ -257,8 +257,10 @@ impl Tail {
     pub fn message(&mut self, eq: &GruenSplitEq<E>, full: bool, constant: E) -> [E; 3] {
         let total = match self.cached.take() {
             Some((cached_full, total)) => {
-                debug_assert!(self.pending.is_none(), "cached sums belong to the current table");
-                debug_assert_eq!(cached_full, full, "cached sums of the same evaluation");
+                // Sums cached under another `full` would lack (or misplace) `q(1)` and give a
+                // wrong message, so both checks hold in release builds too (they are free).
+                assert!(self.pending.is_none(), "cached sums belong to the current table");
+                assert_eq!(cached_full, full, "cached sums of the same evaluation");
                 total
             }
             None => {
