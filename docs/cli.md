@@ -138,9 +138,9 @@ other field fails with `WireError::Flags`. Verifying an aggregate therefore need
 `--hash-field` it was made with.
 
 The byte gate of the `fp` mode is `artifact/expected/hashes-fp.json`, kept apart from
-`hashes.json` so that the default digests stay as they are. It pins the 1K ML-DSA-44 `fp`
-aggregates of the artifact records (no entry is pinned yet),
-which must be byte-identical under every `AGG_ISA` tier and with `RAYON_NUM_THREADS=1`. The
+`hashes.json` so that the default digests stay as they are. It pins the 1K `fp`
+aggregates of the artifact records (ML-DSA-44 under H-FIPS and H-exact, ML-DSA-65 and
+ML-DSA-87 under H-FIPS; `docs/allprime.md` Section 7), which must be byte-identical under every `AGG_ISA` tier and with `RAYON_NUM_THREADS=1`. The
 tier identity is checked at 1K against this file;
 `fp_single_thread_byte_identical` (Section 3) checks the single-thread identity at 100 records.
 

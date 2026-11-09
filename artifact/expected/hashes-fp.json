@@ -1,5 +1,35 @@
 {
-  "commit": "092a41786fe5f188f97e01704017a00f67bb3e30",
+  "commit": "da71f433d16c083c134493a723f2de4d0fd8b941",
   "records": "keygen-batch --params P --count 1024 --seed 42; sign-batch --params P --count 1024 --seed 43",
-  "aggregates": {}
+  "aggregates": {
+    "44": {
+      "1024": {
+        "h-fips": {
+          "bytes": 145354,
+          "sha256": "edb856ff4f48862ac5cb9d98ec42822514aaea8ac4472083993a69c99432b122"
+        },
+        "h-exact": {
+          "bytes": 145147,
+          "sha256": "102078a7b62e0e992a030bfd1d139ee187eb64fab52118d5183c7c2fabe96f82"
+        }
+      }
+    },
+    "65": {
+      "1024": {
+        "h-fips": {
+          "bytes": 167643,
+          "sha256": "3f8808e050333f4edd7b4997b92e3a263231a96154829ae22300f7607c1aa243"
+        }
+      }
+    },
+    "87": {
+      "1024": {
+        "h-fips": {
+          "bytes": 194834,
+          "sha256": "7be1376f638998f47706ea95950154c73968bae10b87c160b3c229185f0abb8e"
+        }
+      }
+    }
+  },
+  "note": "F_p hash field (--hash-field fp) aggregates, keyed by ML-DSA parameter set, batch size and relation. Every tier must reproduce these bytes."
 }

@@ -80,6 +80,13 @@ the pinned code; estimates are marked.
    lattice basis is core-SVP `2^121.8` (block size 417, measured; SelfTargetMSIS alone is
    at `2^123.5`).
 
+**The `F_p` hash field.** Under `--hash-field fp` (`HashField::Fp`) the Keccak chain is proved by
+zero-checks inside the PIOP, so the sites of `sd`, `fs_sigma`, the tied parts and Flock do not
+exist, and the stage batching vectors, the stage-1 degree (4) and, for ML-DSA-65 and ML-DSA-87,
+the stage round count (`d_stage = 10 + d_sig`) change. Its constraints, census, ledger delta
+against item 6 and the scope of the theorem of Section 7 are in `docs/allprime.md` Section 6;
+every site is ground to `2^-128` by the rule of Section 3.1.
+
 ## 1. Model and method
 
 **Oracles.** Classical random-oracle model as in Aerie Section 5.6 and Akita Section 10.1:
