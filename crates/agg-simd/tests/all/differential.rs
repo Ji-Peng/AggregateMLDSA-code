@@ -613,3 +613,153 @@ fn lane_ring_weights_match_the_four_row_table_and_each_other() {
   }
  }
 }
+
+/// The direct slot sums of a higher-degree summand: per item, every monomial at
+/// `X = 0..D-1` from the lane values `a + X d`, and the products of the differences of the
+/// monomials of degree `D`.
+fn high_reference(
+    tables: &[Vec<K>],
+    terms: &agg_simd::high::HighTerms,
+    weights: Option<&[K]>,
+    items: usize,
+    full: bool,
+) -> Vec<K> {
+    let degree = terms.degree();
+    let comps = degree + 1;
+    let mut out = vec![K::from_u64(0); terms.slots * comps];
+    for k in 0..items {
+        let w = weights.map_or(K::from_u64(1), |w| w[k]);
+        for c in 0..comps {
+            if c == 1 && !full {
+                continue;
+            }
+            for m in &terms.monomials {
+                if c == degree && m.degree() != degree {
+                    continue;
+                }
+                let value = m.factors.iter().fold(K::from_u64(1), |p, &(l, e)| {
+                    let (a, b) = (tables[l][2 * k], tables[l][2 * k + 1]);
+                    let x = if c == degree { b - a } else { a + K::from_u64(c as u64) * (b - a) };
+                    (0..e).fold(p, |p, _| p * x)
+                });
+                out[m.slot * comps + c] += w * value * m.coefficient.unwrap_or(K::from_u64(1));
+            }
+        }
+    }
+    out
+}
+
+/// The higher-degree evaluation shares lane powers between monomials, chains the products
+/// of three and four factors and weights each slot once per component. Cubic and quartic
+/// summands, with and without weights and the value at one, must give the direct sums at
+/// every item count (vector steps and the scalar tail), on values at the top of the field.
+#[test]
+fn high_degree_eval_matches_direct_sums() {
+    use agg_simd::{buf::KPlanes, high::{eval_items, HighTerms, Monomial}};
+    let mut seed = 20261109;
+    let worst = |s: &mut u64| {
+        if random(s) % 2 == 0 { K::new(F::from_u64(P - 1), F::from_u64(P - 1)) }
+        else { K::new(F::from_u64(random(s)), F::from_u64(random(s))) }
+    };
+    let mono = |factors: &[(usize, usize)], slot: usize| Monomial { factors: factors.to_vec(), coefficient: None, slot };
+    // An inner coefficient on a lane power and on a product.
+    let scaled = |factors: &[(usize, usize)], c: u64, slot: usize| Monomial { factors: factors.to_vec(), coefficient: Some(K::new(F::from_u64(c), F::from_u64(P - c))), slot };
+    // The cubic shape of the edge and range identities, and a quartic leaf beside them.
+    let cubic = HighTerms {
+        monomials: vec![
+            mono(&[(1, 2)], 0),
+            mono(&[(1, 3)], 1),
+            mono(&[(1, 1), (0, 1)], 1),
+            mono(&[(1, 2), (0, 1)], 0),
+            mono(&[(2, 1), (3, 1)], 2),
+            mono(&[(2, 1), (4, 1), (5, 1)], 2),
+            mono(&[(5, 1)], 3),
+            scaled(&[(0, 3)], 7, 4),
+            scaled(&[(0, 1), (3, 1)], 9, 4),
+            scaled(&[(2, 1), (3, 1), (4, 1)], 11, 3),
+        ],
+        slots: 5,
+    };
+    let quartic = HighTerms {
+        monomials: vec![
+            mono(&[(0, 1)], 0),
+            mono(&[(0, 2)], 1),
+            mono(&[(0, 4)], 2),
+            mono(&[(1, 1)], 3),
+            mono(&[(1, 3)], 4),
+            mono(&[(1, 4)], 2),
+            mono(&[(2, 1), (3, 1), (4, 1), (5, 1)], 4),
+            mono(&[(2, 2), (3, 1)], 0),
+            scaled(&[(5, 4)], 5, 1),
+            scaled(&[(5, 2)], 3, 1),
+        ],
+        slots: 5,
+    };
+    let width = 6;
+    for terms in [&cubic, &quartic] {
+        for items in [1_usize, 3, 4, 8, 9, 64, 1027] {
+            let rows = 2 * items;
+            let tables: Vec<Vec<K>> = (0..width).map(|_| (0..rows).map(|_| worst(&mut seed)).collect()).collect();
+            let planes: Vec<KPlanes> = tables.iter().map(|t| KPlanes::from_fn(rows, |i| t[i])).collect();
+            let lanes: Vec<(&[u64], &[u64])> = planes.iter().map(|p| p.planes()).collect();
+            let weights: Vec<K> = (0..items).map(|_| worst(&mut seed)).collect();
+            let wp = KPlanes::from_fn(items, |i| weights[i]);
+            for weighted in [false, true] {
+                for full in [false, true] {
+                    let mut got = vec![K::from_u64(0); terms.slots * terms.components()];
+                    eval_items(&lanes, terms, weighted.then(|| wp.planes()), 0, items, full, &mut got);
+                    let expected = high_reference(&tables, terms, weighted.then_some(&weights[..]), items, full);
+                    assert_eq!(got, expected, "degree={} items={items} weighted={weighted} full={full}", terms.degree());
+                }
+            }
+        }
+    }
+}
+
+/// A fused pass with a higher-degree summand: the fold writes the table and the split
+/// equality weights apply per item (short first tables) or per block (long ones), over
+/// several parallel tasks.
+#[test]
+fn fused_pass_with_high_degree_summand_matches_direct_sums() {
+    use agg_simd::{
+        buf::KPlanes,
+        fused::{fused_pass_with, EvalAny, Fill, Summand},
+        high::{HighTerms, Monomial},
+        pattern::Columns,
+    };
+    let mut seed = 20261110;
+    let rk = |s: &mut u64| K::new(F::from_u64(random(s)), F::from_u64(random(s)));
+    let terms = HighTerms {
+        monomials: vec![
+            Monomial { factors: vec![(0, 3)], coefficient: None, slot: 0 },
+            Monomial { factors: vec![(0, 2), (1, 1)], coefficient: Some(K::from_u64(5)), slot: 1 },
+            Monomial { factors: vec![(2, 1), (1, 1)], coefficient: None, slot: 0 },
+            Monomial { factors: vec![(2, 1)], coefficient: Some(K::from_u64(3)), slot: 1 },
+        ],
+        slots: 2,
+    };
+    let width = 3;
+    for &items in &[128_usize, 8192] {
+        let rows_in = 4 * items;
+        let tables: Vec<Vec<K>> = (0..width).map(|_| (0..rows_in).map(|_| rk(&mut seed)).collect()).collect();
+        let planes: Vec<KPlanes> = tables.iter().map(|t| KPlanes::from_fn(rows_in, |i| t[i])).collect();
+        let lanes: Vec<(&[u64], &[u64])> = planes.iter().map(|p| p.planes()).collect();
+        let r = rk(&mut seed);
+        let folded: Vec<Vec<K>> =
+            tables.iter().map(|t| (0..2 * items).map(|i| t[2 * i] + r * (t[2 * i + 1] - t[2 * i])).collect()).collect();
+        for &first_len in &[1_usize, 8, 64] {
+            let first: Vec<K> = (0..first_len).map(|_| rk(&mut seed)).collect();
+            let second: Vec<K> = (0..items / first_len).map(|_| rk(&mut seed)).collect();
+            let first_planes = KPlanes::from_fn(first_len, |i| first[i]);
+            for full in [false, true] {
+                let eval = EvalAny { summand: Summand::High(&terms), first: first_planes.planes(), second: &second, full };
+                let mut out = vec![0_u64; 2 * width * 2 * items];
+                let got =
+                    fused_pass_with(Some((&mut out[..], width, 2 * items)), &[], Some(Fill::<Columns>::Fold(r, &lanes)), Some(eval));
+                let weights: Vec<K> = (0..items).map(|k| first[k % first_len] * second[k / first_len]).collect();
+                let expected = high_reference(&folded, &terms, Some(&weights), items, full);
+                assert_eq!(got, expected, "items={items} first_len={first_len} full={full}");
+            }
+        }
+    }
+}
