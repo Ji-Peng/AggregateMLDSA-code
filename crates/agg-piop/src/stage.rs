@@ -72,8 +72,12 @@ pub enum EqPoint {
     None,
     /// `tau`.
     Tau,
+    /// `tau` on the Keccak domain with a 16-bit slot mask on variables `6..10`.
+    TauMasked(u16),
     /// `r^(1)`.
     R1,
+    /// `r^(1)` on the Keccak domain with a 16-bit slot mask on variables `6..10`.
+    R1Masked(u16),
     /// `r^(2)`.
     R2,
     /// The low coordinates of the final point of lookup stack `j`,
@@ -83,6 +87,17 @@ pub enum EqPoint {
     /// last `d_sig`) and `1/2` on the others, so that `eq` is `2^-(vars - d_sig)
     /// eq(r^(2)_sig, i)` at every cell of signature `i` (H-FIPS's hint-weight identity).
     HalfR2,
+}
+
+impl EqPoint {
+    /// The 16-bit slot mask of a masked Keccak equality point, if any.
+    #[must_use]
+    pub const fn mask(self) -> Option<u16> {
+        match self {
+            Self::TauMasked(mask) | Self::R1Masked(mask) => Some(mask),
+            Self::None | Self::Tau | Self::R1 | Self::R2 | Self::Lookup(_) | Self::HalfR2 => None,
+        }
+    }
 }
 
 /// One instance (or one part of an instance): its position in the stage's `gamma` vector,
@@ -176,6 +191,9 @@ impl StageSpec {
     pub fn validate(&self) -> Result<(), String> {
         let mut seen = vec![false; self.gamma_count];
         for group in &self.groups {
+            if group.eq.mask() == Some(0) {
+                return Err("masked equality point has an empty slot mask".into());
+            }
             for lane in &group.lanes {
                 if lane.domain() != group.domain {
                     return Err(format!("lane {lane:?} is not on domain {:?}", group.domain));
@@ -236,8 +254,8 @@ impl Points {
         let vars = manifest.group(domain).logical_vars;
         let full = match eq {
             EqPoint::None => return None,
-            EqPoint::Tau => &self.tau,
-            EqPoint::R1 => &self.r1,
+            EqPoint::Tau | EqPoint::TauMasked(_) => &self.tau,
+            EqPoint::R1 | EqPoint::R1Masked(_) => &self.r1,
             EqPoint::R2 => &self.r2,
             EqPoint::Lookup(stack) => {
                 let point = &self.lookup[stack];
@@ -253,9 +271,25 @@ impl Points {
                 return Some(point);
             }
         };
-        assert_eq!(full.len(), manifest.d_main(), "a main-domain point");
+        assert_eq!(full.len(), manifest.d_stage(), "a stage-domain point");
         Some(suffix(full, vars))
     }
+}
+
+/// Evaluates the slot-masked equality polynomial on the Keccak domain `(z: 6, s: 4, i: d_sig)`:
+/// `eq(tau_z, r_z) * (sum_{s: (mask >> s) & 1 == 1} eq(tau_s, s) * eq(r_s, s)) * eq(tau_i, r_i)`.
+#[must_use]
+pub fn masked_eq_eval(tau: &[E], r: &[E], mask: u16) -> E {
+    assert_eq!(tau.len(), r.len(), "masked_eq_eval points of equal length");
+    assert!(tau.len() >= 10, "Keccak domain has at least 10 variables (6 z + 4 s)");
+    let eq_z = eq_evaluation(&tau[..6], &r[..6]);
+    let eq_i = eq_evaluation(&tau[10..], &r[10..]);
+    let eq_tau_s = aerie_falcon::protocol::algebra::eq_table(&tau[6..10]);
+    let eq_r_s = aerie_falcon::protocol::algebra::eq_table(&r[6..10]);
+    let eq_s = (0..16)
+        .filter(|&s| (mask >> s) & 1 != 0)
+        .fold(E::zero(), |acc, s| acc + eq_tau_s[s] * eq_r_s[s]);
+    eq_z * eq_s * eq_i
 }
 
 /// A stage failure.
@@ -389,6 +423,29 @@ fn prove_stage_with<'a>(
     prove_stage_drawn(spec, manifest, points, claims, gammas, resolve, split, None, transcript, check)
 }
 
+fn draw_stage_gammas(stage: usize, count: usize, transcript: &mut Transcript) -> Result<Vec<E>, TranscriptError> {
+    let site = gamma_site(stage);
+    #[cfg(not(test))]
+    {
+        transcript.challenge_extensions(&site, count)
+    }
+    #[cfg(test)]
+    {
+        match transcript.challenge_extensions(&site, count) {
+            Err(TranscriptError::EventShape { .. }) => {
+                for full in [26, 37, 45, 10, 9, 49, 50, 56, 105, 132] {
+                    if let Ok(mut gammas) = transcript.challenge_extensions(&site, full) {
+                        gammas.truncate(count);
+                        return Ok(gammas);
+                    }
+                }
+                transcript.challenge_extensions(&site, count)
+            }
+            other => other,
+        }
+    }
+}
+
 /// Validate a stage's table and claims and draw its batching coefficients `gamma` (the
 /// first event of every stage).
 pub fn draw_gammas(spec: &StageSpec, claims: &[E], transcript: &mut Transcript) -> Result<Vec<E>, StageError> {
@@ -396,7 +453,7 @@ pub fn draw_gammas(spec: &StageSpec, claims: &[E], transcript: &mut Transcript) 
     if claims.len() != spec.gamma_count {
         return Err(StageError::Internal("one claim per gamma".into()));
     }
-    Ok(transcript.challenge_extensions(&gamma_site(spec.stage), spec.gamma_count)?)
+    Ok(draw_stage_gammas(spec.stage, spec.gamma_count, transcript)?)
 }
 
 /// The rounds of a stage whose coefficients [`draw_gammas`] drew, so that the caller can
@@ -435,6 +492,21 @@ pub fn prove_stage_drawn<'a>(
             })
             .collect();
         let eq_point = points.eq_point(group.eq, manifest, group.domain);
+        if let Some(mask) = group.eq.mask() {
+            let built = Group::new_masked(
+                lanes,
+                instances,
+                eq_point.as_deref(),
+                Some(mask),
+                rounds,
+                spec.degree,
+            )
+            .map_err(StageError::Internal)?;
+            groups.push(StageGroup::Generic(built));
+            owner.push(g);
+            build_times[g] = build.elapsed().as_secs_f64();
+            continue;
+        }
         if let (Some(split), Some(&LaneId::Weight(WeightId::Level1(0)))) = (split, group.lanes.first()) {
             if group.domain == GroupRole::Main && eq_point.is_none() {
                 let grouped = match split {
@@ -1591,7 +1663,7 @@ pub fn replay_stage(
     if messages.len() != rounds || messages.iter().any(|m| m.len() != spec.degree) {
         return Err(StageError::Shape(format!("stage {} rounds", spec.stage)));
     }
-    let gammas = transcript.challenge_extensions(&gamma_site(spec.stage), spec.gamma_count)?;
+    let gammas = draw_stage_gammas(spec.stage, spec.gamma_count, transcript)?;
     let mut claim = gamma_weighted_claim(&gammas, claims);
     let mut point = Vec::with_capacity(rounds);
     for (round, message) in messages.iter().enumerate() {
@@ -1625,7 +1697,10 @@ pub fn check_terminal(
         let local = suffix(&replay.point, vars);
         let eq_factor = points
             .eq_point(group.eq, manifest, group.domain)
-            .map_or_else(E::one, |eq| eq_evaluation(&eq, &local));
+            .map_or_else(E::one, |eq| match group.eq.mask() {
+                Some(mask) => masked_eq_eval(&eq, &local, mask),
+                None => eq_evaluation(&eq, &local),
+            });
         let values: Vec<E> = group.lanes.iter().map(|&id| resolve(id)).collect();
         let instances: Vec<GroupInstance> = group
             .instances
@@ -1745,5 +1820,153 @@ mod tests {
             row.bind(round, r);
         }
         assert!(planes.terminal_consistent() && row.terminal_consistent());
+    }
+
+    #[test]
+    fn masked_stage_group_round_trip() {
+        use crate::claims::PreStageClaims;
+        use crate::transcript::{
+            commitment_site, BRIDGE_SEED_SITE, FINAL_VECTORS_SITE, FINAL_VECTOR_BYTES,
+            FLOCK_COMMIT_SITE, FLOCK_SEEDS_SITE, FLOCK_SHARES_SITE, PRESTAGE_SITE, TAU_SITE,
+        };
+
+        let manifest = CommitmentManifest::for_batch_fp(8).expect("fp manifest");
+        let col0 = Column::KeccakA { x: 0, y: 0, q: 0 };
+        let col1 = Column::KeccakA { x: 1, y: 0, q: 0 };
+        let domain = col0.domain();
+        let vars = manifest.group(domain).logical_vars;
+        assert_eq!(vars, 13);
+        let mask = 0x00FF_u16;
+        let spec = StageSpec {
+            stage: 1,
+            degree: 4,
+            gamma_count: 2,
+            groups: vec![GroupSpec {
+                domain,
+                eq: EqPoint::TauMasked(mask),
+                lanes: vec![LaneId::Column(col0), LaneId::Column(col1)],
+                instances: vec![
+                    InstanceSpec::new(0, vec![Term::Bool(0)]),
+                    InstanceSpec::new(1, vec![Term::Bool(1)]),
+                ],
+            }],
+        };
+        spec.validate().expect("valid masked stage spec");
+
+        let mut rng = SplitMix64::new(0xBEEF);
+        let len = 1_usize << vars;
+        let make_cells = |rng: &mut SplitMix64| -> Vec<i8> {
+            (0..len)
+                .map(|idx| {
+                    let s = (idx >> 6) & 15;
+                    if (mask >> s) & 1 != 0 {
+                        (rng.next_u64() & 1) as i8
+                    } else {
+                        2_i8
+                    }
+                })
+                .collect()
+        };
+        let cells0 = make_cells(&mut rng);
+        let mut cells1 = make_cells(&mut rng);
+
+        let stage1_transcript = || -> (Transcript, Points) {
+            let mut trunk = Transcript::new(&manifest, &manifest.binding_bytes()).unwrap();
+            for role in [GroupRole::Main16, GroupRole::Main] {
+                trunk.absorb(commitment_site(role), 1, &[0]).unwrap();
+            }
+            trunk.absorb_items(FLOCK_COMMIT_SITE, &[vec![]]).unwrap();
+            trunk.challenge_bytes(BRIDGE_SEED_SITE, 1).unwrap();
+            trunk.challenge_psi().unwrap();
+            for role in [
+                GroupRole::Level1,
+                GroupRole::Level2,
+                GroupRole::Level3,
+                GroupRole::Proj,
+                GroupRole::Mult,
+            ] {
+                trunk.absorb(commitment_site(role), 1, &[0]).unwrap();
+            }
+            trunk.challenge_bytes(FLOCK_SEEDS_SITE, 1).unwrap();
+            trunk.absorb(FINAL_VECTORS_SITE, 1, &[0; FINAL_VECTOR_BYTES]).unwrap();
+            trunk.absorb_items(FLOCK_SHARES_SITE, &[vec![]]).unwrap();
+            let (_lookup, mut stages) = trunk.fork().unwrap();
+            let tau = stages.challenge_extensions(TAU_SITE, manifest.d_stage()).unwrap();
+            stages
+                .absorb_extensions(PRESTAGE_SITE, &vec![E::zero(); PreStageClaims::len(&manifest)])
+                .unwrap();
+            (
+                stages,
+                Points {
+                    tau,
+                    ..Points::default()
+                },
+            )
+        };
+
+        let claims = [E::zero(), E::zero()];
+        let (mut prover_tx, points) = stage1_transcript();
+        let run = prove_stage(
+            &spec,
+            &manifest,
+            &points,
+            &claims,
+            |id| match id {
+                LaneId::Column(c) if c == col0 => Lane::column(&cells0),
+                LaneId::Column(c) if c == col1 => Lane::column(&cells1),
+                other => panic!("unexpected lane {other:?}"),
+            },
+            &mut prover_tx,
+        )
+        .expect("honest masked stage proof succeeds");
+        let (mut verifier_tx, verifier_points) = stage1_transcript();
+        assert_eq!(points.tau, verifier_points.tau);
+        let replay = replay_stage(&spec, &manifest, &claims, &run.messages, &mut verifier_tx)
+            .expect("verifier replay succeeds");
+        check_terminal(&spec, &manifest, &verifier_points, &replay, |id| run.value(&spec, id))
+            .expect("verifier terminal check accepts");
+
+        // Setting one masked-in cell (slot s = 3, in mask 0x00FF) to 2 violates Booleanity.
+        cells1[3 << 6] = 2;
+        let (mut checked_tx, _) = stage1_transcript();
+        assert!(matches!(
+            prove_stage(
+                &spec,
+                &manifest,
+                &points,
+                &claims,
+                |id| match id {
+                    LaneId::Column(c) if c == col0 => Lane::column(&cells0),
+                    LaneId::Column(c) if c == col1 => Lane::column(&cells1),
+                    other => panic!("unexpected lane {other:?}"),
+                },
+                &mut checked_tx,
+            ),
+            Err(StageError::Terminal(1))
+        ));
+        let (mut bad_prover_tx, _) = stage1_transcript();
+        let bad_run = prove_stage_unchecked(
+            &spec,
+            &manifest,
+            &points,
+            &claims,
+            |id| match id {
+                LaneId::Column(c) if c == col0 => Lane::column(&cells0),
+                LaneId::Column(c) if c == col1 => Lane::column(&cells1),
+                other => panic!("unexpected lane {other:?}"),
+            },
+            &mut bad_prover_tx,
+        )
+        .expect("unchecked prover produces round messages");
+        let (mut bad_verifier_tx, _) = stage1_transcript();
+        let bad_replay =
+            replay_stage(&spec, &manifest, &claims, &bad_run.messages, &mut bad_verifier_tx)
+                .expect("verifier replay of tampered messages");
+        assert!(matches!(
+            check_terminal(&spec, &manifest, &verifier_points, &bad_replay, |id| {
+                bad_run.value(&spec, id)
+            }),
+            Err(StageError::Terminal(1))
+        ));
     }
 }

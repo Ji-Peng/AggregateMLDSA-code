@@ -873,3 +873,135 @@ fn integer_pair_group_rejects_out_of_range_lanes() {
     assert!(IntPairGroup::new([&big_m, &small], None, c, &eq_point).is_none());
     assert!(IntPairGroup::new([&small, &small], Some([&small, &small]), c, &eq_point).is_some());
 }
+
+fn reference_round(
+    lanes: &[Lane<'_>],
+    eq_lane: Option<&Lane<'_>>,
+    instances: &[GroupInstance],
+    degree: usize,
+    inactive: usize,
+) -> Vec<E> {
+    let half = lanes[0].len() / 2;
+    let lift = inverse_power_of_two(inactive);
+    let evals: Vec<E> = (0..=degree as u64)
+        .map(|x| {
+            let xf = E::from_u64(x);
+            let mut sum = E::zero();
+            for k in 0..half {
+                let values: Vec<E> = lanes
+                    .iter()
+                    .map(|l| l.value(2 * k) + xf * (l.value(2 * k + 1) - l.value(2 * k)))
+                    .collect();
+                let w = eq_lane.map_or(E::one(), |eq| {
+                    eq.value(2 * k) + xf * (eq.value(2 * k + 1) - eq.value(2 * k))
+                });
+                sum += w * summand(instances, &values);
+            }
+            sum * lift
+        })
+        .collect();
+    UnivariatePoly::from_evals(&evals).into_coefficients()
+}
+
+#[test]
+fn masked_group_matches_explicit_masked_eq_table() {
+    use aerie_falcon::protocol::algebra::{eq_evaluation, eq_table};
+    let mut rng = SplitMix64::new(0x4A54);
+    let vars = 13; // 6 z + 4 s + 3 i
+    let cells = eq_fixture(&mut rng, vars);
+    let lanes = eq_lanes(&cells);
+    let instances = eq_instances(&mut rng);
+    let tau = point(&mut rng, vars);
+    let full_eq = eq_table(&tau);
+
+    assert!(
+        Group::new_masked(lanes.clone(), instances.clone(), Some(&tau), Some(0), vars, 5).is_err(),
+        "empty slot mask must be rejected"
+    );
+    assert!(
+        Group::new_masked(lanes.clone(), instances.clone(), None, Some(0x00FF), vars, 5).is_err(),
+        "slot mask without an equality point must be rejected"
+    );
+
+    for mask in [0xFFFF_u16, 0x00FF, 0xFEFF, 0xFFFE, 0x0100, 0x0001, 0x0080, 0x5A3C] {
+        let mut masked_eq_table = full_eq.clone();
+        for idx in 0..(1_usize << vars) {
+            let s = (idx >> 6) & 15;
+            if (mask >> s) & 1 == 0 {
+                masked_eq_table[idx] = E::zero();
+            }
+        }
+        let mut group = Group::new_masked(
+            lanes.clone(),
+            instances.clone(),
+            Some(&tau),
+            Some(mask),
+            vars,
+            5,
+        )
+        .expect("masked group");
+        assert_eq!(
+            matches!(group.eq, Some(GroupEq::Unmasked(_))),
+            mask == 0xFFFF,
+            "mask 0xFFFF falls back to the unmasked factor"
+        );
+
+        let mut ref_lanes: Vec<Lane<'_>> = lanes.clone();
+        let mut eq_lane = Lane::Source(Source::Field(&masked_eq_table));
+        let mut challenges = Vec::new();
+        let mut expected_messages = Vec::new();
+        for round in 0..vars {
+            let want = compress(&reference_round(&ref_lanes, Some(&eq_lane), &instances, 5, 0), 5);
+            let got = group.round_message(round);
+            assert_eq!(got, want, "mask {mask:#06x} round {round}");
+            let r = field(&mut rng);
+            group.bind(round, r);
+            for lane in &mut ref_lanes {
+                lane.fold(r);
+            }
+            eq_lane.fold(r);
+            challenges.push(r);
+            expected_messages.push(want);
+        }
+        let term_vals = group.terminal_values();
+        let eq_z = eq_evaluation(&tau[..6], &challenges[..6]);
+        let eq_i = eq_evaluation(&tau[10..], &challenges[10..]);
+        let eq_tau_s = eq_table(&tau[6..10]);
+        let eq_r_s = eq_table(&challenges[6..10]);
+        let eq_s = (0..16)
+            .filter(|&s| (mask >> s) & 1 != 0)
+            .fold(E::zero(), |acc, s| acc + eq_tau_s[s] * eq_r_s[s]);
+        let eq_factor = eq_z * eq_s * eq_i;
+        assert_eq!(eq_factor, eq_lane.terminal(), "mask {mask:#06x} eq_factor");
+        assert_eq!(
+            group.claim(),
+            expected_terminal(&instances, &term_vals, eq_factor, 0),
+            "mask {mask:#06x} terminal"
+        );
+        if mask == 0x5A3C {
+            for (name, policy) in policies() {
+                let mut g = Group::with_policy_masked(
+                    lanes.clone(),
+                    instances.clone(),
+                    Some(&tau),
+                    Some(mask),
+                    vars,
+                    5,
+                    policy,
+                )
+                .expect("masked group with policy");
+                for (round, &r) in challenges.iter().enumerate() {
+                    assert_eq!(
+                        g.round_message(round),
+                        expected_messages[round],
+                        "policy {name} round {round}"
+                    );
+                    g.bind(round, r);
+                }
+                assert_eq!(g.terminal_values(), term_vals, "policy {name} terminals");
+                assert_eq!(g.claim(), group.claim(), "policy {name} claim");
+            }
+        }
+    }
+}
+

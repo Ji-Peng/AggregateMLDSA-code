@@ -1183,6 +1183,15 @@ impl CommitmentManifest {
         agg_pcs_config::catalogs::D_POS + self.d_sig
     }
 
+    /// Rounds of each sum-check stage: `d_main` under `Gf2`, `max(d_main, d_K)` under `Fp`.
+    #[must_use]
+    pub fn d_stage(&self) -> usize {
+        match self.hash_field {
+            HashField::Gf2 => self.d_main(),
+            HashField::Fp => self.d_main().max(self.d_keccak()),
+        }
+    }
+
     /// Number of `2^13`-signature segments `S`.
     #[must_use]
     pub const fn segments(&self) -> usize {

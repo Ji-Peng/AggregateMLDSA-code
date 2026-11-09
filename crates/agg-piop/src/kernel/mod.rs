@@ -46,6 +46,8 @@ mod tail;
 #[cfg(test)]
 mod tests;
 
+use aerie_falcon::protocol::algebra::eq_table;
+use akita_algebra::eq_poly::EqPolynomial;
 use akita_algebra::split_eq::GruenSplitEq;
 use jolt_field::{Field, Fold, One, Ring, Unreduced, Zero};
 use jolt_poly::UnivariatePoly;
@@ -688,9 +690,242 @@ struct Taylor {
     lines: Vec<TaylorLine>,
 }
 
+/// Split equality polynomial on the Keccak domain `(z: 6, s: 4, i: d_sig)` with a 16-bit
+/// slot mask `mask` (`w(z, s, i) = eq(tau_z, z) * (1_M(s) eq(tau_s, s)) * eq(tau_i, i)`).
+struct MaskedSplitEq {
+    tau: Vec<E>,
+    current_round: usize,
+    current_scalar: E,
+    /// `E_first_z[5 - k]` (`k in 0..6`) holds the `(9 - k)`-variable table
+    /// `(z_{k+1..6}, s) -> eq(tau_z[k+1..6], z_rem) * 1_M(s) * eq(tau_s, s)`.
+    first_z: [Vec<E>; 6],
+    /// The slot table `g(s) = 1_M(s) eq(tau_s, s)` (16 entries before round 6, halved per
+    /// slot round `6..10`).
+    slot_table: Vec<E>,
+    /// `sum_{s = 0..16} 1_M(s) eq(tau_s, s)`.
+    slot_sum: E,
+    /// `eq(tau_i, .)` on the `d_sig` record variables (`2^d_sig` entries).
+    record_eq: Vec<E>,
+    /// Standard split equality state for the trailing `d_sig` record rounds (`10..local_vars`).
+    tail_eq: GruenSplitEq<E>,
+}
+
+impl MaskedSplitEq {
+    fn new(tau: &[E], mask: u16) -> Result<Self, String> {
+        if mask == 0 {
+            return Err("masked equality point requires a nonzero slot mask".into());
+        }
+        if tau.len() <= 10 {
+            return Err("masked equality point needs at least 11 variables (6 z + 4 s + d_sig)".into());
+        }
+        let tau_z = &tau[..6];
+        let tau_s = &tau[6..10];
+        let tau_i = &tau[10..];
+        let eq_s = eq_table(tau_s);
+        let slot_table: Vec<E> = (0..16)
+            .map(|s| if (mask >> s) & 1 != 0 { eq_s[s] } else { E::zero() })
+            .collect();
+        let slot_sum = slot_table.iter().copied().fold(E::zero(), |a, b| a + b);
+        let z_suffixes = EqPolynomial::evals_cached(&tau_z[1..]).map_err(|e| e.to_string())?;
+        // z_suffixes[rem] has 2^rem entries for the last `rem` variables of `tau_z` (`rem in 0..=5`).
+        let first_z: [Vec<E>; 6] = std::array::from_fn(|rem| {
+            let z_tab = &z_suffixes[rem];
+            let z_len = z_tab.len();
+            let mut table = Vec::with_capacity(z_len * 16);
+            for &gs in &slot_table {
+                for &ez in z_tab {
+                    table.push(ez * gs);
+                }
+            }
+            table
+        });
+        let record_eq = eq_table(tau_i);
+        let tail_eq = GruenSplitEq::new(tau_i).map_err(|e| e.to_string())?;
+        Ok(Self {
+            tau: tau.to_vec(),
+            current_round: 0,
+            current_scalar: E::one(),
+            first_z,
+            slot_table,
+            slot_sum,
+            record_eq,
+            tail_eq,
+        })
+    }
+
+    fn is_slot_round(&self) -> bool {
+        (6..10).contains(&self.current_round)
+    }
+
+    fn current_tau(&self) -> E {
+        if self.current_round < 10 {
+            self.tau[self.current_round]
+        } else {
+            self.tail_eq.current_tau()
+        }
+    }
+
+    fn current_scalar(&self) -> E {
+        if self.current_round < 10 {
+            self.current_scalar
+        } else {
+            self.tail_eq.current_scalar()
+        }
+    }
+
+    fn linear_factor_evals(&self) -> (E, E) {
+        if self.current_round < 6 {
+            let l1 = self.current_scalar * self.tau[self.current_round];
+            (self.current_scalar - l1, l1)
+        } else if self.current_round >= 10 {
+            self.tail_eq.linear_factor_evals()
+        } else {
+            unreachable!("slot rounds have per-slot linear factors")
+        }
+    }
+
+    fn gruen_mul(&self, q_poly: &UnivariatePoly<E>) -> UnivariatePoly<E> {
+        if self.current_round >= 10 {
+            return self.tail_eq.gruen_mul(q_poly);
+        }
+        debug_assert!(self.current_round < 6);
+        let (at_zero, at_one) = self.linear_factor_evals();
+        let slope = at_one - at_zero;
+        let q = q_poly.coefficients();
+        let mut coeffs = vec![E::zero(); q.len() + 1];
+        for (i, &c) in q.iter().enumerate() {
+            coeffs[i] += c * at_zero;
+            coeffs[i + 1] += c * slope;
+        }
+        UnivariatePoly::new(coeffs)
+    }
+
+    fn remaining_eq_tables(&self) -> (&[E], &[E]) {
+        if self.current_round < 6 {
+            (&self.first_z[5 - self.current_round], &self.record_eq)
+        } else if self.current_round >= 10 {
+            self.tail_eq.remaining_eq_tables()
+        } else {
+            (&[], &[])
+        }
+    }
+
+    fn remaining_eq_tables_after(&self, binds: usize) -> Option<(&[E], &[E])> {
+        let target = self.current_round + binds;
+        if target < 6 {
+            Some((&self.first_z[5 - target], &self.record_eq))
+        } else if self.current_round >= 10 {
+            self.tail_eq.remaining_eq_tables_after(binds)
+        } else {
+            None
+        }
+    }
+
+    fn remaining_weight_sum(&self) -> E {
+        if self.current_round < 6 {
+            self.slot_sum
+        } else {
+            E::one()
+        }
+    }
+
+    fn bind(&mut self, r: E) {
+        if self.current_round < 6 {
+            let tau_k = self.tau[self.current_round];
+            self.current_scalar *= tau_k * r + (E::one() - tau_k) * (E::one() - r);
+            self.current_round += 1;
+        } else if self.current_round < 10 {
+            let next_len = self.slot_table.len() / 2;
+            let mut next = Vec::with_capacity(next_len);
+            for pair in self.slot_table.chunks_exact(2) {
+                next.push(pair[0] + r * (pair[1] - pair[0]));
+            }
+            self.slot_table = next;
+            self.current_round += 1;
+            if self.current_round == 10 {
+                debug_assert_eq!(self.slot_table.len(), 1);
+                let total_scalar = self.current_scalar * self.slot_table[0];
+                self.tail_eq = GruenSplitEq::with_initial_scalar(&self.tau[10..], total_scalar)
+                    .expect("non-empty record coordinates");
+            }
+        } else {
+            self.tail_eq.bind(r);
+            self.current_round += 1;
+        }
+    }
+}
+
+/// Equality factor of a [`Group`]: unmasked [`GruenSplitEq`] or slot-masked [`MaskedSplitEq`].
+enum GroupEq {
+    Unmasked(GruenSplitEq<E>),
+    Masked(MaskedSplitEq),
+}
+
+impl GroupEq {
+    fn is_masked_slot_round(&self) -> bool {
+        matches!(self, Self::Masked(m) if m.is_slot_round())
+    }
+
+    fn current_tau(&self) -> E {
+        match self {
+            Self::Unmasked(eq) => eq.current_tau(),
+            Self::Masked(eq) => eq.current_tau(),
+        }
+    }
+
+    fn linear_factor_evals(&self) -> (E, E) {
+        match self {
+            Self::Unmasked(eq) => eq.linear_factor_evals(),
+            Self::Masked(eq) => eq.linear_factor_evals(),
+        }
+    }
+
+    fn gruen_mul(&self, q_poly: &UnivariatePoly<E>) -> UnivariatePoly<E> {
+        match self {
+            Self::Unmasked(eq) => eq.gruen_mul(q_poly),
+            Self::Masked(eq) => eq.gruen_mul(q_poly),
+        }
+    }
+
+    fn remaining_eq_tables(&self) -> (&[E], &[E]) {
+        match self {
+            Self::Unmasked(eq) => eq.remaining_eq_tables(),
+            Self::Masked(eq) => eq.remaining_eq_tables(),
+        }
+    }
+
+    fn remaining_eq_tables_after(&self, binds: usize) -> Option<(&[E], &[E])> {
+        match self {
+            Self::Unmasked(eq) => eq.remaining_eq_tables_after(binds),
+            Self::Masked(eq) => eq.remaining_eq_tables_after(binds),
+        }
+    }
+
+    fn remaining_weight_sum(&self) -> E {
+        match self {
+            Self::Unmasked(_) => E::one(),
+            Self::Masked(eq) => eq.remaining_weight_sum(),
+        }
+    }
+
+    fn bind(&mut self, r: E) {
+        match self {
+            Self::Unmasked(eq) => eq.bind(r),
+            Self::Masked(eq) => eq.bind(r),
+        }
+    }
+
+    fn unmasked(&self) -> Option<&GruenSplitEq<E>> {
+        match self {
+            Self::Unmasked(eq) => Some(eq),
+            Self::Masked(_) => None,
+        }
+    }
+}
+
 /// The lanes of one local domain and the instances batched on them.
 pub struct Group<'a> {
-    eq: Option<GruenSplitEq<E>>,
+    eq: Option<GroupEq>,
     /// The local equality point (empty without an equality factor).
     tau: Vec<E>,
     sources: Vec<Lane<'a>>,
@@ -770,10 +1005,35 @@ impl<'a> Group<'a> {
         Self::with_policy(lanes, instances, eq_point, rounds, degree, AUTO)
     }
 
+    /// [`Group::new`] with a 16-bit slot mask `mask` on variables `6..10` of a Keccak-domain
+    /// equality point `eq_point`.
+    pub fn new_masked(
+        lanes: Vec<Lane<'a>>,
+        instances: Vec<GroupInstance>,
+        eq_point: Option<&[E]>,
+        mask: Option<u16>,
+        rounds: usize,
+        degree: usize,
+    ) -> Result<Self, String> {
+        Self::with_policy_masked(lanes, instances, eq_point, mask, rounds, degree, AUTO)
+    }
+
     fn with_policy(
         lanes: Vec<Lane<'a>>,
         instances: Vec<GroupInstance>,
         eq_point: Option<&[E]>,
+        rounds: usize,
+        degree: usize,
+        policy: Policy,
+    ) -> Result<Self, String> {
+        Self::with_policy_masked(lanes, instances, eq_point, None, rounds, degree, policy)
+    }
+
+    fn with_policy_masked(
+        lanes: Vec<Lane<'a>>,
+        instances: Vec<GroupInstance>,
+        eq_point: Option<&[E]>,
+        mask: Option<u16>,
         rounds: usize,
         degree: usize,
         policy: Policy,
@@ -807,14 +1067,21 @@ impl<'a> Group<'a> {
         if degree + 1 - inner > field::MAX_COEFFICIENTS {
             return Err(format!("degree {degree} exceeds the kernel's maximum"));
         }
-        let eq = match eq_point {
-            Some(point) => {
+        let eq = match (eq_point, mask) {
+            (Some(point), Some(m)) if m != 0xFFFF => {
                 if point.len() != local_vars {
                     return Err("equality point of the wrong length".into());
                 }
-                Some(GruenSplitEq::new(point).map_err(|e| e.to_string())?)
+                Some(GroupEq::Masked(MaskedSplitEq::new(point, m)?))
             }
-            None => None,
+            (Some(point), _) => {
+                if point.len() != local_vars {
+                    return Err("equality point of the wrong length".into());
+                }
+                Some(GroupEq::Unmasked(GruenSplitEq::new(point).map_err(|e| e.to_string())?))
+            }
+            (None, Some(_)) => return Err("slot mask without an equality point".into()),
+            (None, None) => None,
         };
         let is_field: Vec<bool> = lanes.iter().map(Lane::is_field).collect();
         let plan = Plan::compile(lanes.len(), &instances, &is_field);
@@ -985,10 +1252,10 @@ impl<'a> Group<'a> {
             ..direct_source.clone()
         };
         let lane_count = lanes.len();
-        // The tail on planes needs an equality factor (so a cell's constant enters once),
-        // a degree at least three, and lanes without a shift.
+        // The tail on planes needs an unmasked equality factor (so a cell's constant enters
+        // once), a degree at least three, and lanes without a shift.
         let tail_terms = (layout() == Layout::Plane
-            && eq.is_some()
+            && matches!(eq, Some(GroupEq::Unmasked(_)))
             && degree >= 3
             && local_vars >= 4
             && plan.shifts.iter().all(Zero::is_zero))
@@ -1115,6 +1382,17 @@ impl<'a> Group<'a> {
             self.pending = message.clone();
             return message;
         }
+        if self.eq.as_ref().is_some_and(GroupEq::is_masked_slot_round) {
+            let full = self.masked_slot_round();
+            let at_zero_plus_one = full.iter().fold(E::zero(), |s, &c| s + c) + full[0];
+            if round == 0 {
+                self.claim = at_zero_plus_one;
+            }
+            debug_assert_eq!(at_zero_plus_one, self.claim, "g(0) + g(1) = claim");
+            let message = compress(&full, self.degree);
+            self.pending = message.clone();
+            return message;
+        }
         // After the first active round the claim is this group's exact sum, so the
         // constant coefficient of `q` follows from the others (exact field arithmetic: the
         // same polynomial as a direct evaluation).
@@ -1161,11 +1439,93 @@ impl<'a> Group<'a> {
         message
     }
 
+    /// Evaluates the full round polynomial of a masked slot round (`level in 6..10`):
+    /// accumulates `eq(tau_i, i) * P_{s_rem, i}(X)` per remaining slot prefix `s_rem` and
+    /// multiplies each by its linear slot factor `g[2 * s_rem] + (g[2 * s_rem + 1] - g[2 * s_rem]) X`.
+    fn masked_slot_round(&self) -> Vec<E> {
+        let Some(GroupEq::Masked(m)) = &self.eq else {
+            unreachable!("masked slot round requires MaskedSplitEq");
+        };
+        let u = m.current_round - 6;
+        let s_pairs = 1_usize << (3 - u);
+        let eq_i = &m.record_eq;
+        let records = eq_i.len();
+        let width = self.coefficient_count();
+        let lanes = self.sources.len();
+        let (stride, dense) = (self.dense_stride, &self.dense);
+        let pieces = &self.plan.dense;
+        let eval_record_range = |range: std::ops::Range<usize>| -> Vec<Vec<Acc>> {
+            let mut scratch = Scratch::new(lanes);
+            let mut coeffs = vec![Acc::zero(); width];
+            let mut buckets = vec![vec![Acc::zero(); width]; s_pairs];
+            for i in range {
+                let w_i = eq_i[i];
+                if w_i.is_zero() {
+                    continue;
+                }
+                let base_k = i * s_pairs;
+                for (s_rem, bucket) in buckets.iter_mut().enumerate() {
+                    let k = base_k + s_rem;
+                    for l in 0..lanes {
+                        let x = dense[l * stride + 2 * k];
+                        scratch.a[l] = x;
+                        scratch.d[l] = dense[l * stride + 2 * k + 1] - x;
+                    }
+                    coeffs.fill(Acc::zero());
+                    pieces.add_at(&scratch.a, &scratch.d, &mut coeffs);
+                    for (slot, &c) in bucket.iter_mut().zip(&coeffs) {
+                        *slot += w_i.mul_unreduced(E::reduce_product(c));
+                    }
+                }
+            }
+            buckets
+        };
+        let buckets = if records * s_pairs >= MIN_PARALLEL_ITEMS && records > 1 {
+            let chunk = (field::ITEM_CHUNK / s_pairs).max(1);
+            (0..records.div_ceil(chunk))
+                .into_par_iter()
+                .map(|c| eval_record_range(c * chunk..((c + 1) * chunk).min(records)))
+                .reduce(
+                    || vec![vec![Acc::zero(); width]; s_pairs],
+                    |mut a, b| {
+                        for (ba, bb) in a.iter_mut().zip(b) {
+                            for (sa, sb) in ba.iter_mut().zip(bb) {
+                                *sa += sb;
+                            }
+                        }
+                        a
+                    },
+                )
+        } else {
+            eval_record_range(0..records)
+        };
+        let mut full = vec![E::zero(); width + 1];
+        for (s_rem, bucket) in buckets.into_iter().enumerate() {
+            let g0 = m.slot_table[2 * s_rem];
+            let g1 = m.slot_table[2 * s_rem + 1];
+            if g0.is_zero() && g1.is_zero() {
+                continue;
+            }
+            let slope = g1 - g0;
+            let mut q: Vec<E> = bucket.into_iter().map(E::reduce_product).collect();
+            q[0] += self.plan.constant;
+            for (idx, &c) in q.iter().enumerate() {
+                full[idx] += c * g0;
+                full[idx + 1] += c * slope;
+            }
+        }
+        let scale = m.current_scalar() * self.scale;
+        for c in &mut full {
+            *c *= scale;
+        }
+        full
+    }
+
     /// A round over the dense planes: the coefficients of the inner polynomial `q`, the
     /// linear one from the evaluation at one, or from the running claim when the equality
     /// factor allows it.
     fn plane_round(&mut self) -> Vec<E> {
-        let eq = self.eq.as_ref().expect("plane groups have an equality factor");
+        let eq = self.eq.as_ref().and_then(GroupEq::unmasked).expect("plane groups have an unmasked equality factor");
         let tail = self.tail.as_mut().expect("the plane table");
         let full = !eq.can_recover_linear_q_term_from_claim();
         let [q0, at_one, q2] = tail.message(eq, full, self.plan.constant);
@@ -1188,8 +1548,8 @@ impl<'a> Group<'a> {
             return E::zero();
         }
         match &self.eq {
-            // The remaining equality weights sum to one.
-            Some(_) => self.plan.constant,
+            // The remaining equality weights sum to one (or `slot_sum` in masked z rounds).
+            Some(eq) => self.plan.constant * eq.remaining_weight_sum(),
             None => self.plan.constant * E::from_u64(self.pairs() as u64),
         }
     }
@@ -1945,7 +2305,7 @@ impl<'a> Group<'a> {
         debug_assert!(rows >= 2 && rows.is_power_of_two());
         let next_rows = rows / 2;
         let context = E::precompute(challenge);
-        let evaluate = next_rows >= 2;
+        let evaluate = next_rows >= 2 && self.eq.as_ref().is_none_or(|eq| !eq.is_masked_slot_round());
         let upper = evaluate && self.recovery().is_some();
         let mut next = match &self.arena {
             Some(arena) => lock_arena(arena).take(next_rows * lanes),
