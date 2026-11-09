@@ -45,8 +45,13 @@ pub const D_SEG_MAX: usize = 13;
 pub const TABLE_VARS: usize = 16;
 /// Balanced base-16 digits of one multiplicity (`m < 7 (16^7 - 1) / 15`).
 pub const MULTIPLICITY_DIGITS: usize = 7;
-/// Groups of one batch.
+/// Groups of one batch under `HashField::Gf2`.
 pub const GROUP_COUNT: usize = 7;
+/// Groups of one batch under `HashField::Fp` (`G_main16`, `G_main4`, the seven Keccak
+/// groups `KeccakA(0..4)`, `KeccakC`, `KeccakCPrime`, `G_k`, `G_m`).
+pub const GROUP_COUNT_FP: usize = 11;
+/// Number of Keccak commitment groups under `HashField::Fp`.
+pub const KECCAK_GROUP_COUNT: usize = 7;
 /// Rows of the `{0,1}` projection of `v`, log2: `128 = 2^7`.
 pub const PROJ_ROW_VARS: usize = 7;
 
@@ -59,6 +64,10 @@ pub const CATALOG_D_SIG_H_EXACT: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1
 
 /// Batch sizes (`d_sig`) whose relation-H-FIPS rows are generated and checked in.
 pub const CATALOG_D_SIG_H_FIPS: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+
+/// Batch sizes (`d_sig`) whose `HashField::Fp` catalog rows are generated and checked in
+/// for every parameter set and relation.
+pub const CATALOG_D_SIG_FP: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10];
 
 /// Relation byte of H-u: the proof header's flags byte and byte 3 of the instance-record bytes.
 pub const RELATION_HU: u8 = 0;
@@ -145,7 +154,7 @@ impl Relation {
         matches!((set, self), (Set::S44 | Set::S65 | Set::S87, _))
     }
 
-    /// The batch sizes whose rows of this relation are checked in.
+    /// The batch sizes whose rows of this relation are checked in under `HashField::Gf2`.
     #[must_use]
     pub const fn catalog_d_sigs(self) -> &'static [usize] {
         match self {
@@ -157,6 +166,75 @@ impl Relation {
 }
 
 impl std::fmt::Display for Relation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// The field in which the commitment-hash relation `c~ = SHAKE256(mu || w1Encode(w1'))`
+/// is proven.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum HashField {
+    /// Mixed-field baseline: Flock over `GF(2)` tied to the `F_p` side by the parity bridge.
+    #[default]
+    Gf2,
+    /// All-prime-field comparator: Keccak-f[1600] round states committed and zero-checked
+    /// directly in `F_p`.
+    Fp,
+}
+
+impl HashField {
+    /// Both hash fields, in default-first order.
+    pub const ALL: [Self; 2] = [Self::Gf2, Self::Fp];
+
+    /// Display name (`GF(2)`, `F_p`).
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Gf2 => "GF(2)",
+            Self::Fp => "F_p",
+        }
+    }
+
+    /// Command-line spelling (`gf2`, `fp`); [`HashField::parse`] inverts it.
+    #[must_use]
+    pub const fn flag(self) -> &'static str {
+        match self {
+            Self::Gf2 => "gf2",
+            Self::Fp => "fp",
+        }
+    }
+
+    /// Parse a command-line spelling (`gf2`, `fp`).
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "gf2" | "gf(2)" => Some(Self::Gf2),
+            "fp" | "f_p" => Some(Self::Fp),
+            _ => None,
+        }
+    }
+
+    /// Number of committed groups in a batch under this hash field.
+    #[must_use]
+    pub const fn group_count(self) -> usize {
+        match self {
+            Self::Gf2 => GROUP_COUNT,
+            Self::Fp => GROUP_COUNT_FP,
+        }
+    }
+
+    /// The committed groups of a batch in wire order.
+    #[must_use]
+    pub const fn groups(self) -> &'static [Group] {
+        match self {
+            Self::Gf2 => &Group::ALL,
+            Self::Fp => &Group::ALL_FP,
+        }
+    }
+}
+
+impl std::fmt::Display for HashField {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.name())
     }
@@ -203,7 +281,8 @@ impl Family {
     }
 }
 
-/// The seven committed groups, in wire order.
+/// Committed witness groups across `HashField::Gf2` (seven groups, [`Group::ALL`]) and
+/// `HashField::Fp` (eleven groups, [`Group::ALL_FP`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Group {
     /// `Z_lo, U_lo, V_lo, V_hi` on the main domain (round 1, width 16): the 16-bit parts of
@@ -212,12 +291,21 @@ pub enum Group {
     Main16,
     /// `Z_hi, U_hi, b_0..b_5` on the main domain (round 1, width 4); H-exact appends `a_z`.
     Main,
-    /// Level-1 carries `kappa^(1)_t` on `D_1` (round 2, width 16).
+    /// Post-theta Keccak state lanes `A'[x, y]` (`x in 0..5`, slot groups `q in 0..Q`) for
+    /// row `y in 0..5` on the Keccak domain `d_K = 10 + d_sig` (round 1, width 4, `HashField::Fp` only).
+    KeccakA(u8),
+    /// Pre-theta Keccak column parities `C[x]` (`x in 0..5`, slot groups `q in 0..Q`) on `d_K`
+    /// (round 1, width 4, `HashField::Fp` only).
+    KeccakC,
+    /// Post-theta Keccak column parities `C'[x]` (`x in 0..5`, slot groups `q in 0..Q`) on `d_K`
+    /// (round 1, width 4, `HashField::Fp` only).
+    KeccakCPrime,
+    /// Level-1 carries `kappa^(1)_t` on `D_1` (round 2, width 16, `HashField::Gf2` only).
     Level1,
-    /// Level-2 parities `y^(2)_t` and carries `kappa^(2)_t` on `D_2` (round 2, width 16).
+    /// Level-2 parities `y^(2)_t` and carries `kappa^(2)_t` on `D_2` (round 2, width 16, `HashField::Gf2` only).
     Level2,
     /// The level-3 carry `kappa^(3)` on `D_3` and zero polynomials, in `G_2`'s layout (round 2,
-    /// width 16).
+    /// width 16, `HashField::Gf2` only).
     Level3,
     /// The digits `K_0, K_1, K_2, K_3` of the projection outputs `k = <Psi_o, v_i>` on the
     /// projection domain `(o, i)` (round 2, width 16).
@@ -228,7 +316,7 @@ pub enum Group {
 }
 
 impl Group {
-    /// All groups in wire and catalog order.
+    /// All groups of `HashField::Gf2` in wire and catalog order.
     pub const ALL: [Self; GROUP_COUNT] = [
         Self::Main16,
         Self::Main,
@@ -239,7 +327,50 @@ impl Group {
         Self::Mult,
     ];
 
-    /// Position in the wire order.
+    /// All groups of `HashField::Fp` in wire and catalog order.
+    pub const ALL_FP: [Self; GROUP_COUNT_FP] = [
+        Self::Main16,
+        Self::Main,
+        Self::KeccakA(0),
+        Self::KeccakA(1),
+        Self::KeccakA(2),
+        Self::KeccakA(3),
+        Self::KeccakA(4),
+        Self::KeccakC,
+        Self::KeccakCPrime,
+        Self::Proj,
+        Self::Mult,
+    ];
+
+    /// The seven `HashField::Fp` Keccak groups in wire order.
+    pub const KECCAK: [Self; KECCAK_GROUP_COUNT] = [
+        Self::KeccakA(0),
+        Self::KeccakA(1),
+        Self::KeccakA(2),
+        Self::KeccakA(3),
+        Self::KeccakA(4),
+        Self::KeccakC,
+        Self::KeccakCPrime,
+    ];
+
+    /// Number of 16-round slot groups `Q = ceil(24 * perms / 16)` per Keccak lane for `set`
+    /// (`11` for ML-DSA-44 and ML-DSA-65, `14` for ML-DSA-87).
+    #[must_use]
+    pub const fn keccak_slot_groups(set: Set) -> usize {
+        match set {
+            Set::S44 | Set::S65 => 11,
+            Set::S87 => 14,
+        }
+    }
+
+    /// True if this group is one of the seven `HashField::Fp` Keccak groups.
+    #[must_use]
+    pub const fn is_keccak(self) -> bool {
+        matches!(self, Self::KeccakA(_) | Self::KeccakC | Self::KeccakCPrime)
+    }
+
+    /// Canonical role index (matches the wire position in `HashField::Gf2` for the seven
+    /// `Gf2` groups, and assigns distinct tags `7..=13` to the seven `Fp` Keccak groups).
     #[must_use]
     pub const fn index(self) -> usize {
         match self {
@@ -250,14 +381,59 @@ impl Group {
             Self::Level3 => 4,
             Self::Proj => 5,
             Self::Mult => 6,
+            Self::KeccakA(y) => {
+                assert!(y < 5, "KeccakA row y must be in 0..5");
+                7 + y as usize
+            }
+            Self::KeccakC => 12,
+            Self::KeccakCPrime => 13,
         }
     }
 
-    /// Commitment round: 1 before the bridge seed, 2 after.
+    /// Position in the wire order of `hash_field` (`0..7` under `Gf2`, `0..11` under `Fp`).
+    #[must_use]
+    pub const fn index_in(self, hash_field: HashField) -> usize {
+        match hash_field {
+            HashField::Gf2 => match self {
+                Self::Main16 => 0,
+                Self::Main => 1,
+                Self::Level1 => 2,
+                Self::Level2 => 3,
+                Self::Level3 => 4,
+                Self::Proj => 5,
+                Self::Mult => 6,
+                Self::KeccakA(_) | Self::KeccakC | Self::KeccakCPrime => {
+                    panic!("Keccak groups belong to HashField::Fp")
+                }
+            },
+            HashField::Fp => match self {
+                Self::Main16 => 0,
+                Self::Main => 1,
+                Self::KeccakA(y) => {
+                    assert!(y < 5, "KeccakA row y must be in 0..5");
+                    2 + y as usize
+                }
+                Self::KeccakC => 7,
+                Self::KeccakCPrime => 8,
+                Self::Proj => 9,
+                Self::Mult => 10,
+                Self::Level1 | Self::Level2 | Self::Level3 => {
+                    panic!("bridge groups belong to HashField::Gf2")
+                }
+            },
+        }
+    }
+
+    /// Commitment round: 1 for the main and Keccak groups, 2 for the bridge, projection
+    /// and multiplicity groups.
     #[must_use]
     pub const fn round(self) -> u8 {
         match self {
-            Self::Main16 | Self::Main => 1,
+            Self::Main16
+            | Self::Main
+            | Self::KeccakA(_)
+            | Self::KeccakC
+            | Self::KeccakCPrime => 1,
             Self::Level1 | Self::Level2 | Self::Level3 | Self::Proj | Self::Mult => 2,
         }
     }
@@ -272,7 +448,11 @@ impl Group {
     #[must_use]
     pub const fn family(self) -> Family {
         match self {
-            Self::Main | Self::Mult => Family::Width4,
+            Self::Main
+            | Self::KeccakA(_)
+            | Self::KeccakC
+            | Self::KeccakCPrime
+            | Self::Mult => Family::Width4,
             Self::Main16 | Self::Level1 | Self::Level2 | Self::Level3 | Self::Proj => {
                 Family::Width16
             }
@@ -282,23 +462,26 @@ impl Group {
     /// Number of committed polynomials for a parameter set and relation.
     ///
     /// For ML-DSA-44: 4 on the main domain (round 1, width 16); 8, 9, or 12
-    /// under relations H-u, H-exact, and H-FIPS (round 1, width 4); 6 carries on Level 1;
-    /// 12 parities and carries on Level 2 (13 under H-FIPS); Level 3 matches Level 2;
-    /// 4 projection digits and 7 multiplicity digits.
+    /// under relations H-u, H-exact, and H-FIPS (round 1, width 4); 55 per Keccak group;
+    /// 6 carries on Level 1; 12 parities and carries on Level 2 (13 under H-FIPS); Level 3
+    /// matches Level 2; 4 projection digits and 7 multiplicity digits.
     ///
     /// For ML-DSA-65 (relations H-u and H-exact): 23 on width-16 main domain (5 for z_lo, 6 each for
     /// u_lo, v_lo, v_hi); 46 on width-4 main domain (5 each for z_mid and a_z, 6 each for
-    /// u_mid and a_u, 24 for 4 bit planes across 6 lanes); 4 carries on Level 1;
+    /// u_mid and a_u, 24 for 4 bit planes across 6 lanes); 55 per Keccak group; 4 carries on Level 1;
     /// 8 parities and carries on Level 2; Level 3 matches Level 2; 5 projection digits;
     /// 7 multiplicity digits.
     ///
     /// For ML-DSA-87 (relations H-u and H-exact): 31 on width-16 main domain (7 for z_lo, 8 each for
     /// u_lo, v_lo, v_hi); 62 on width-4 main domain (7 each for z_mid and a_z, 8 each for
-    /// u_mid and a_u, 32 for 4 bit planes across 8 lanes); 4 carries on Level 1;
+    /// u_mid and a_u, 32 for 4 bit planes across 8 lanes); 70 per Keccak group; 4 carries on Level 1;
     /// 8 parities and carries on Level 2; Level 3 matches Level 2; 5 projection digits;
     /// 7 multiplicity digits.
     #[must_use]
     pub const fn num_polynomials(self, set: Set, relation: Relation) -> usize {
+        if self.is_keccak() {
+            return 5 * Self::keccak_slot_groups(set);
+        }
         match set {
             Set::S44 => match self {
                 Self::Main16 => 4,
@@ -315,6 +498,7 @@ impl Group {
                 Self::Level3 => Self::Level2.num_polynomials(set, relation),
                 Self::Proj => 4,
                 Self::Mult => MULTIPLICITY_DIGITS,
+                Self::KeccakA(_) | Self::KeccakC | Self::KeccakCPrime => unreachable!(),
             },
             Set::S65 => match self {
                 Self::Main16 => 5 + 3 * 6,
@@ -330,6 +514,7 @@ impl Group {
                 Self::Level3 => Self::Level2.num_polynomials(set, relation),
                 Self::Proj => 5,
                 Self::Mult => MULTIPLICITY_DIGITS,
+                Self::KeccakA(_) | Self::KeccakC | Self::KeccakCPrime => unreachable!(),
             },
             Set::S87 => match self {
                 Self::Main16 => 7 + 3 * 8,
@@ -345,11 +530,14 @@ impl Group {
                 Self::Level3 => Self::Level2.num_polynomials(set, relation),
                 Self::Proj => 5,
                 Self::Mult => MULTIPLICITY_DIGITS,
+                Self::KeccakA(_) | Self::KeccakC | Self::KeccakCPrime => unreachable!(),
             },
         }
     }
 
     /// Logical variable count of the group's domain for a given parameter set and `d_sig`.
+    ///
+    /// Every Keccak group has `d_K = 10 + d_sig` variables for all parameter sets.
     ///
     /// For ML-DSA-44: `d_main = 10 + d_sig`, `d_1 = 13 + max(0, d_sig - 9)`,
     /// `d_2 = 13 + max(0, d_sig - 13)`, `d_3 = 12 + max(0, d_sig - 13)`,
@@ -364,6 +552,9 @@ impl Group {
     /// `d_k = 8 + d_sig` (two projection row blocks); 16 for `G_m`.
     #[must_use]
     pub const fn logical_vars(self, set: Set, d_sig: usize) -> usize {
+        if self.is_keccak() {
+            return D_POS + d_sig;
+        }
         match set {
             Set::S44 => match self {
                 Self::Main16 | Self::Main => D_POS + d_sig,
@@ -372,6 +563,7 @@ impl Group {
                 Self::Level3 => 12 + d_sig.saturating_sub(D_SEG_MAX),
                 Self::Proj => PROJ_ROW_VARS + d_sig,
                 Self::Mult => TABLE_VARS,
+                Self::KeccakA(_) | Self::KeccakC | Self::KeccakCPrime => unreachable!(),
             },
             Set::S65 => match self {
                 Self::Main16 | Self::Main => 8 + d_sig,
@@ -380,6 +572,7 @@ impl Group {
                 Self::Level3 => 12 + d_sig.saturating_sub(D_SEG_MAX),
                 Self::Proj => PROJ_ROW_VARS + d_sig,
                 Self::Mult => TABLE_VARS,
+                Self::KeccakA(_) | Self::KeccakC | Self::KeccakCPrime => unreachable!(),
             },
             Set::S87 => match self {
                 Self::Main16 | Self::Main => 8 + d_sig,
@@ -388,6 +581,7 @@ impl Group {
                 Self::Level3 => 12 + d_sig.saturating_sub(D_SEG_MAX),
                 Self::Proj => PROJ_ROW_VARS + 1 + d_sig,
                 Self::Mult => TABLE_VARS,
+                Self::KeccakA(_) | Self::KeccakC | Self::KeccakCPrime => unreachable!(),
             },
         }
     }
@@ -418,6 +612,14 @@ impl Group {
         match self {
             Self::Main16 => "main16",
             Self::Main => "main",
+            Self::KeccakA(0) => "keccak_a0",
+            Self::KeccakA(1) => "keccak_a1",
+            Self::KeccakA(2) => "keccak_a2",
+            Self::KeccakA(3) => "keccak_a3",
+            Self::KeccakA(4) => "keccak_a4",
+            Self::KeccakA(_) => "keccak_a",
+            Self::KeccakC => "keccak_c",
+            Self::KeccakCPrime => "keccak_c_prime",
             Self::Level1 => "level1",
             Self::Level2 => "level2",
             Self::Level3 => "level3",
@@ -427,9 +629,10 @@ impl Group {
     }
 }
 
-/// The ordered seven-group layout of one batch size `N* = 2^d_sig` under one relation
-/// and parameter set.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The ordered group layout of one batch size `N* = 2^d_sig` under one relation,
+/// parameter set and hash field (`GROUP_COUNT` groups under `Gf2`, `GROUP_COUNT_FP`
+/// under `Fp`).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BatchLayout {
     /// The parameter set (FIPS 204 ML-DSA-44, 65, or 87).
     pub set: Set,
@@ -437,15 +640,35 @@ pub struct BatchLayout {
     pub d_sig: usize,
     /// The relation (it fixes the polynomial counts of `G_main4` and `G_2`).
     pub relation: Relation,
-    /// Physical layouts of `G_main16, G_main4, G_1, G_2, G_3, G_k, G_m`.
-    pub groups: [PolynomialGroupLayout; GROUP_COUNT],
+    /// The field in which the commitment hash is proven (`Gf2` or `Fp`).
+    pub hash_field: HashField,
+    /// Physical layouts of the batch's groups in wire order.
+    pub groups: Vec<PolynomialGroupLayout>,
 }
 
 impl BatchLayout {
-    /// The layout for `set` at `d_sig` under `relation`; `None` outside `[MIN_D_SIG, MAX_D_SIG]`
-    /// or if `set` does not define the relation ([`Relation::is_available`]).
+    /// The `HashField::Gf2` layout for `set` at `d_sig` under `relation`; `None` outside
+    /// `[MIN_D_SIG, MAX_D_SIG]` or if `set` does not define the relation ([`Relation::is_available`]).
     #[must_use]
     pub fn new(set: Set, d_sig: usize, relation: Relation) -> Option<Self> {
+        Self::for_hash_field(set, d_sig, relation, HashField::Gf2)
+    }
+
+    /// The `HashField::Fp` layout for `set` at `d_sig` under `relation` (`GROUP_COUNT_FP`
+    /// groups in wire order `G_main16, G_main4, KeccakA[0..4], KeccakC, KeccakCPrime, G_k, G_m`).
+    #[must_use]
+    pub fn new_fp(set: Set, d_sig: usize, relation: Relation) -> Option<Self> {
+        Self::for_hash_field(set, d_sig, relation, HashField::Fp)
+    }
+
+    /// The layout for `set` at `d_sig` under `relation` and `hash_field`.
+    #[must_use]
+    pub fn for_hash_field(
+        set: Set,
+        d_sig: usize,
+        relation: Relation,
+        hash_field: HashField,
+    ) -> Option<Self> {
         if !relation.is_available(set) {
             return None;
         }
@@ -453,34 +676,39 @@ impl BatchLayout {
             set,
             d_sig,
             relation,
-            groups: Group::ALL.map(|group| group.layout(set, d_sig, relation)),
+            hash_field,
+            groups: hash_field
+                .groups()
+                .iter()
+                .map(|&group| group.layout(set, d_sig, relation))
+                .collect(),
         })
     }
 
     /// The precommitted groups (every group but `G_m`), in order.
     #[must_use]
     pub fn precommitted(&self) -> &[PolynomialGroupLayout] {
-        &self.groups[..GROUP_COUNT - 1]
+        &self.groups[..self.groups.len() - 1]
     }
 
     /// The precommitted groups with their roles, in order.
     #[must_use]
     pub fn precommitted_groups(&self) -> Vec<(Group, PolynomialGroupLayout)> {
-        Group::ALL[..GROUP_COUNT - 1]
+        let roles = self.hash_field.groups();
+        roles[..roles.len() - 1]
             .iter()
-            .map(|&group| (group, self.groups[group.index()]))
+            .copied()
+            .zip(self.precommitted().iter().copied())
             .collect()
     }
 
     /// The final group `G_m`.
     #[must_use]
-    pub const fn final_group(&self) -> PolynomialGroupLayout {
-        self.groups[GROUP_COUNT - 1]
+    pub fn final_group(&self) -> PolynomialGroupLayout {
+        *self.groups.last().expect("non-empty groups")
     }
 
-    /// Total committed polynomials (53 for H-u, 54 for H-exact, 59 for H-FIPS under ML-DSA-44;
-    /// 101 for H-u and H-exact, 121 for H-FIPS under ML-DSA-65; 125 for H-u and H-exact, 151
-    /// for H-FIPS under ML-DSA-87).
+    /// Total committed polynomials.
     #[must_use]
     pub fn total_polynomials(&self) -> usize {
         self.groups
@@ -489,18 +717,18 @@ impl BatchLayout {
             .sum()
     }
 
-    /// Largest physical variable count (the main domain).
+    /// Largest physical variable count (the main or Keccak domain).
     #[must_use]
     pub fn max_physical_vars(&self) -> usize {
         self.groups
             .iter()
             .map(|group| group.num_vars())
             .max()
-            .expect("seven groups")
+            .expect("non-empty groups")
     }
 
     /// Catalog row name of the grouped row (`p16` for H-u, `p16x` for H-exact, `p16f` for
-    /// H-FIPS: the lookup into `T_16` with the projected `v`).
+    /// H-FIPS; `-fp` suffix before `-batch-` under `HashField::Fp`).
     #[must_use]
     pub fn row_name(&self) -> String {
         let layout = match self.relation {
@@ -508,21 +736,29 @@ impl BatchLayout {
             Relation::HExact => "p16x",
             Relation::HFips => "p16f",
         };
+        let field = match self.hash_field {
+            HashField::Gf2 => "",
+            HashField::Fp => "-fp",
+        };
         format!(
-            "mldsa-{}-{layout}-batch-{}-mult-final",
+            "mldsa-{}-{layout}{field}-batch-{}-mult-final",
             self.set.name(),
             1_usize << self.d_sig
         )
     }
 
-    /// Whether this batch size has checked-in catalog rows for its set and relation.
+    /// Whether this batch size has checked-in catalog rows for its set, relation and hash field.
     #[must_use]
     pub fn in_catalog(&self) -> bool {
-        self.relation.is_available(self.set) && self.relation.catalog_d_sigs().contains(&self.d_sig)
+        self.relation.is_available(self.set)
+            && match self.hash_field {
+                HashField::Gf2 => self.relation.catalog_d_sigs().contains(&self.d_sig),
+                HashField::Fp => CATALOG_D_SIG_FP.contains(&self.d_sig),
+            }
     }
 }
 
-/// Every batch layout for a given parameter set whose catalog rows can be resolved.
+/// Every `HashField::Gf2` batch layout for a given parameter set whose catalog rows can be resolved.
 #[must_use]
 pub fn catalog_batches_for_set(set: Set) -> Vec<BatchLayout> {
     Relation::ALL
@@ -537,14 +773,45 @@ pub fn catalog_batches_for_set(set: Set) -> Vec<BatchLayout> {
         .collect()
 }
 
-/// Every checked-in batch layout: the 39 ML-DSA-44 layouts across all relations, and the
-/// 39 ML-DSA-65 and 39 ML-DSA-87 layouts (H-u and H-exact have equal layouts, so they share
-/// their catalog rows).
+/// Every `HashField::Fp` batch layout for a given parameter set whose catalog rows can be resolved.
+#[must_use]
+pub fn catalog_batches_for_set_fp(set: Set) -> Vec<BatchLayout> {
+    Relation::ALL
+        .iter()
+        .filter(|relation| relation.is_available(set))
+        .flat_map(|&relation| {
+            CATALOG_D_SIG_FP
+                .iter()
+                .filter_map(move |&d_sig| BatchLayout::new_fp(set, d_sig, relation))
+        })
+        .collect()
+}
+
+/// Every checked-in `HashField::Gf2` batch layout: the 39 ML-DSA-44 layouts across all
+/// relations, and the 39 ML-DSA-65 and 39 ML-DSA-87 layouts (H-u and H-exact have equal
+/// layouts, so they share their catalog rows).
 #[must_use]
 pub fn catalog_batches() -> Vec<BatchLayout> {
     let mut batches = catalog_batches_for_set(Set::S44);
     batches.extend(catalog_batches_for_set(Set::S65));
     batches.extend(catalog_batches_for_set(Set::S87));
+    batches
+}
+
+/// Every checked-in `HashField::Fp` batch layout across all parameter sets and relations.
+#[must_use]
+pub fn catalog_batches_fp() -> Vec<BatchLayout> {
+    let mut batches = catalog_batches_for_set_fp(Set::S44);
+    batches.extend(catalog_batches_for_set_fp(Set::S65));
+    batches.extend(catalog_batches_for_set_fp(Set::S87));
+    batches
+}
+
+/// Every checked-in batch layout across both `HashField::Gf2` and `HashField::Fp`.
+#[must_use]
+pub fn all_catalog_batches() -> Vec<BatchLayout> {
+    let mut batches = catalog_batches();
+    batches.extend(catalog_batches_fp());
     batches
 }
 
@@ -669,11 +936,13 @@ mod tests {
 
     #[test]
     fn batch_layouts_for_the_catalog_sizes() {
-        let shape = |set, d_sig| {
+        let shape = |set, d_sig| -> Vec<(usize, usize)> {
             BatchLayout::new(set, d_sig, Relation::Hu)
                 .unwrap()
                 .groups
+                .iter()
                 .map(|group| (group.num_vars(), group.num_polynomials()))
+                .collect()
         };
         assert_eq!(
             shape(Set::S44, 8),
@@ -696,7 +965,12 @@ mod tests {
         // H-FIPS of ML-DSA-65 and ML-DSA-87: G_main4 gains three columns per row lane, G_2 and
         // G_3 the hint slack.
         assert_eq!(
-            BatchLayout::new(Set::S65, 8, Relation::HFips).unwrap().groups.map(|g| (g.num_vars(), g.num_polynomials())),
+            BatchLayout::new(Set::S65, 8, Relation::HFips)
+                .unwrap()
+                .groups
+                .iter()
+                .map(|g| (g.num_vars(), g.num_polynomials()))
+                .collect::<Vec<_>>(),
             [(16, 23), (16, 64), (13, 4), (13, 9), (13, 9), (15, 5), (16, 7)]
         );
         assert_eq!(BatchLayout::new(Set::S87, 15, Relation::HFips).unwrap().total_polynomials(), 151);
@@ -728,7 +1002,11 @@ mod tests {
         // H-exact: G_main4 at 9 polynomials, its own row name, every other group unchanged.
         let exact = BatchLayout::new(Set::S44, 15, Relation::HExact).unwrap();
         assert_eq!(
-            exact.groups.map(|group| (group.num_vars(), group.num_polynomials())),
+            exact
+                .groups
+                .iter()
+                .map(|group| (group.num_vars(), group.num_polynomials()))
+                .collect::<Vec<_>>(),
             [(25, 4), (25, 9), (19, 6), (15, 12), (15, 12), (22, 4), (16, 7)]
         );
         assert_eq!(exact.total_polynomials(), 54);
@@ -748,6 +1026,51 @@ mod tests {
         assert_eq!(catalog_batches().len(), 117);
         assert_eq!(catalog_batches_for_set(Set::S65).len(), 39);
         assert_eq!(catalog_batches_for_set(Set::S87).len(), 39);
+    }
+
+    #[test]
+    fn fp_batch_layouts_and_groups() {
+        assert_eq!(HashField::default(), HashField::Gf2);
+        for field in HashField::ALL {
+            assert_eq!(HashField::parse(field.flag()), Some(field));
+            assert_eq!(field.groups().len(), field.group_count());
+        }
+        assert_eq!(HashField::parse("other"), None);
+        for (idx, &group) in Group::ALL_FP.iter().enumerate() {
+            assert_eq!(group.index_in(HashField::Fp), idx);
+            assert_eq!(group.is_final(), group == Group::Mult);
+            if group.is_keccak() {
+                assert_eq!(group.round(), 1);
+                assert_eq!(group.family(), Family::Width4);
+                assert_eq!(group.num_polynomials(Set::S44, Relation::Hu), 55);
+                assert_eq!(group.num_polynomials(Set::S65, Relation::HFips), 55);
+                assert_eq!(group.num_polynomials(Set::S87, Relation::Hu), 70);
+                assert_eq!(group.logical_vars(Set::S44, 10), 20);
+                assert_eq!(group.logical_vars(Set::S65, 10), 20);
+                assert_eq!(group.logical_vars(Set::S87, 10), 20);
+            }
+        }
+        let fp44 = BatchLayout::new_fp(Set::S44, 10, Relation::Hu).unwrap();
+        assert_eq!(fp44.hash_field, HashField::Fp);
+        assert_eq!(fp44.groups.len(), GROUP_COUNT_FP);
+        assert_eq!(fp44.precommitted().len(), GROUP_COUNT_FP - 1);
+        assert_eq!(fp44.row_name(), "mldsa-44-p16-fp-batch-1024-mult-final");
+        // 4 + 8 + 7 * 55 + 4 + 7 = 408 polynomials.
+        assert_eq!(fp44.total_polynomials(), 408);
+        assert_eq!(fp44.max_physical_vars(), 20);
+        assert!(fp44.in_catalog());
+
+        let fp65 = BatchLayout::new_fp(Set::S65, 10, Relation::HExact).unwrap();
+        assert_eq!(fp65.row_name(), "mldsa-65-p16x-fp-batch-1024-mult-final");
+        assert_eq!(fp65.max_physical_vars(), 20);
+        // 23 + 46 + 7 * 55 + 5 + 7 = 466 polynomials.
+        assert_eq!(fp65.total_polynomials(), 466);
+
+        let fp87 = BatchLayout::new_fp(Set::S87, 10, Relation::HFips).unwrap();
+        assert_eq!(fp87.row_name(), "mldsa-87-p16f-fp-batch-1024-mult-final");
+        assert_eq!(fp87.max_physical_vars(), 20);
+        // 31 + 86 + 7 * 70 + 5 + 7 = 619 polynomials.
+        assert_eq!(fp87.total_polynomials(), 619);
     }
 
     #[test]

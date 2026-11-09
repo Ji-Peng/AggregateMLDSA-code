@@ -41,7 +41,7 @@
 //! planner workers (default 3; the search is memory bound).
 
 use agg_pcs_config::catalogs::{
-    catalog_batches, catalog_batches_for_set, scalar_layouts, BatchLayout, Family, Relation, Set,
+    all_catalog_batches, scalar_layouts, BatchLayout, Family, HashField, Relation, Set,
 };
 use agg_pcs_config::preset::{
     AggFp64SignedWidth16 as W16, AggFp64SignedWidth4 as Cfg, WIDTH16_FAMILY, WIDTH4_FAMILY,
@@ -107,9 +107,24 @@ fn requested_sets() -> Vec<Set> {
     }
 }
 
+/// Hash fields requested by the environment (`AGG_CATALOG_HASH_FIELD=fp`), default both.
+fn requested_hash_fields() -> Vec<HashField> {
+    match std::env::var("AGG_CATALOG_HASH_FIELD") {
+        Ok(value) if !value.trim().is_empty() && value.trim() != "all" => vec![
+            HashField::parse(&value)
+                .unwrap_or_else(|| panic!("AGG_CATALOG_HASH_FIELD {value:?} is not a hash field")),
+        ],
+        _ => HashField::ALL.to_vec(),
+    }
+}
+
 /// Batches requested by the environment (`AGG_CATALOG_D_SIG=8,10` under the relations of
-/// `AGG_CATALOG_RELATION` and sets of `AGG_CATALOG_SET`), defaulting to every checked-in batch.
+/// `AGG_CATALOG_RELATION`, sets of `AGG_CATALOG_SET` and hash fields of
+/// `AGG_CATALOG_HASH_FIELD`), defaulting to every checked-in batch.
 fn requested_batches() -> Vec<BatchLayout> {
+    let sets = requested_sets();
+    let relations = requested_relations();
+    let fields = requested_hash_fields();
     match std::env::var("AGG_CATALOG_D_SIG") {
         Ok(value) if !value.trim().is_empty() => {
             let d_sigs: Vec<usize> = value
@@ -121,11 +136,15 @@ fn requested_batches() -> Vec<BatchLayout> {
                 })
                 .collect();
             let mut batches = Vec::new();
-            for set in requested_sets() {
-                for relation in requested_relations() {
-                    for &d_sig in &d_sigs {
-                        if let Some(layout) = BatchLayout::new(set, d_sig, relation) {
-                            batches.push(layout);
+            for &field in &fields {
+                for &set in &sets {
+                    for &relation in &relations {
+                        for &d_sig in &d_sigs {
+                            if let Some(layout) =
+                                BatchLayout::for_hash_field(set, d_sig, relation, field)
+                            {
+                                batches.push(layout);
+                            }
                         }
                     }
                 }
@@ -133,25 +152,16 @@ fn requested_batches() -> Vec<BatchLayout> {
             batches
         }
         _ => {
-            if std::env::var("AGG_CATALOG_SET").is_ok() {
-                let mut batches = Vec::new();
-                for set in requested_sets() {
-                    for layout in agg_pcs_config::catalogs::catalog_batches_for_set(set) {
-                        if requested_relations().contains(&layout.relation) {
-                            batches.push(layout);
-                        }
-                    }
-                }
-                batches
-            } else {
-                catalog_batches()
-                    .into_iter()
-                    .filter(|layout| {
-                        requested_sets().contains(&layout.set)
-                            && requested_relations().contains(&layout.relation)
-                    })
-                    .collect()
-            }
+            let mut batches: Vec<BatchLayout> = all_catalog_batches()
+                .into_iter()
+                .filter(|layout| {
+                    sets.contains(&layout.set)
+                        && relations.contains(&layout.relation)
+                        && fields.contains(&layout.hash_field)
+                })
+                .collect();
+            batches.sort_by_key(|b| (b.hash_field, b.d_sig, b.set.id(), b.relation));
+            batches
         }
     }
 }
@@ -417,16 +427,14 @@ fn update_catalog_rows() {
     let requested = requested_batches();
     let replace = std::env::var("AGG_CATALOG_REPLACE").map_or(false, |v| v == "1" || v == "true");
     let mut keep = Vec::new();
-    for set in Set::ALL {
-        for layout in catalog_batches_for_set(set) {
-            if !keep.contains(&layout) {
-                keep.push(layout);
-            }
+    for layout in all_catalog_batches() {
+        if !keep.contains(&layout) {
+            keep.push(layout);
         }
     }
     for layout in &requested {
         if !keep.contains(layout) {
-            keep.push(*layout);
+            keep.push(layout.clone());
         }
     }
     let mut rows: [Rows; 2] = [Vec::new(), Vec::new()];
@@ -444,23 +452,26 @@ fn update_catalog_rows() {
             }
         }
     }
-    for layout in requested {
-        let (d_sig, relation) = (layout.d_sig, layout.relation);
-        let started = Instant::now();
-        for (slot, family) in rows.iter_mut().zip(Family::ALL) {
-            let mut missing: Vec<PolynomialGroupLayout> = layout
-                .precommitted_groups()
-                .into_iter()
-                .filter(|(group, _)| group.family() == family)
-                .map(|(_, shape)| shape)
-                .filter(|&shape| {
-                    !slot.iter().any(|(profiles, _)| {
-                        profiles.precommitteds.is_empty() && profiles.final_group.group == shape
-                    })
+    for (slot, family) in rows.iter_mut().zip(Family::ALL) {
+        let mut missing: Vec<PolynomialGroupLayout> = requested
+            .iter()
+            .flat_map(|layout| {
+                layout
+                    .precommitted_groups()
+                    .into_iter()
+                    .filter(|(group, _)| group.family() == family)
+                    .map(|(_, shape)| shape)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|&shape| {
+                !slot.iter().any(|(profiles, _)| {
+                    profiles.precommitteds.is_empty() && profiles.final_group.group == shape
                 })
-                .collect();
-            missing.sort_by_key(|shape| (shape.num_vars(), shape.num_polynomials()));
-            missing.dedup();
+            })
+            .collect();
+        missing.sort_by_key(|shape| (shape.num_vars(), shape.num_polynomials()));
+        missing.dedup();
+        if !missing.is_empty() {
             let workers = offline_planning_worker_count(missing.len());
             let planned = bounded_parallel_filter_map(&missing, workers, |&shape| {
                 let schedule = preplanned_scalar(family, shape)
@@ -472,28 +483,44 @@ fn update_catalog_rows() {
                 let key = ScheduleLookupKey::single(shape);
                 let profiles = rendered_profiles(&key, &schedule).expect("scalar profile");
                 slot.push((profiles, schedule));
-                save(family, slot);
             }
+            save(family, slot);
         }
-        let request = grouped_request(&layout);
+    }
+    let mut missing_grouped: Vec<(BatchLayout, GroupedGenerationRequest, ScheduleLookupKey)> =
+        Vec::new();
+    for layout in &requested {
+        let request = grouped_request(layout);
         let key = request.key();
-        if !rows[0].iter().any(|(profiles, _)| row_key(profiles) == key) {
+        let already_present = rows[0].iter().any(|(profiles, _)| row_key(profiles) == key)
+            || missing_grouped.iter().any(|(_, _, k)| *k == key);
+        if !already_present {
+            missing_grouped.push((layout.clone(), request, key));
+        }
+    }
+    if !missing_grouped.is_empty() {
+        let workers = offline_planning_worker_count(missing_grouped.len());
+        let rows4 = Mutex::new(std::mem::take(&mut rows[0]));
+        bounded_parallel_filter_map(&missing_grouped, workers, |(layout, request, key)| {
             let grouped_started = Instant::now();
-            let schedule = regen_group_batch(request).expect("grouped planning");
+            let schedule = regen_group_batch(request.clone())
+                .map_err(|e| format!("grouped planning failed for {}: {e}", layout.row_name()))?;
             eprintln!(
-                "planned grouped {} in {:.1?}",
+                "planned grouped {} (d_sig {}, {}) in {:.1?}",
                 layout.row_name(),
+                layout.d_sig,
+                layout.relation,
                 grouped_started.elapsed()
             );
-            let profiles = rendered_profiles(&key, &schedule).expect("grouped profile");
-            rows[0].push((profiles, schedule));
-            save(Family::Width4, &rows[0]);
-        }
-        eprintln!(
-            "d_sig {d_sig}, {relation} ({}): all rows ready in {:.1?}",
-            layout.row_name(),
-            started.elapsed()
-        );
+            let profiles = rendered_profiles(key, &schedule)
+                .map_err(|e| format!("grouped profile failed for {}: {e}", layout.row_name()))?;
+            let mut guard = rows4.lock().expect("rows4 mutex");
+            guard.push((profiles, schedule));
+            save(Family::Width4, &guard);
+            Ok(Some(()))
+        })
+        .expect("plan grouped rows");
+        rows[0] = rows4.into_inner().expect("rows4 mutex");
     }
     for (slot, family) in rows.iter().zip(Family::ALL) {
         save(family, slot);
@@ -505,7 +532,7 @@ fn update_catalog_rows() {
 #[test]
 #[ignore = "offline DP regeneration; rewrites src/schedules/"]
 fn regenerate() {
-    let batches = catalog_batches();
+    let batches = all_catalog_batches();
     let keys4 = scalar_layouts(&batches, Family::Width4);
     let keys16 = scalar_layouts(&batches, Family::Width16);
     let all: Vec<(Family, PolynomialGroupLayout)> = keys4
@@ -607,7 +634,7 @@ fn verify_rows() {
 
 #[cfg(feature = "schedules")]
 fn requested_keys() -> (Vec<ScheduleLookupKey>, Vec<ScheduleLookupKey>) {
-    let batches = catalog_batches();
+    let batches = all_catalog_batches();
     let mut keys4: Vec<ScheduleLookupKey> = scalar_layouts(&batches, Family::Width4)
         .into_iter()
         .map(ScheduleLookupKey::single)
@@ -702,7 +729,7 @@ fn checked_in_catalog_holds_exactly_the_requested_rows() {
     let (keys4, keys16) = requested_keys();
     check_catalog(Cfg::catalog().expect("width-4 catalog"), Family::Width4, &keys4);
     check_catalog(W16::catalog().expect("width-16 catalog"), Family::Width16, &keys16);
-    let batches = catalog_batches();
+    let batches = all_catalog_batches();
     for layout in &batches {
         let key = ScheduleLookupKey {
             final_group: layout.final_group(),

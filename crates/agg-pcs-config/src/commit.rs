@@ -33,7 +33,7 @@ use akita_types::{
 use akita_verifier::AkitaVerifier;
 use jolt_field::{ExtField, Ring, Zero};
 
-use crate::catalogs::{Family, Group, GROUP_COUNT};
+use crate::catalogs::{Family, Group};
 use crate::preset::{AggFp64SignedWidth16, AggFp64SignedWidth4 as Cfg, BaseField, OpeningField};
 use crate::work_plan::WorkPlan;
 
@@ -209,7 +209,7 @@ impl PcsProver {
     /// slots; warming them before the commit stages keeps the build off the
     /// commit's critical path.
     pub fn prewarm_groups(&self) -> Result<(), CommitError> {
-        for group in Group::ALL {
+        for &group in self.plan.groups() {
             self.backend.prewarm_commit(*self.plan.profile(group))?;
         }
         Ok(())
@@ -309,12 +309,12 @@ impl PcsProver {
         })
     }
 
-    /// Prove the batched opening of all seven groups, in wire order, under the
-    /// 32-byte PIOP session digest.
+    /// Prove the batched opening of all groups of the work plan, in wire order,
+    /// under the 32-byte PIOP session digest.
     pub fn open(
         &self,
-        commitments: [GroupCommitment; GROUP_COUNT],
-        claims: &[GroupClaim; GROUP_COUNT],
+        commitments: impl Into<Vec<GroupCommitment>>,
+        claims: &[GroupClaim],
         session: &[u8; 32],
     ) -> Result<Vec<u8>, CommitError> {
         let prepared = self.prepare_open(commitments, claims)?;
@@ -329,13 +329,18 @@ impl PcsProver {
     /// may run it while other transcript-independent work is still in flight.
     pub fn prepare_open(
         &self,
-        commitments: [GroupCommitment; GROUP_COUNT],
-        claims: &[GroupClaim; GROUP_COUNT],
+        commitments: impl Into<Vec<GroupCommitment>>,
+        claims: &[GroupClaim],
     ) -> Result<PreparedOpening, CommitError> {
-        let mut groups = Vec::with_capacity(GROUP_COUNT);
-        let mut handles = Vec::with_capacity(GROUP_COUNT);
+        let commitments = commitments.into();
+        let expected_groups = self.plan.groups();
+        if commitments.len() != expected_groups.len() || claims.len() != expected_groups.len() {
+            return Err(CommitError::ClaimShape(Group::Mult));
+        }
+        let mut groups = Vec::with_capacity(expected_groups.len());
+        let mut handles = Vec::with_capacity(expected_groups.len());
         for (commitment, (group, claim)) in
-            commitments.into_iter().zip(Group::ALL.iter().zip(claims))
+            commitments.into_iter().zip(expected_groups.iter().zip(claims))
         {
             if commitment.group != *group {
                 return Err(CommitError::ClaimShape(*group));
@@ -449,24 +454,28 @@ impl PcsVerifier {
         &self.plan
     }
 
-    /// Verify the batched opening of the seven groups. Group profiles and the
+    /// Verify the batched opening of the work plan's groups. Group profiles and the
     /// schedule selection come from the work plan, never from the proof.
     pub fn verify(
         &self,
-        commitments: &[Commitment<BaseField>; GROUP_COUNT],
-        claims: &[GroupClaim; GROUP_COUNT],
+        commitments: &[Commitment<BaseField>],
+        claims: &[GroupClaim],
         proof: &[u8],
         session: &[u8; 32],
     ) -> Result<(), CommitError> {
-        let committed: Vec<CommittedGroup<BaseField>> = Group::ALL
+        let expected_groups = self.plan.groups();
+        if commitments.len() != expected_groups.len() || claims.len() != expected_groups.len() {
+            return Err(CommitError::ClaimShape(Group::Mult));
+        }
+        let committed: Vec<CommittedGroup<BaseField>> = expected_groups
             .iter()
             .zip(commitments)
             .map(|(&group, commitment)| {
                 CommittedGroup::new(*self.plan.profile(group), commitment.clone())
             })
             .collect();
-        let mut points = Vec::with_capacity(GROUP_COUNT);
-        for (&group, claim) in Group::ALL.iter().zip(claims) {
+        let mut points = Vec::with_capacity(expected_groups.len());
+        for (&group, claim) in expected_groups.iter().zip(claims) {
             points.push(physical_point(&self.plan, group, claim)?);
         }
         let groups = committed

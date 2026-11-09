@@ -8,6 +8,7 @@ mod commit_open;
 mod h_exact;
 mod h_fips;
 mod h_fips_lanes;
+mod keccak_fp;
 mod mode_b;
 mod projection;
 mod simd;

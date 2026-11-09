@@ -23,7 +23,7 @@ fn commit_and_open(records: usize, relation: Relation) {
             .commit_group(group, &tables[group.index()])
             .unwrap_or_else(|e| panic!("{group:?}: {e}"))
     });
-    let commitments = std::array::from_fn(|i| groups[i].commitment().clone());
+    let commitments: [_; 7] = std::array::from_fn(|i| groups[i].commitment().clone());
     for group in &groups {
         assert!(!group.serialized().expect("encoding").is_empty());
     }

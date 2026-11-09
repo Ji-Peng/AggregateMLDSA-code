@@ -84,10 +84,8 @@ fn commit_and_open(n_own: usize, n_shared: usize, seed: u64, suffix: bool) {
         let pi_m = point(&mut rng, 16);
         group_points(&manifest, &r3, &pi_m).unwrap()
     } else {
-        let mut points = manifest
-            .groups()
-            .clone()
-            .map(|group| point(&mut rng, group.logical_vars));
+        let mut points: [Vec<OpeningField>; 7] =
+            std::array::from_fn(|i| point(&mut rng, manifest.groups()[i].logical_vars));
         points[1] = points[0].clone();
         points
     };

@@ -9,7 +9,8 @@ use akita_params::{GroupCommitPhaseParams, OpeningScheduleSelection, ScheduleLoo
 use akita_params::PolynomialGroupLayout;
 
 use crate::catalogs::{
-    BatchLayout, Family, Group, Relation, Set, D_SEG_MAX, MAX_D_SIG, MIN_D_SIG, PCS_MIN_CELLS_LOG2,
+    BatchLayout, Family, Group, HashField, Relation, Set, D_SEG_MAX, MAX_D_SIG, MIN_D_SIG,
+    PCS_MIN_CELLS_LOG2,
 };
 use crate::preset::{AggFp64SignedWidth16, AggFp64SignedWidth4, BaseField};
 
@@ -97,15 +98,35 @@ pub struct WorkPlan {
 }
 
 impl WorkPlan {
-    /// The plan for ML-DSA-44 with `records` live records under `relation`.
+    /// The `HashField::Gf2` plan for ML-DSA-44 with `records` live records under `relation`.
     pub fn for_records(records: usize, relation: Relation) -> Result<Self, PlanError> {
         Self::for_set(Set::S44, records, relation)
     }
 
-    /// The plan for `set` with `records` live records under `relation`.
+    /// The `HashField::Fp` plan for ML-DSA-44 with `records` live records under `relation`.
+    pub fn for_records_fp(records: usize, relation: Relation) -> Result<Self, PlanError> {
+        Self::for_set_fp(Set::S44, records, relation)
+    }
+
+    /// The `HashField::Gf2` plan for `set` with `records` live records under `relation`.
     pub fn for_set(set: Set, records: usize, relation: Relation) -> Result<Self, PlanError> {
+        Self::for_hash_field(set, records, relation, HashField::Gf2)
+    }
+
+    /// The `HashField::Fp` plan for `set` with `records` live records under `relation`.
+    pub fn for_set_fp(set: Set, records: usize, relation: Relation) -> Result<Self, PlanError> {
+        Self::for_hash_field(set, records, relation, HashField::Fp)
+    }
+
+    /// The plan for `set` with `records` live records under `relation` and `hash_field`.
+    pub fn for_hash_field(
+        set: Set,
+        records: usize,
+        relation: Relation,
+        hash_field: HashField,
+    ) -> Result<Self, PlanError> {
         let (padded, d_sig) = padded_size(records)?;
-        let layout = BatchLayout::new(set, d_sig, relation)
+        let layout = BatchLayout::for_hash_field(set, d_sig, relation, hash_field)
             .ok_or(PlanError::NotInCatalog { d_sig, relation })?;
         if !layout.in_catalog() {
             return Err(PlanError::NotInCatalog { d_sig, relation });
@@ -148,10 +169,22 @@ impl WorkPlan {
         self.layout.relation
     }
 
+    /// The hash field of the plan.
+    #[must_use]
+    pub const fn hash_field(&self) -> HashField {
+        self.layout.hash_field
+    }
+
+    /// The groups of the plan in wire order.
+    #[must_use]
+    pub const fn groups(&self) -> &'static [Group] {
+        self.layout.hash_field.groups()
+    }
+
     /// Committed polynomials of `group` (its layout's count under the plan's parameter set and relation).
     #[must_use]
-    pub const fn num_polynomials(&self, group: Group) -> usize {
-        self.layout.groups[group.index()].num_polynomials()
+    pub fn num_polynomials(&self, group: Group) -> usize {
+        self.layout.groups[group.index_in(self.layout.hash_field)].num_polynomials()
     }
 
     /// Number of `2^13`-signature segments `S`.
@@ -190,7 +223,7 @@ impl WorkPlan {
         if group.is_final() {
             &self.final_profile
         } else {
-            &self.precommitted[group.index()]
+            &self.precommitted[group.index_in(self.layout.hash_field)]
         }
     }
 
@@ -253,6 +286,24 @@ mod tests {
                         );
                     }
                     assert_eq!(plan.segments(), 1 << d_sig.saturating_sub(13));
+                }
+            }
+            for layout in crate::catalogs::catalog_batches_for_set_fp(set) {
+                let (d_sig, relation) = (layout.d_sig, layout.relation);
+                for records in [(1 << d_sig) / 2 + 1, 1 << d_sig] {
+                    let plan = WorkPlan::for_set_fp(set, records, relation).expect("fp catalog plan");
+                    assert_eq!((plan.d_sig(), plan.relation()), (d_sig, relation));
+                    assert_eq!(plan.set(), set);
+                    assert_eq!(plan.hash_field(), HashField::Fp);
+                    assert_eq!(plan.precommitted.len(), crate::catalogs::GROUP_COUNT_FP - 1);
+                    for group in Group::ALL_FP {
+                        assert_eq!(plan.profile(group).group, group.layout(set, d_sig, relation));
+                        assert_eq!(plan.num_polynomials(group), group.num_polynomials(set, relation));
+                        assert_eq!(
+                            plan.logical_vars(group) + plan.pad_vars(group),
+                            plan.physical_vars(group)
+                        );
+                    }
                 }
             }
         }

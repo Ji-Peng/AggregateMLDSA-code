@@ -1846,7 +1846,11 @@ impl BridgeGroupTables {
             }
             GroupRole::Proj => self.proj.columns(),
             GroupRole::Mult => self.digits.iter().map(|d| Cells::Narrow(d)).collect(),
-            GroupRole::Main16 | GroupRole::Main => panic!("a round-1 group"),
+            GroupRole::Main16
+            | GroupRole::Main
+            | GroupRole::KeccakA(_)
+            | GroupRole::KeccakC
+            | GroupRole::KeccakCPrime => panic!("a round-1 group"),
         }
     }
 
@@ -1978,7 +1982,10 @@ pub fn lookup_stacks<'a>(
         lanes.push(&main.wide()[start..end]);
         start = end;
     }
-    lanes.extend([bridge.carries(1), bridge.carries(2), bridge.carries(3), &bridge.projection().stacked]);
+    if manifest.hash_field() == crate::manifest::HashField::Gf2 {
+        lanes.extend([bridge.carries(1), bridge.carries(2), bridge.carries(3)]);
+    }
+    lanes.push(&bridge.projection().stacked);
     shape
         .stacks
         .iter()

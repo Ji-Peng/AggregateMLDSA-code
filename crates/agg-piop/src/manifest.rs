@@ -49,7 +49,10 @@
 use agg_pcs_config::catalogs::{
     BatchLayout, Family, Group, Set, MULTIPLICITY_DIGITS, TABLE_VARS,
 };
-pub use agg_pcs_config::catalogs::{Relation, RELATION_HU, RELATION_H_EXACT, RELATION_H_FIPS};
+pub use agg_pcs_config::catalogs::{
+    HashField, Relation, GROUP_COUNT_FP, KECCAK_GROUP_COUNT, RELATION_HU, RELATION_H_EXACT,
+    RELATION_H_FIPS,
+};
 use agg_pcs_config::work_plan::{padded_size, PlanError, WorkPlan};
 use agg_witness::digits::{
     z_digit_slack_exact, Alphabet, BitSlackLayout, DigitLayout, SlackLayout, StepLayout, ValueForm, L_SLACK,
@@ -366,6 +369,32 @@ pub enum Column {
     /// layout (`agg_pcs_config::catalogs::Group::physical_vars`); no stage reads it and its
     /// opening claim is zero.
     Zero(u8),
+    /// Post-theta Keccak state lane `A'[x, y]` (`x, y in 0..5`) in slot group `q` (`0..Q`)
+    /// under `HashField::Fp`.
+    KeccakA {
+        /// Column coordinate `x in 0..5`.
+        x: u8,
+        /// Row coordinate `y in 0..5`.
+        y: u8,
+        /// Slot-group index `q in 0..Q`.
+        q: u8,
+    },
+    /// Pre-theta Keccak column parity `C[x]` (`x in 0..5`) in slot group `q` (`0..Q`)
+    /// under `HashField::Fp`.
+    KeccakC {
+        /// Column coordinate `x in 0..5`.
+        x: u8,
+        /// Slot-group index `q in 0..Q`.
+        q: u8,
+    },
+    /// Post-theta Keccak column parity `C'[x]` (`x in 0..5`) in slot group `q` (`0..Q`)
+    /// under `HashField::Fp`.
+    KeccakCPrime {
+        /// Column coordinate `x in 0..5`.
+        x: u8,
+        /// Slot-group index `q in 0..Q`.
+        q: u8,
+    },
 }
 
 impl Column {
@@ -515,7 +544,13 @@ impl Column {
     pub fn alphabet(self) -> Alphabet {
         match self {
             Self::Digit { value, digit, .. } => value.layout().alphabet(usize::from(digit)),
-            Self::W1Bit(..) | Self::Parity2(_) | Self::Fips(FipsColumn::Sign, _) | Self::Zero(_) => Alphabet::Bool,
+            Self::W1Bit(..)
+            | Self::Parity2(_)
+            | Self::Fips(FipsColumn::Sign, _)
+            | Self::Zero(_)
+            | Self::KeccakA { .. }
+            | Self::KeccakC { .. }
+            | Self::KeccakCPrime { .. } => Alphabet::Bool,
             Self::Fips(FipsColumn::Delta | FipsColumn::Wrap, _) => Alphabet::Ternary,
             Self::Multiplicity(_) => Alphabet::Balanced(16),
         }
@@ -526,7 +561,14 @@ impl Column {
     pub fn base(self) -> Option<u32> {
         match self {
             Self::Digit { value, digit, .. } => value.layout().base(usize::from(digit)),
-            Self::W1Bit(..) | Self::Parity2(_) | Self::Multiplicity(_) | Self::Fips(..) | Self::Zero(_) => None,
+            Self::W1Bit(..)
+            | Self::Parity2(_)
+            | Self::Multiplicity(_)
+            | Self::Fips(..)
+            | Self::Zero(_)
+            | Self::KeccakA { .. }
+            | Self::KeccakC { .. }
+            | Self::KeccakCPrime { .. } => None,
         }
     }
 
@@ -564,6 +606,9 @@ impl Column {
         match self {
             Self::Digit { value, digit, .. } => value.group(digit),
             Self::W1Bit(..) | Self::Fips(..) => Group::Main,
+            Self::KeccakA { y, .. } => Group::KeccakA(y),
+            Self::KeccakC { .. } => Group::KeccakC,
+            Self::KeccakCPrime { .. } => Group::KeccakCPrime,
             Self::Parity2(_) => Group::Level2,
             Self::Multiplicity(_) => Group::Mult,
             Self::Zero(_) => Group::Level3,
@@ -576,11 +621,13 @@ impl Column {
         matches!(self, Self::Zero(_))
     }
 
-    /// The domain the column lives on (the main domain for both main groups).
+    /// The domain the column lives on (the main domain for both main groups; `KeccakA(0)` for
+    /// all Keccak groups).
     #[must_use]
     pub const fn domain(self) -> GroupRole {
         match self.group() {
             Group::Main16 | Group::Main => Group::Main,
+            Group::KeccakA(_) | Group::KeccakC | Group::KeccakCPrime => Group::KeccakA(0),
             other => other,
         }
     }
@@ -628,6 +675,9 @@ impl Column {
             Self::Fips(FipsColumn::Delta, _) => "delta".to_owned(),
             Self::Fips(FipsColumn::Wrap, _) => "e".to_owned(),
             Self::Zero(k) => format!("zero_{k}"),
+            Self::KeccakA { x, y, q } => format!("keccak_a_{x}_{y}_{q}"),
+            Self::KeccakC { x, q } => format!("keccak_c_{x}_{q}"),
+            Self::KeccakCPrime { x, q } => format!("keccak_cp_{x}_{q}"),
         }
     }
 
@@ -723,6 +773,7 @@ pub fn group_columns(role: GroupRole, relation: Relation) -> Vec<Column> {
     let z = value_columns(z_value(relation));
     let u = value_columns(u_slot_value(relation));
     let fips = relation == Relation::HFips;
+    let slots = Group::keccak_slot_groups(Set::S44) as u8;
     match role {
         Group::Main16 => vec![z[0], u[0], Column::V_LO, Column::V_HI],
         Group::Main => [z[1], u[1]]
@@ -730,6 +781,15 @@ pub fn group_columns(role: GroupRole, relation: Relation) -> Vec<Column> {
             .chain(lanes.map(|t| Column::W1Bit(t, 0)))
             .chain(z[2..].iter().copied())
             .chain(FipsColumn::ALL.into_iter().map(|c| Column::Fips(c, 0)).filter(|_| fips))
+            .collect(),
+        Group::KeccakA(y) => (0..5_u8)
+            .flat_map(|x| (0..slots).map(move |q| Column::KeccakA { x, y, q }))
+            .collect(),
+        Group::KeccakC => (0..5_u8)
+            .flat_map(|x| (0..slots).map(move |q| Column::KeccakC { x, q }))
+            .collect(),
+        Group::KeccakCPrime => (0..5_u8)
+            .flat_map(|x| (0..slots).map(move |q| Column::KeccakCPrime { x, q }))
             .collect(),
         Group::Level1 => lanes.map(|t| Column::carry(1, t)).collect(),
         Group::Level2 => lanes
@@ -758,6 +818,8 @@ pub fn group_columns(role: GroupRole, relation: Relation) -> Vec<Column> {
 ///   columns `Z_lo, U_lo` are the first `l + k` polynomials of the stacked lane;
 /// * `G_main4`: `Z_mid^(s)`, `a_z^(s)`, `U_mid^(rho)`, `a_u^(rho)`, then the bits
 ///   `b_t^(rho)` bit-major (`t` outer, `rho` inner);
+/// * `KeccakA(y)`, `KeccakC`, `KeccakCPrime`: `x in 0..5` outer, `q in 0..Q` inner (`Q = 11` for
+///   ML-DSA-44 and ML-DSA-65, `14` for ML-DSA-87);
 /// * `G_1`: `kappa^(1)_t`; `G_2`: `y^(2)_t`, `kappa^(2)_t`; `G_3`: `kappa^(3)` and zero
 ///   polynomials up to `G_2`'s count; `G_k`: the five projection digits; `G_m` as for ML-DSA-44.
 ///
@@ -770,6 +832,25 @@ pub fn group_columns_for(set: Set, role: GroupRole, relation: Relation) -> Vec<C
         return group_columns(role, relation);
     }
     assert!(relation.is_available(set), "relation {relation} is not available for ML-DSA-{}", set.name());
+    let slots = Group::keccak_slot_groups(set) as u8;
+    match role {
+        Group::KeccakA(y) => {
+            return (0..5_u8)
+                .flat_map(|x| (0..slots).map(move |q| Column::KeccakA { x, y, q }))
+                .collect();
+        }
+        Group::KeccakC => {
+            return (0..5_u8)
+                .flat_map(|x| (0..slots).map(move |q| Column::KeccakC { x, q }))
+                .collect();
+        }
+        Group::KeccakCPrime => {
+            return (0..5_u8)
+                .flat_map(|x| (0..slots).map(move |q| Column::KeccakCPrime { x, q }))
+                .collect();
+        }
+        _ => {}
+    }
     let shape = SetShape::of(set);
     let family = |value: DigitValue, digit: u8, lanes: usize| {
         (0..lanes as u8).map(move |lane| Column::Digit { value, digit, lane })
@@ -807,6 +888,7 @@ pub fn group_columns_for(set: Set, role: GroupRole, relation: Relation) -> Vec<C
             .collect(),
         Group::Proj => value_columns(DigitValue::K5),
         Group::Mult => (0..MULTIPLICITY_DIGITS as u8).map(Column::Multiplicity).collect(),
+        Group::KeccakA(_) | Group::KeccakC | Group::KeccakCPrime => unreachable!(),
     }
 }
 
@@ -961,34 +1043,69 @@ pub struct CommitmentManifest {
     padded: usize,
     d_sig: usize,
     relation: Relation,
-    groups: [GroupDescriptor; GROUP_COUNT],
+    hash_field: HashField,
+    groups: Vec<GroupDescriptor>,
     catalog_row: String,
 }
 
 impl CommitmentManifest {
-    /// The manifest of a batch of `records` live records (`1 <= N <= 2^15`) under the
-    /// default relation H-u.
+    /// The `HashField::Gf2` manifest of a batch of `records` live records (`1 <= N <= 2^15`)
+    /// under the default relation H-u.
     pub fn for_batch(records: usize) -> Result<Self, PlanError> {
         Self::for_relation(records, Relation::default())
     }
 
-    /// The ML-DSA-44 manifest of a batch of `records` live records under `relation`.
+    /// The `HashField::Fp` manifest of a ML-DSA-44 batch of `records` live records under the
+    /// default relation H-u.
+    pub fn for_batch_fp(records: usize) -> Result<Self, PlanError> {
+        Self::for_relation_fp(records, Relation::default())
+    }
+
+    /// The `HashField::Gf2` ML-DSA-44 manifest of a batch of `records` live records under `relation`.
     pub fn for_relation(records: usize, relation: Relation) -> Result<Self, PlanError> {
         Self::for_set(Set::S44, records, relation)
     }
 
-    /// The manifest of a batch of `records` live records of parameter set `set` under
-    /// `relation`.
+    /// The `HashField::Fp` ML-DSA-44 manifest of a batch of `records` live records under `relation`.
+    pub fn for_relation_fp(records: usize, relation: Relation) -> Result<Self, PlanError> {
+        Self::for_set_fp(Set::S44, records, relation)
+    }
+
+    /// The `HashField::Gf2` manifest of a batch of `records` live records of parameter set
+    /// `set` under `relation`.
     pub fn for_set(set: Set, records: usize, relation: Relation) -> Result<Self, PlanError> {
+        Self::for_hash_field(set, records, relation, HashField::Gf2)
+    }
+
+    /// The `HashField::Fp` manifest of a batch of `records` live records of parameter set
+    /// `set` under `relation`.
+    pub fn for_set_fp(set: Set, records: usize, relation: Relation) -> Result<Self, PlanError> {
+        Self::for_hash_field(set, records, relation, HashField::Fp)
+    }
+
+    /// The manifest of a batch of `records` live records of parameter set `set` under
+    /// `relation` and `hash_field`.
+    pub fn for_hash_field(
+        set: Set,
+        records: usize,
+        relation: Relation,
+        hash_field: HashField,
+    ) -> Result<Self, PlanError> {
         let (padded, d_sig) = padded_size(records)?;
-        let layout = BatchLayout::new(set, d_sig, relation).ok_or(PlanError::NotInCatalog { d_sig, relation })?;
+        let layout = BatchLayout::for_hash_field(set, d_sig, relation, hash_field)
+            .ok_or(PlanError::NotInCatalog { d_sig, relation })?;
         Ok(Self {
             set,
             records,
             padded,
             d_sig,
             relation,
-            groups: Group::ALL.map(|role| GroupDescriptor::new(role, set, d_sig, relation)),
+            hash_field,
+            groups: hash_field
+                .groups()
+                .iter()
+                .map(|&role| GroupDescriptor::new(role, set, d_sig, relation))
+                .collect(),
             catalog_row: layout.row_name(),
         })
     }
@@ -997,6 +1114,12 @@ impl CommitmentManifest {
     #[must_use]
     pub const fn set(&self) -> Set {
         self.set
+    }
+
+    /// The field in which the commitment hash is proven (`Gf2` or `Fp`).
+    #[must_use]
+    pub const fn hash_field(&self) -> HashField {
+        self.hash_field
     }
 
     /// The dimensions of the parameter set.
@@ -1020,7 +1143,7 @@ impl CommitmentManifest {
 
     /// Cells of one main-domain polynomial per signature (`2^(d_main - d_sig)`).
     #[must_use]
-    pub const fn lane_cells(&self) -> usize {
+    pub fn lane_cells(&self) -> usize {
         1 << (self.d_main() - self.d_sig)
     }
 
@@ -1050,8 +1173,14 @@ impl CommitmentManifest {
 
     /// `d_main = 8 + d_vec + d_sig` (`10 + d_sig` for ML-DSA-44).
     #[must_use]
-    pub const fn d_main(&self) -> usize {
-        self.groups[Group::Main.index()].logical_vars
+    pub fn d_main(&self) -> usize {
+        self.group(Group::Main).logical_vars
+    }
+
+    /// `d_K = 10 + d_sig`, the logical variable count of the Keccak domain.
+    #[must_use]
+    pub const fn d_keccak(&self) -> usize {
+        agg_pcs_config::catalogs::D_POS + self.d_sig
     }
 
     /// Number of `2^13`-signature segments `S`.
@@ -1068,20 +1197,20 @@ impl CommitmentManifest {
 
     /// Every group in wire order.
     #[must_use]
-    pub const fn groups(&self) -> &[GroupDescriptor; GROUP_COUNT] {
+    pub fn groups(&self) -> &[GroupDescriptor] {
         &self.groups
     }
 
     /// The descriptor of `role`.
     #[must_use]
-    pub const fn group(&self, role: GroupRole) -> &GroupDescriptor {
-        &self.groups[role.index()]
+    pub fn group(&self, role: GroupRole) -> &GroupDescriptor {
+        &self.groups[role.index_in(self.hash_field)]
     }
 
     /// Logical variables of a domain (the main domain for both main groups).
     #[must_use]
-    pub const fn domain_vars(&self, domain: GroupRole) -> usize {
-        self.groups[domain.index()].logical_vars
+    pub fn domain_vars(&self, domain: GroupRole) -> usize {
+        self.group(domain).logical_vars
     }
 
     /// `(group, position)` of a column.
@@ -1165,13 +1294,30 @@ impl CommitmentManifest {
     /// The looked-up columns of lookup stack `stack` ([`stack_columns_for`]).
     #[must_use]
     pub fn stack_columns(&self, stack: usize) -> Vec<Column> {
-        stack_columns_for(self.set, stack, self.relation)
+        match self.hash_field {
+            HashField::Gf2 => stack_columns_for(self.set, stack, self.relation),
+            HashField::Fp => {
+                let main_stacks = self.main_stacks();
+                if stack < main_stacks {
+                    stack_columns_for(self.set, stack, self.relation)
+                } else if stack == main_stacks {
+                    value_columns(self.k_value())[..2].to_vec()
+                } else {
+                    panic!("{} lookup stacks under Fp", main_stacks + 1)
+                }
+            }
+        }
     }
 
     /// The domain of every lookup stack ([`stack_domains`]).
     #[must_use]
     pub fn stack_domains(&self) -> Vec<GroupRole> {
-        stack_domains(self.set)
+        match self.hash_field {
+            HashField::Gf2 => stack_domains(self.set),
+            HashField::Fp => std::iter::repeat_n(Group::Main, self.main_stacks())
+                .chain([Group::Proj])
+                .collect(),
+        }
     }
 
     /// The number of main-domain lookup stacks (1 for ML-DSA-44, 3 for ML-DSA-65, 4 for
@@ -1181,9 +1327,10 @@ impl CommitmentManifest {
         main_stack_sizes(self.set).len()
     }
 
-    /// The lookup stack of the carries of level `level` (`1..=3`).
+    /// The lookup stack of the carries of level `level` (`1..=3`, `HashField::Gf2` only).
     #[must_use]
     pub fn carry_stack(&self, level: usize) -> usize {
+        assert_eq!(self.hash_field, HashField::Gf2, "no bridge carry stacks under Fp");
         assert!((1..=3).contains(&level), "levels 1 to 3");
         self.main_stacks() + level - 1
     }
@@ -1191,7 +1338,10 @@ impl CommitmentManifest {
     /// The lookup stack `[K_0 | K_1]` of the projection digits (the last one).
     #[must_use]
     pub fn proj_stack(&self) -> usize {
-        self.main_stacks() + 3
+        match self.hash_field {
+            HashField::Gf2 => self.main_stacks() + 3,
+            HashField::Fp => self.main_stacks(),
+        }
     }
 
     /// The leaf-checked digits in the order of the leaf and link instances: `Z_hi` (base 4),
@@ -1227,9 +1377,10 @@ impl CommitmentManifest {
             .sum()
     }
 
-    /// The public shape of the lookup: the five stacks
+    /// The public shape of the lookup: under `Gf2` the five stacks
     /// `[Z_lo | U_lo]` on the main domain, `kappa^(1)` (6 columns in 8 slots) on `D_1`,
-    /// `kappa^(2)` on `D_2`, `kappa^(3)` on `D_3`, `[K_0 | K_1]` on `D_k`, one table `T_16`, two
+    /// `kappa^(2)` on `D_2`, `kappa^(3)` on `D_3`, `[K_0 | K_1]` on `D_k`; under `Fp` the
+    /// main-domain stack(s) `[Z_lo | U_lo]` and `[K_0 | K_1]`; one table `T_16`, two
     /// challenges.
     #[must_use]
     pub fn lookup_shape(&self) -> LookupShape {
@@ -1274,6 +1425,8 @@ impl CommitmentManifest {
     pub fn matches_plan(&self, plan: &WorkPlan) -> bool {
         plan.records == self.records
             && plan.padded == self.padded
+            && plan.hash_field() == self.hash_field
+            && plan.groups().len() == self.groups.len()
             && self.groups.iter().all(|group| {
                 let profile = plan.profile(group.role).group;
                 plan.logical_vars(group.role) == group.logical_vars
@@ -1289,14 +1442,15 @@ impl CommitmentManifest {
     ///
     /// `LE16` wire version, parameter-set byte (`0x44`, `0x65`, `0x87`), relation byte ([`Relation::id`],
     /// `0` = H-u, `1` = H-exact, `2` = H-FIPS), `LE64` `N`, `LE64` `N*`, digit layout id
-    /// ([`DIGIT_LAYOUT_ID`] = 2, the lookup layout with the projected quotient), group count;
-    /// per group: role, round, family (0 = width 4, 1 = width 16), logical and physical
-    /// variable counts, polynomial count and one alphabet byte per polynomial
-    /// ([`Column::alphabet_code`]); the catalog row id (`LE16` length, ASCII); the bridge
-    /// parameters `(J_t, m_t, k_t)` of levels 1 to 3 (`LE64`, `LE64`, `U8`); the lookup layout:
-    /// challenge count, table count, one width byte per table, stack count, and per stack the
-    /// column count, variables, table and storage shift (`U8, U8, U8, LE32`). The
-    /// public-record digest and the Flock profile id complete the instance record elsewhere.
+    /// ([`DIGIT_LAYOUT_ID`] = 2, the lookup layout with the projected quotient), group count
+    /// (`7` under `Gf2`, `11` under `Fp`); per group: role, round, family (0 = width 4, 1 =
+    /// width 16), logical and physical variable counts, polynomial count and one alphabet byte
+    /// per polynomial ([`Column::alphabet_code`]); the catalog row id (`LE16` length, ASCII);
+    /// under `Gf2` only, the bridge parameters `(J_t, m_t, k_t)` of levels 1 to 3 (`LE64`,
+    /// `LE64`, `U8`); the lookup layout: challenge count, table count, one width byte per
+    /// table, stack count, and per stack the column count, variables, table and storage shift
+    /// (`U8, U8, U8, LE32`). The public-record digest and the Keccak-side profile id complete
+    /// the instance record elsewhere.
     #[must_use]
     pub fn binding_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(160);
@@ -1306,7 +1460,7 @@ impl CommitmentManifest {
         bytes.extend_from_slice(&(self.records as u64).to_le_bytes());
         bytes.extend_from_slice(&(self.padded as u64).to_le_bytes());
         bytes.push(DIGIT_LAYOUT_ID);
-        bytes.push(GROUP_COUNT as u8);
+        bytes.push(self.groups.len() as u8);
         for group in &self.groups {
             bytes.push(role_id(group.role));
             bytes.push(group.round);
@@ -1318,12 +1472,14 @@ impl CommitmentManifest {
         }
         bytes.extend_from_slice(&(self.catalog_row.len() as u16).to_le_bytes());
         bytes.extend_from_slice(self.catalog_row.as_bytes());
-        // The bridge shape (J_t, m_t, k_t); this wire version admits the set's production
-        // shape only.
-        for level in &agg_bridge::Shape::production(self.set).levels {
-            bytes.extend_from_slice(&(level.cols as u64).to_le_bytes());
-            bytes.extend_from_slice(&(level.rows as u64).to_le_bytes());
-            bytes.push(level.k as u8);
+        if self.hash_field == HashField::Gf2 {
+            // The bridge shape (J_t, m_t, k_t); this wire version admits the set's production
+            // shape only. Under Fp there is no bridge and this field is omitted.
+            for level in &agg_bridge::Shape::production(self.set).levels {
+                bytes.extend_from_slice(&(level.cols as u64).to_le_bytes());
+                bytes.extend_from_slice(&(level.rows as u64).to_le_bytes());
+                bytes.push(level.k as u8);
+            }
         }
         let lookup = self.lookup_shape();
         bytes.push(lookup.challenges as u8);
@@ -1986,5 +2142,112 @@ mod tests {
         assert_ne!(single.binding_bytes(), minimum.binding_bytes());
         assert!(CommitmentManifest::for_batch(0).is_err());
         assert!(CommitmentManifest::for_batch((1 << 15) + 1).is_err());
+    }
+
+    #[test]
+    fn gf2_ml_dsa_44_hu_1024_binding_bytes_match_frozen_vector() {
+        const FROZEN_HEX: &str = concat!(
+            "04004400000400000000000000040000000000000207",
+            "00010114140490901010",
+            "0101001414080406000000000000",
+            "0202010e0e06909090909090",
+            "0302010d0d0c000000000000909090909090",
+            "0402010c0d0c900808080808080808080808",
+            "05020111110490900808",
+            "06020010100750505050505050",
+            "22006d6c6473612d34342d7031362d62617463682d313032342d6d756c742d66696e616c",
+            "000008000000000000200000000000000e",
+            "000008000000000000200000000000000e",
+            "00c0000000000000001000000000000012",
+            "02011005",
+            "02140000800000",
+            "060e0000800000",
+            "060d0000800000",
+            "010c0000800000",
+            "02110000800000",
+        );
+        let manifest = CommitmentManifest::for_batch(1024).unwrap();
+        assert_eq!(manifest.hash_field(), HashField::Gf2);
+        let hex: String = manifest.binding_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, FROZEN_HEX);
+    }
+
+    #[test]
+    fn fp_manifest_groups_columns_and_binding_bytes() {
+        let manifest = CommitmentManifest::for_batch_fp(1024).unwrap();
+        assert_eq!(manifest.hash_field(), HashField::Fp);
+        assert_eq!(manifest.groups().len(), GROUP_COUNT_FP);
+        assert_eq!(manifest.catalog_row(), "mldsa-44-p16-fp-batch-1024-mult-final");
+        let counts: Vec<usize> = manifest
+            .groups()
+            .iter()
+            .map(GroupDescriptor::polynomial_count)
+            .collect();
+        assert_eq!(counts, [4, 8, 55, 55, 55, 55, 55, 55, 55, 4, 7]);
+        assert_eq!(manifest.total_polynomials(), 408);
+        assert_eq!(manifest.stage3_polynomials(), 401);
+
+        // Keccak columns: alphabet Bool, code 0, locate and group round-trip.
+        for y in 0..5_u8 {
+            let group = manifest.group(Group::KeccakA(y));
+            assert_eq!(group.round, 1);
+            assert_eq!(group.family, PcsFamily::Width4);
+            assert_eq!(group.logical_vars, 20);
+            assert_eq!(group.physical_vars, 20);
+            assert_eq!(group.columns.len(), 55);
+            for x in 0..5_u8 {
+                for q in 0..11_u8 {
+                    let col = Column::KeccakA { x, y, q };
+                    assert_eq!(col.alphabet(), Alphabet::Bool);
+                    assert_eq!(col.alphabet_code(), 0);
+                    assert_eq!(col.group(), Group::KeccakA(y));
+                    assert_eq!(
+                        manifest.locate(col),
+                        (Group::KeccakA(y), usize::from(x) * 11 + usize::from(q))
+                    );
+                }
+            }
+        }
+        for x in 0..5_u8 {
+            for q in 0..11_u8 {
+                let c = Column::KeccakC { x, q };
+                let cp = Column::KeccakCPrime { x, q };
+                assert_eq!((c.alphabet_code(), cp.alphabet_code()), (0, 0));
+                assert_eq!(
+                    manifest.locate(c),
+                    (Group::KeccakC, usize::from(x) * 11 + usize::from(q))
+                );
+                assert_eq!(
+                    manifest.locate(cp),
+                    (Group::KeccakCPrime, usize::from(x) * 11 + usize::from(q))
+                );
+            }
+        }
+
+        // Lookup shape under Fp for ML-DSA-44: two stacks ([Z_lo | U_lo], [K_0 | K_1]).
+        let lookup = manifest.lookup_shape();
+        assert_eq!(lookup.stacks.len(), 2);
+        assert_eq!(manifest.stack_columns(0), [Column::Z_LO, Column::U_LO]);
+        assert_eq!(manifest.stack_columns(1), [Column::K_0, Column::K_1]);
+        assert_eq!((lookup.stacks[0].columns, lookup.stacks[0].vars), (2, 20));
+        assert_eq!((lookup.stacks[1].columns, lookup.stacks[1].vars), (2, 17));
+
+        // Binding bytes under Fp: group count 11, no bridge parameters, Fp row id, 2 stacks.
+        let bytes = manifest.binding_bytes();
+        assert_eq!(bytes[21], GROUP_COUNT_FP as u8);
+        let row = manifest.catalog_row().len();
+        let expected_len = 22 + GROUP_COUNT_FP * 6 + 408 + 2 + row + 3 + 1 + 2 * 7;
+        assert_eq!(bytes.len(), expected_len);
+        // Lookup trailer at the end: challenges 2, 1 table of width 16, 2 stacks.
+        let trailer = &bytes[bytes.len() - (4 + 2 * 7)..];
+        assert_eq!(&trailer[..4], &[2, 1, 16, 2]);
+        assert_eq!(&trailer[4..11], &[2, 20, 0, 0x00, 0x80, 0x00, 0x00]);
+        assert_eq!(&trailer[11..18], &[2, 17, 0, 0x00, 0x80, 0x00, 0x00]);
+
+        // ML-DSA-87 under Fp: 70 polynomials per Keccak group (Q = 14).
+        let m87 = CommitmentManifest::for_set_fp(Set::S87, 1024, Relation::Hu).unwrap();
+        assert_eq!(m87.group(Group::KeccakA(0)).polynomial_count(), 70);
+        assert_eq!(m87.group(Group::KeccakA(0)).logical_vars, 20);
+        assert_eq!(m87.catalog_row(), "mldsa-87-p16-fp-batch-1024-mult-final");
     }
 }

@@ -12,7 +12,7 @@
 use agg_witness::params::C_TILDE_BYTES;
 use rayon::prelude::*;
 
-use crate::manifest::CommitmentManifest;
+use crate::manifest::{CommitmentManifest, HashField};
 use crate::transcript::cshake256;
 
 /// Leaf block size.
@@ -20,7 +20,7 @@ pub const BINDING_BLOCK_BYTES: usize = 16 * 1024;
 const LEAF_CUSTOMIZATION: &[u8] = b"agg-mldsa/v1/record-leaf";
 const BINDING_CUSTOMIZATION: &[u8] = b"agg-mldsa/v1/public-records-binding";
 
-/// Flock profile ids bound in the instance record.
+/// Keccak-side profile ids bound in the instance record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FlockProfile {
@@ -36,6 +36,8 @@ pub enum FlockProfile {
     /// Ligerito `Slim8` (rate 1/8 at level 0 with `Slim`'s accounting, a parameter set the
     /// vendored Flock core derives and validates with its own analysis).
     Slim8 = 5,
+    /// Prime-field (`F_p`) Keccak zero-check argument (`HashField::Fp` only).
+    FpKeccak = 6,
 }
 
 impl FlockProfile {
@@ -48,8 +50,37 @@ impl FlockProfile {
             3 => Some(Self::PublicBits),
             4 => Some(Self::Slim),
             5 => Some(Self::Slim8),
+            6 => Some(Self::FpKeccak),
             _ => None,
         }
+    }
+
+    /// From the wire byte, accepted only when it matches `hash_field` (`6` under `Fp`,
+    /// `0 | 1 | 3 | 4 | 5` under `Gf2`).
+    #[must_use]
+    pub fn from_id_for(id: u8, hash_field: HashField) -> Option<Self> {
+        Self::from_id(id).filter(|profile| profile.matches_hash_field(hash_field))
+    }
+
+    /// The hash field this profile belongs to (`HashField::Fp` for `FpKeccak`,
+    /// `HashField::Gf2` for every other profile).
+    #[must_use]
+    pub const fn hash_field(self) -> HashField {
+        match self {
+            Self::FpKeccak => HashField::Fp,
+            Self::None | Self::Fast | Self::PublicBits | Self::Slim | Self::Slim8 => {
+                HashField::Gf2
+            }
+        }
+    }
+
+    /// True when this profile is valid under `hash_field`.
+    #[must_use]
+    pub const fn matches_hash_field(self, hash_field: HashField) -> bool {
+        matches!(
+            (self.hash_field(), hash_field),
+            (HashField::Gf2, HashField::Gf2) | (HashField::Fp, HashField::Fp)
+        )
     }
 
     /// Mode A: the hash relation is proved by Flock sub-proofs (`Fast`, `Slim` or `Slim8`),
@@ -126,7 +157,11 @@ pub fn public_records_binding<C: AsRef<[u8]> + Sync>(records: &[(&[u8], &[u8], C
 }
 
 /// The canonical instance record: the manifest bytes, the public-record digest,
-/// the Flock profile id and the plan digest.
+/// the Keccak-side profile id and the plan digest.
+///
+/// # Panics
+/// If `flock` does not match `manifest.hash_field()` (`FlockProfile::FpKeccak` is
+/// accepted only under `HashField::Fp`, and the `Gf2` profiles only under `HashField::Gf2`).
 #[must_use]
 pub fn instance_record(
     manifest: &CommitmentManifest,
@@ -134,6 +169,11 @@ pub fn instance_record(
     flock: FlockProfile,
     plan_digest: &[u8; 32],
 ) -> Vec<u8> {
+    assert!(
+        flock.matches_hash_field(manifest.hash_field()),
+        "Keccak-side profile {flock:?} is not accepted under hash field {:?}",
+        manifest.hash_field(),
+    );
     let mut record = manifest.binding_bytes();
     record.extend_from_slice(record_digest);
     record.push(flock as u8);
@@ -187,13 +227,34 @@ mod tests {
         assert_eq!(FlockProfile::from_id(3), Some(FlockProfile::PublicBits));
         assert_eq!(FlockProfile::from_id(4), Some(FlockProfile::Slim));
         assert_eq!(FlockProfile::from_id(5), Some(FlockProfile::Slim8));
-        assert_eq!(FlockProfile::from_id(6), None);
-        let mode_a: Vec<u8> = (0..6)
+        assert_eq!(FlockProfile::from_id(6), Some(FlockProfile::FpKeccak));
+        assert_eq!(FlockProfile::from_id(7), None);
+        assert_eq!(FlockProfile::from_id_for(6, HashField::Gf2), None);
+        assert_eq!(FlockProfile::from_id_for(6, HashField::Fp), Some(FlockProfile::FpKeccak));
+        assert_eq!(FlockProfile::from_id_for(1, HashField::Fp), None);
+        let fp_manifest = CommitmentManifest::for_batch_fp(13).unwrap();
+        let fp_record = instance_record(&fp_manifest, &digest, FlockProfile::FpKeccak, &[9; 32]);
+        assert_eq!(fp_record[fp_record.len() - 33], 6);
+        let mode_a: Vec<u8> = (0..7)
             .filter(|&id| FlockProfile::from_id(id).is_some_and(FlockProfile::is_mode_a))
             .collect();
         assert_eq!(mode_a, [1, 4, 5]);
-        for id in [0, 1, 3, 4, 5] {
+        for id in [0, 1, 3, 4, 5, 6] {
             assert_eq!(FlockProfile::from_id(id).unwrap() as u8, id);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "not accepted under hash field Gf2")]
+    fn instance_record_rejects_fp_keccak_on_gf2_manifest() {
+        let manifest = CommitmentManifest::for_batch(8).unwrap();
+        let _ = instance_record(&manifest, &[0; 32], FlockProfile::FpKeccak, &[0; 32]);
+    }
+
+    #[test]
+    #[should_panic(expected = "not accepted under hash field Fp")]
+    fn instance_record_rejects_gf2_profile_on_fp_manifest() {
+        let manifest = CommitmentManifest::for_batch_fp(8).unwrap();
+        let _ = instance_record(&manifest, &[0; 32], FlockProfile::Fast, &[0; 32]);
     }
 }

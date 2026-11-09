@@ -101,6 +101,18 @@ The instance record of event 0 (`binding::instance_record`) is these bytes follo
 into 16-KiB blocks, each hashed by cSHAKE256 under `agg-mldsa/v1/record-leaf`, and the root
 is cSHAKE256 of `LE64(blocks) || leaves` under `agg-mldsa/v1/public-records-binding`.
 
+Under `HashField::Fp` (`CommitmentManifest::for_set_fp`, `CommitmentManifest::hash_field`),
+the manifest has 11 groups (`G_main16`, `G_main4`, `KeccakA(0..4)`, `KeccakC`,
+`KeccakCPrime`, `G_k`, `G_m`; no `G_1, G_2, G_3`) with Boolean columns
+`Column::KeccakA { x, y, q }`, `Column::KeccakC { x, q }` and
+`Column::KeccakCPrime { x, q }` (alphabet code 0, ordered by `x in 0..5` then `q in 0..Q`).
+In `CommitmentManifest::binding_bytes` the group count is 11, the catalog row id is
+`mldsa-<set>-p16{,x,f}-fp-batch-<N*>-mult-final`, the bridge-parameter field is omitted,
+and the lookup layout has only the main-domain stack(s) (`[Z_lo | U_lo]` for ML-DSA-44) and
+`[K_0 | K_1]`. `binding::instance_record` accepts Keccak-side profile id `6`
+(`FlockProfile::FpKeccak`) only under `HashField::Fp`, and `pcs::TableCommitter` bounds
+concurrent Keccak group commits by `AGG_COMMIT_PARALLEL` (default 2).
+
 ## 3. Commit flow
 
 1. `MainTables::build(manifest, instance, sigs)` (strict derivation) or `from_values`; both

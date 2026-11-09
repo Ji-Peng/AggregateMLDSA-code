@@ -25,6 +25,7 @@ test-hooks = []
 agg-simd = { workspace = true }
 agg-witness = { workspace = true }
 agg-pcs-config = { workspace = true }
+agg-fpkeccak = { workspace = true }
 agg-bridge = { workspace = true }
 agg-mldsa-simd = { workspace = true }
 flock-core = { workspace = true }

@@ -231,6 +231,7 @@ dependencies = [
  "aerie-prover",
  "aerie-simd",
  "agg-bridge",
+ "agg-fpkeccak",
  "agg-mldsa-simd",
  "agg-pcs-config",
  "agg-piop",

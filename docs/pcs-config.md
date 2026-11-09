@@ -114,6 +114,15 @@ table point.
 `13 + max(0, d_sig - 9)`.) Polynomial counts: `G_main16` 4, `G_main4` 8, `G_1` 6, `G_2` 12
 (6 parities + 6 carries), `G_3` 1, `G_m` 7; 38 in total (67 in the base-16 layout).
 
+Under the prime-field commitment-hash mode (`catalogs::HashField::Fp`,
+`BatchLayout::new_fp`, `WorkPlan::for_set_fp`), the bridge groups `G_1, G_2, G_3` are
+replaced by seven round-1 width-4 Keccak groups (`Group::KeccakA(0..4)`, `Group::KeccakC`,
+`Group::KeccakCPrime`, `GROUP_COUNT_FP = 11` in wire order `G_main16, G_main4,
+KeccakA[0..4], KeccakC, KeccakCPrime, G_k, G_m`). Every Keccak group has layout `(d_K =
+10 + d_sig, 5 Q)` with `Q = 11` (`55` polynomials, ML-DSA-44 and ML-DSA-65) or `Q = 14`
+(`70` polynomials, ML-DSA-87), and the grouped catalog rows are named
+`mldsa-<set>-p16{,x,f}-fp-batch-<N*>-mult-final` (`CATALOG_D_SIG_FP`).
+
 ## 4. Catalog status
 
 All thirteen batch sizes of the wire version, `N* = 2^3` to `2^15`, are ready for the three

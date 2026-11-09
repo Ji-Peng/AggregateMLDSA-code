@@ -301,7 +301,7 @@ impl Stage3Claims {
     /// Offset of a group's values.
     #[must_use]
     pub fn group_offset(manifest: &CommitmentManifest, role: GroupRole) -> usize {
-        manifest.groups()[..role.index()]
+        manifest.groups()[..role.index_in(manifest.hash_field())]
             .iter()
             .map(|g| g.claimed_count())
             .sum()

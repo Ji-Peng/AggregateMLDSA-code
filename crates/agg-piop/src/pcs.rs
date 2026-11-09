@@ -18,7 +18,9 @@ use akita_error::AkitaError;
 use akita_pcs::DensePoly;
 use rayon::prelude::*;
 
-use crate::manifest::{CommitmentManifest, GroupRole, GROUP_COUNT};
+use crate::manifest::{
+    CommitmentManifest, GroupRole, GROUP_COUNT, GROUP_COUNT_FP, KECCAK_GROUP_COUNT,
+};
 use crate::source_tables::{BridgeGroupTables, Cells, MainTables, SourceTables};
 use crate::{BaseField, OpeningField};
 
@@ -115,8 +117,8 @@ pub fn group_polynomials(
         .collect()
 }
 
-/// The group points: every group but `G_m` at the suffix of the main-domain point `r3`,
-/// `G_m` at the lookup's table point `pi_m`.
+/// The group points under `HashField::Gf2`: every group but `G_m` at the suffix of the
+/// main-domain point `r3`, `G_m` at the lookup's table point `pi_m`.
 pub fn group_points(
     manifest: &CommitmentManifest,
     r3: &[OpeningField],
@@ -128,8 +130,34 @@ pub fn group_points(
     if pi_m.len() != manifest.group(GroupRole::Mult).logical_vars {
         return Err(PcsError::PointShape(GroupRole::Mult));
     }
-    Ok(manifest.groups().clone().map(|group| {
-        if group.role == GroupRole::Mult {
+    Ok(GroupRole::ALL.map(|role| {
+        let group = manifest.group(role);
+        if role == GroupRole::Mult {
+            pi_m.to_vec()
+        } else {
+            r3[r3.len() - group.logical_vars..].to_vec()
+        }
+    }))
+}
+
+/// The group points under `HashField::Fp`: every group but `G_m` at the suffix of the
+/// stage-3 point `r3` (`d_stage = max(d_main, d_K)` coordinates), `G_m` at the lookup's
+/// table point `pi_m`.
+pub fn group_points_fp(
+    manifest: &CommitmentManifest,
+    r3: &[OpeningField],
+    pi_m: &[OpeningField],
+) -> Result<[Vec<OpeningField>; GROUP_COUNT_FP], PcsError> {
+    let d_stage = manifest.d_main().max(manifest.d_keccak());
+    if r3.len() != d_stage {
+        return Err(PcsError::PointShape(GroupRole::Main));
+    }
+    if pi_m.len() != manifest.group(GroupRole::Mult).logical_vars {
+        return Err(PcsError::PointShape(GroupRole::Mult));
+    }
+    Ok(GroupRole::ALL_FP.map(|role| {
+        let group = manifest.group(role);
+        if role == GroupRole::Mult {
             pi_m.to_vec()
         } else {
             r3[r3.len() - group.logical_vars..].to_vec()
@@ -183,6 +211,59 @@ pub(crate) fn join_os_thread<T>(handle: std::thread::ScopedJoinHandle<'_, T>) ->
         .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
 }
 
+/// Default concurrency cap for committing the seven `HashField::Fp` Keccak groups.
+pub const DEFAULT_COMMIT_PARALLEL: usize = 2;
+
+/// Maximum number of Keccak groups committed concurrently (`AGG_COMMIT_PARALLEL`,
+/// default [`DEFAULT_COMMIT_PARALLEL`], at least 1).
+#[must_use]
+pub fn commit_parallel_limit() -> usize {
+    std::env::var("AGG_COMMIT_PARALLEL")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_COMMIT_PARALLEL)
+        .max(1)
+}
+
+/// Run up to `limit` Akita commits concurrently on scoped OS threads, never as rayon jobs.
+fn bounded_concurrent_commits<const K: usize>(
+    limit: usize,
+    commits: [&(dyn Fn() -> Result<GroupCommitment, PcsError> + Sync); K],
+) -> [Result<GroupCommitment, PcsError>; K] {
+    if on_calling_thread() || limit <= 1 || K <= 1 {
+        return commits.map(|commit| commit());
+    }
+    let workers = limit.min(K);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: [std::sync::OnceLock<Result<GroupCommitment, PcsError>>; K] =
+        std::array::from_fn(|_| std::sync::OnceLock::new());
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let next_ref = &next;
+            let slots_ref = &slots;
+            let commits_ref = &commits;
+            handles.push(
+                std::thread::Builder::new()
+                    .name("akita-commit".into())
+                    .stack_size(COMMIT_THREAD_STACK)
+                    .spawn_scoped(scope, move || loop {
+                        let idx = next_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if idx >= K {
+                            break;
+                        }
+                        let _ = slots_ref[idx].set(commits_ref[idx]());
+                    })
+                    .expect("spawn a commit thread"),
+            );
+        }
+        for handle in handles {
+            join_os_thread(handle);
+        }
+    });
+    slots.map(| mut slot| slot.take().expect("every commit slot filled"))
+}
+
 /// Run Akita commits concurrently, each on its own scoped OS thread, never as rayon jobs.
 ///
 /// Akita's CPU backend builds its NTT slots lazily inside `OnceLock::get_or_init` with
@@ -196,19 +277,7 @@ pub(crate) fn join_os_thread<T>(handle: std::thread::ScopedJoinHandle<'_, T>) ->
 fn concurrent_commits<const K: usize>(
     commits: [&(dyn Fn() -> Result<GroupCommitment, PcsError> + Sync); K],
 ) -> [Result<GroupCommitment, PcsError>; K] {
-    if on_calling_thread() {
-        return commits.map(|commit| commit());
-    }
-    std::thread::scope(|scope| {
-        let handles = commits.map(|commit| {
-            std::thread::Builder::new()
-                .name("akita-commit".into())
-                .stack_size(COMMIT_THREAD_STACK)
-                .spawn_scoped(scope, commit)
-                .expect("spawn a commit thread")
-        });
-        handles.map(join_os_thread)
-    })
+    bounded_concurrent_commits(K, commits)
 }
 
 /// Run `first` on the calling thread and `second` concurrently with it; return both
@@ -254,7 +323,12 @@ pub struct TableCommitter {
 impl TableCommitter {
     /// Plan the batch of `manifest` and allocate the seed-derived setup.
     pub fn new(manifest: CommitmentManifest) -> Result<Self, PcsError> {
-        let plan = WorkPlan::for_set(manifest.set(), manifest.records(), manifest.relation())?;
+        let plan = WorkPlan::for_hash_field(
+            manifest.set(),
+            manifest.records(),
+            manifest.relation(),
+            manifest.hash_field(),
+        )?;
         if !manifest.matches_plan(&plan) {
             return Err(PcsError::ManifestMismatch);
         }
@@ -284,6 +358,15 @@ impl TableCommitter {
     pub fn warm(&self) -> Result<(), PcsError> {
         self.prover.prewarm_groups()?;
         Ok(())
+    }
+
+    /// Commit one group's logical `Cells` columns under its work-plan profile.
+    pub fn commit_group_cells(
+        &self,
+        role: GroupRole,
+        columns: &[Cells<'_>],
+    ) -> Result<GroupCommitment, PcsError> {
+        self.commit(role, columns)
     }
 
     fn commit(&self, role: GroupRole, columns: &[Cells<'_>]) -> Result<GroupCommitment, PcsError> {
@@ -330,6 +413,53 @@ impl TableCommitter {
         Ok([wide?, narrow?])
     }
 
+    /// Commit the seven `HashField::Fp` Keccak groups (`KeccakA(0..4)`, `KeccakC`,
+    /// `KeccakCPrime`) from the packed [`agg_fpkeccak::KeccakTables`], expanding and
+    /// committing at most `AGG_COMMIT_PARALLEL` (default 2) groups at a time.
+    pub fn commit_keccak(
+        &self,
+        keccak: &agg_fpkeccak::KeccakTables,
+    ) -> Result<[GroupCommitment; KECCAK_GROUP_COUNT], PcsError> {
+        let commit_one = |group_idx: usize| -> Result<GroupCommitment, PcsError> {
+            let role = GroupRole::KECCAK[group_idx];
+            let descriptor = self.manifest.group(role);
+            let cells_per_poly = descriptor.logical_cells();
+            let expanded = keccak.expand_i8(keccak.layout().group_poly_range(group_idx));
+            let columns: Vec<Cells<'_>> = expanded
+                .chunks_exact(cells_per_poly)
+                .map(Cells::Narrow)
+                .collect();
+            self.commit(role, &columns)
+        };
+        let [ka0, ka1, ka2, ka3, ka4, kc, kcp] = bounded_concurrent_commits(
+            commit_parallel_limit(),
+            [
+                &|| commit_one(0),
+                &|| commit_one(1),
+                &|| commit_one(2),
+                &|| commit_one(3),
+                &|| commit_one(4),
+                &|| commit_one(5),
+                &|| commit_one(6),
+            ],
+        );
+        Ok([ka0?, ka1?, ka2?, ka3?, ka4?, kc?, kcp?])
+    }
+
+    /// Round 2 under `HashField::Fp`: `G_k` (`GroupRole::Proj`) and `G_m` (`GroupRole::Mult`),
+    /// committed concurrently.
+    pub fn commit_round2_fp(
+        &self,
+        proj: &[Cells<'_>],
+        mult: &[Cells<'_>],
+    ) -> Result<[GroupCommitment; 2], PcsError> {
+        let [proj, mult] = concurrent_commits([
+            &|| self.commit(GroupRole::Proj, proj),
+            &|| self.commit(GroupRole::Mult, mult),
+        ]);
+        Ok([proj?, mult?])
+    }
+
     /// Round 2 (after the bridge seed): `G_1`, `G_2`, `G_3`, `G_k` and the final
     /// group `G_m`. The five commits are independent (the final group is committed against the
     /// precommitted profiles of the work plan, not against the other commitments), so they
@@ -362,13 +492,13 @@ impl TableCommitter {
         Ok((proof, claims))
     }
 
-    /// The batched opening of all seven groups for claims the caller already holds (the
-    /// prover's stage-3 terminal values and multiplicity-digit claims, which equal the
-    /// table evaluations).
+    /// The batched opening of all groups of the manifest for claims the caller already
+    /// holds (the prover's stage-3 terminal values and multiplicity-digit claims, which
+    /// equal the table evaluations).
     pub fn open_claims(
         &self,
-        commitments: [GroupCommitment; GROUP_COUNT],
-        claims: &[GroupClaim; GROUP_COUNT],
+        commitments: impl Into<Vec<GroupCommitment>>,
+        claims: &[GroupClaim],
         session: &[u8; 32],
     ) -> Result<Vec<u8>, PcsError> {
         let prepared = self.prepare_open_claims(commitments, claims)?;
@@ -379,9 +509,12 @@ impl TableCommitter {
     /// the opening points. It holds no transcript session.
     pub fn prepare_open_claims(
         &self,
-        commitments: [GroupCommitment; GROUP_COUNT],
-        claims: &[GroupClaim; GROUP_COUNT],
+        commitments: impl Into<Vec<GroupCommitment>>,
+        claims: &[GroupClaim],
     ) -> Result<PreparedOpening, PcsError> {
+        if claims.len() != self.manifest.groups().len() {
+            return Err(PcsError::PointShape(GroupRole::Mult));
+        }
         for (group, claim) in self.manifest.groups().iter().zip(claims) {
             if claim.point.len() != group.logical_vars {
                 return Err(PcsError::PointShape(group.role));
@@ -407,7 +540,12 @@ impl TableCommitter {
 
 /// The verifier of the batched opening, built from the public setup seed alone.
 pub fn verifier_for(manifest: &CommitmentManifest) -> Result<PcsVerifier, PcsError> {
-    let plan = WorkPlan::for_set(manifest.set(), manifest.records(), manifest.relation())?;
+    let plan = WorkPlan::for_hash_field(
+        manifest.set(),
+        manifest.records(),
+        manifest.relation(),
+        manifest.hash_field(),
+    )?;
     if !manifest.matches_plan(&plan) {
         return Err(PcsError::ManifestMismatch);
     }
