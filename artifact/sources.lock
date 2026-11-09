@@ -7,7 +7,7 @@
 [[source]]
 name = "ours"
 commit = "c1c7590ef7a4bbeff08c47b5015eb1f796b46bf9"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 role = "prover, verifier"
 in_repo = true
 path = "."

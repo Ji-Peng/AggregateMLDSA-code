@@ -307,3 +307,7 @@ cell both ways if timing claims matter. Use native runs for the `Reproduced`
 badge and Docker for `Functional`.
 
 Nix packaging (a flake with both Rust toolchains) is future work.
+
+## License
+
+Our code is under the MIT licence (`../LICENSE`); vendored dependencies keep their upstream licences (`sources.lock`).

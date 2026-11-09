@@ -108,4 +108,5 @@ do not verify with upstream Flock. The Akita patches touch the prover only.
 
 ## License
 
-MIT OR Apache-2.0.
+Our code is under the MIT licence ([`LICENSE`](LICENSE)). The vendored dependencies in
+`vendor/` (Akita, Flock) keep their upstream licences (MIT OR Apache-2.0).
