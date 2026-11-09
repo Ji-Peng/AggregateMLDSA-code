@@ -702,27 +702,79 @@ impl agg_simd::fused::RowSource for LevelRows<'_> {
                     std::slice::from_raw_parts_mut(c1 as *mut u64, n),
                 )
             };
-            let mut put = |i: usize, x: E| {
-                c0[i] = x.c0().to_canonical_u64();
-                c1[i] = x.c1().to_canonical_u64();
-            };
-            // One match per lane and block; the loops index the codes and tables directly.
-            match *reader {
-                Reader::Quartet { pairs, lut, space } => {
-                    for (i, p) in pairs[2 * row0..2 * row1].chunks_exact(2).enumerate() {
-                        put(i, lut[p[0] as usize * space + p[1] as usize]);
-                    }
-                }
-                Reader::Table(table) => {
-                    for (i, &x) in table[row0..row1].iter().enumerate() {
-                        put(i, x);
-                    }
-                }
-                other => {
-                    for i in 0..n {
-                        put(i, other.at(row0 + i));
-                    }
-                }
+            gather(reader, row0, row1, c0, c1);
+        }
+    }
+}
+
+/// Cells `row0..row1` of one lane at level 2 as canonical coordinate planes `c0`, `c1`.
+#[inline]
+fn gather(reader: &Reader<'_>, row0: usize, row1: usize, c0: &mut [u64], c1: &mut [u64]) {
+    // A pair table holds level-1 values: at level 2 its generic arm would return them
+    // without the second fold.
+    debug_assert!(!matches!(reader, Reader::Pair { .. }), "level-2 lanes are folded twice");
+    let mut put = |i: usize, x: E| {
+        c0[i] = x.c0().to_canonical_u64();
+        c1[i] = x.c1().to_canonical_u64();
+    };
+    // One match per lane and block; the loops index the codes and tables directly.
+    match *reader {
+        Reader::Quartet { pairs, lut, space } => {
+            for (i, p) in pairs[2 * row0..2 * row1].chunks_exact(2).enumerate() {
+                put(i, lut[p[0] as usize * space + p[1] as usize]);
+            }
+        }
+        Reader::Table(table) => {
+            for (i, &x) in table[row0..row1].iter().enumerate() {
+                put(i, x);
+            }
+        }
+        other => {
+            for i in 0..row1 - row0 {
+                put(i, other.at(row0 + i));
+            }
+        }
+    }
+}
+
+/// The level-2 rows of a group folded by the second-level challenge `r`: the level-3 rows,
+/// computed block by block instead of being stored. Row `i` of lane `l` is
+/// `v(2i) + r (v(2i + 1) - v(2i))` over the lane's level-2 values `v`.
+struct FoldedRows<'r> {
+    inner: LevelRows<'r>,
+    r: E,
+}
+
+/// Output rows per gather-and-fold step of [`FoldedRows`]: the two gathered planes
+/// (`2 · 2 · FOLD_CHUNK` words, 8 KiB) stay on the stack and in L1.
+const FOLD_CHUNK: usize = 256;
+
+impl agg_simd::fused::RowSource for FoldedRows<'_> {
+    fn width(&self) -> usize {
+        self.inner.readers.len()
+    }
+
+    fn rows(&self) -> usize {
+        self.inner.rows / 2
+    }
+
+    #[allow(unsafe_code)]
+    unsafe fn fill(&self, row0: usize, row1: usize, out: &[agg_simd::fused::OutLane]) {
+        assert_eq!(out.len(), self.inner.readers.len());
+        assert!(row0 <= row1 && 2 * row1 <= self.inner.rows);
+        let mut lo = [0_u64; 2 * FOLD_CHUNK];
+        let mut hi = [0_u64; 2 * FOLD_CHUNK];
+        for (reader, &(c0, c1)) in self.inner.readers.iter().zip(out) {
+            let mut a = row0;
+            while a < row1 {
+                let b = (a + FOLD_CHUNK).min(row1);
+                let n = b - a;
+                gather(reader, 2 * a, 2 * b, &mut lo[..2 * n], &mut hi[..2 * n]);
+                let at = 8 * (a - row0);
+                // SAFETY: the caller guarantees `row1 - row0` writable rows at `c0` and `c1`;
+                // rows `a - row0 .. b - row0` lie inside them and only this call writes them.
+                unsafe { agg_simd::fused::fold_rows(self.r, &[(&lo[..2 * n], &hi[..2 * n])], &[(c0 + at, c1 + at)], 0, n) };
+                a = b;
             }
         }
     }
@@ -771,8 +823,11 @@ pub struct Group<'a> {
     dense: Vec<E>,
     dense_stride: usize,
     dense_rows: usize,
-    /// The term lists of the plane path, until bind 2 builds the table.
+    /// The term lists of the plane path, until bind 3 builds the table.
     tail_terms: Option<TailTerms>,
+    /// The challenge of bind 2 on the plane path, until bind 3: the level-3 rows are the
+    /// level-2 states folded by it as they are read, and no level-3 table is stored.
+    tail_fold: Option<E>,
     /// The dense rounds on lane-major planes (plane layout only).
     tail: Option<Tail>,
     /// The coefficient slots of the plane tail, when the group runs on it (for traces).
@@ -1070,6 +1125,7 @@ impl<'a> Group<'a> {
             dense_rows: 0,
             tail_slots: tail_terms.as_ref().map(TailTerms::slot_count),
             tail_terms,
+            tail_fold: None,
             tail: None,
             arena: None,
             challenges: Vec::new(),
@@ -1176,8 +1232,9 @@ impl<'a> Group<'a> {
         // same polynomial as a direct evaluation).
         let level = self.level();
         // A group with plane-tail terms evaluates its rounds on the fused kernels from the
-        // third active round on: over the computed level-2 rows, then over its planes.
-        let on_planes = (level >= 3 && self.tail.is_some()) || (level == 2 && self.tail_terms.is_some());
+        // third active round on: over the computed level-2 and level-3 rows, then over its
+        // planes.
+        let on_planes = (level >= 3 && self.tail.is_some()) || ((2..=3).contains(&level) && self.tail_terms.is_some());
         let recovery = if level == 0 || on_planes { None } else { self.recovery() };
         let upper = recovery.is_some();
         let mut q = match level {
@@ -1219,7 +1276,7 @@ impl<'a> Group<'a> {
         message
     }
 
-    /// A round over the dense planes (or, at level 2, over the rows gathered from the
+    /// A round over the dense planes (or, at levels 2 and 3, over the rows gathered from the
     /// compact states): the coefficients of the inner polynomial `q`, the
     /// linear one from the evaluation at one, or from the running claim when the equality
     /// factor allows it.
@@ -1229,13 +1286,14 @@ impl<'a> Group<'a> {
         let [q0, at_one, q2] = if let Some(tail) = self.tail.as_mut() {
             tail.message(eq, full, self.plan.constant)
         } else {
-            // Level 2: the lanes' compact states are read block by block.
-            let source = LevelRows {
-                readers: (0..self.sources.len()).map(|l| self.reader(l)).collect(),
-                rows: 2 * self.pairs(),
-            };
+            // Levels 2 and 3: the lanes' compact states are read block by block (and folded
+            // by the bind-2 challenge at level 3).
+            let source = self.level2_rows();
             let terms = self.tail_terms.as_ref().expect("the plane tail's terms");
-            terms.rows_message(&source, eq, full, self.plan.constant)
+            match self.tail_fold {
+                Some(r) => terms.rows_message(&FoldedRows { inner: source, r }, eq, full, self.plan.constant),
+                None => terms.rows_message(&source, eq, full, self.plan.constant),
+            }
         };
         let q1 = if full {
             at_one - q0 - q2
@@ -1248,6 +1306,14 @@ impl<'a> Group<'a> {
         let mut q = vec![E::zero(); self.coefficient_count()];
         q[..3].copy_from_slice(&[q0, q1, q2]);
         q
+    }
+
+    /// The level-2 cells of every lane, read from the compact states.
+    fn level2_rows(&self) -> LevelRows<'_> {
+        LevelRows {
+            readers: (0..self.sources.len()).map(|l| self.reader(l)).collect(),
+            rows: 1 << (self.local_vars - 2),
+        }
     }
 
     /// The constant of every cell, summed over the pairs with their weights.
@@ -1444,7 +1510,14 @@ impl<'a> Group<'a> {
                 Some(tail) => tail.get(l, cell),
                 None => self.dense[l * self.dense_stride + cell] + self.plan.shifts[l],
             },
-            _ => self.reader(l).at(cell),
+            _ => match self.tail_fold {
+                // Level 3 of a plane-tail group: the level-2 pair folded on the fly.
+                Some(r) => {
+                    let (even, odd) = self.reader(l).item(cell);
+                    even + fm(r, odd - even)
+                }
+                None => self.reader(l).at(cell),
+            },
         }
     }
 
@@ -1796,6 +1869,7 @@ impl<'a> Group<'a> {
             0 => self.bind_first(challenge),
             1 => self.bind_second(challenge),
             2 => self.bind_third(challenge),
+            3 if self.tail_terms.is_some() => self.build_tail(challenge),
             _ => match &mut self.tail {
                 Some(tail) => {
                     let last = self.bound == self.inactive + self.local_vars;
@@ -1917,33 +1991,19 @@ impl<'a> Group<'a> {
     }
 
     /// Bind 2: every lane into the dense lane-major table at an eighth of the domain, and
-    /// the item sums of the first dense round on every block as it is written.
+    /// the item sums of the first dense round on every block as it is written (a plane-tail
+    /// group only records the challenge; [`Self::build_tail`] writes its first table).
     #[allow(unsafe_code)]
     fn bind_third(&mut self, challenge: E) {
         self.taylor.clear();
         let context = E::precompute(challenge);
         let lanes = self.sources.len();
         let rows = 1 << (self.local_vars - 3);
-        if let Some(terms) = self.tail_terms.take() {
-            // The plane path has no lane shifts (checked when the tail was compiled). The
-            // level-2 values are gathered block by block, folded by the vector kernels and
-            // the next round is evaluated on the fresh rows in the same pass.
-            let eq = self.eq.as_ref().expect("plane groups have an equality factor");
-            let full = !eq.can_recover_linear_q_term_from_claim();
-            let source = LevelRows {
-                readers: (0..lanes).map(|l| self.reader(l)).collect(),
-                rows: 2 * rows,
-            };
-            let table = Tail::from_rows(terms, challenge, &source, eq, full);
-            drop(source);
-            self.tail = Some(table);
-            self.dense = Vec::new();
-            self.dense_stride = 0;
-            self.dense_rows = 0;
-            self.states = vec![State::Dense; lanes];
-            for column in &mut self.columns {
-                column.pairs = Vec::new();
-            }
+        if self.tail_terms.is_some() {
+            // The plane path keeps the compact states one more round: the level-3 rows are
+            // the level-2 values folded by this challenge as they are read, and bind 3
+            // builds the first table.
+            self.tail_fold = Some(challenge);
             return;
         }
         self.dense_stride = rows;
@@ -2002,6 +2062,33 @@ impl<'a> Group<'a> {
             self.cached_next = Some(total.into_iter().map(E::reduce_product).collect());
         }
         // The pair codes are not read again (one byte per pair of cells and column).
+        for column in &mut self.columns {
+            column.pairs = Vec::new();
+        }
+    }
+
+    /// Bind 3 of a plane-tail group: the level-2 values are gathered block by block and
+    /// folded by the bind-2 challenge and then by `challenge` into the first table (a
+    /// sixteenth of the domain; the plane path has no lane shifts, which was checked when
+    /// the tail was compiled), and the next round is evaluated on the fresh rows in the same
+    /// pass.
+    fn build_tail(&mut self, challenge: E) {
+        let terms = self.tail_terms.take().expect("the plane tail's terms");
+        let r = self.tail_fold.take().expect("bind 2 precedes bind 3");
+        let last = self.bound == self.inactive + self.local_vars;
+        let eq = self.eq.as_ref().expect("plane groups have an equality factor");
+        // After the last bind no round follows, so nothing is evaluated.
+        let eval = (!last).then(|| (eq, !eq.can_recover_linear_q_term_from_claim()));
+        let source = FoldedRows { inner: self.level2_rows(), r };
+        // A group outside a stage driver has no arena: its tail recycles within itself.
+        let arena = self.arena.clone().unwrap_or_else(TableArena::shared);
+        let table = Tail::from_rows(terms, challenge, &source, eval, arena);
+        drop(source);
+        self.tail = Some(table);
+        self.dense = Vec::new();
+        self.dense_stride = 0;
+        self.dense_rows = 0;
+        self.states = vec![State::Dense; self.sources.len()];
         for column in &mut self.columns {
             column.pairs = Vec::new();
         }

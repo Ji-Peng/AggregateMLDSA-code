@@ -293,33 +293,35 @@ impl Pool {
     /// Under `AGG_ALLOC_POISON=1` the whole buffer is filled with `0xA5` first, including a
     /// fresh allocation, which exposes a reader of stale or uninitialized contents.
     pub fn take(&mut self, len: usize) -> AlignedVec<MaybeUninit<u64>> {
+        Self::ready(self.take_spare(len), len)
+    }
+
+    /// The smallest spare buffer of at least `len` words, removed from the pool, without
+    /// the poison fill. A pool behind a lock hands this out under the lock and calls
+    /// [`Self::ready`] after releasing it: the poison fill runs on the thread pool, whose
+    /// tasks may need the same lock.
+    pub fn take_spare(&mut self, len: usize) -> Option<AlignedVec<MaybeUninit<u64>>> {
         let best = self
             .spare
             .iter()
             .enumerate()
             .filter(|(_, b)| b.len() >= len)
             .min_by_key(|(_, b)| b.len())
-            .map(|(i, _)| i);
-        match best {
-            Some(i) => {
-                let mut buffer = self.spare.swap_remove(i);
-                if poison_hits() {
-                    buffer
-                        .par_chunks_mut(POISON_CHUNK)
-                        .for_each(|chunk| chunk.fill(MaybeUninit::new(0xA5A5_A5A5_A5A5_A5A5)));
-                }
-                buffer
-            }
-            None => {
-                let mut buffer = AlignedVec::<u64>::uninit(len);
-                if poison_hits() {
-                    buffer
-                        .par_chunks_mut(POISON_CHUNK)
-                        .for_each(|chunk| chunk.fill(MaybeUninit::new(0xA5A5_A5A5_A5A5_A5A5)));
-                }
-                buffer
-            }
+            .map(|(i, _)| i)?;
+        Some(self.spare.swap_remove(best))
+    }
+
+    /// `spare`, or a new buffer of `len` words without one, filled with `0xA5` under
+    /// `AGG_ALLOC_POISON=1` (as [`Self::take`] hands it out).
+    pub fn ready(spare: Option<AlignedVec<MaybeUninit<u64>>>, len: usize) -> AlignedVec<MaybeUninit<u64>> {
+        let mut buffer = spare.unwrap_or_else(|| AlignedVec::<u64>::uninit(len));
+        debug_assert!(buffer.len() >= len);
+        if poison_hits() {
+            buffer
+                .par_chunks_mut(POISON_CHUNK)
+                .for_each(|chunk| chunk.fill(MaybeUninit::new(0xA5A5_A5A5_A5A5_A5A5)));
         }
+        buffer
     }
 
     /// Return a buffer for reuse. Initialized buffers are relabelled with

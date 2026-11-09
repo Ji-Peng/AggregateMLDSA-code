@@ -1,15 +1,16 @@
 //! The dense rounds of a generic [`super::Group`] on lane-major `K` planes.
 //!
-//! From the third bind on, a generic group holds every lane as a table of `K` values. When
-//! all of the group's pieces are at most quadratic in the lanes, the summand is the bilinear
-//! form with coefficient slots of `agg_simd::fused`, and a round is one fused pass: fold
-//! every lane by the previous challenge into the spare buffer and evaluate the round on the
-//! just-written pairs. This replaces the row-major table with its separate evaluation and
-//! fold passes. The round before the table (level 2) runs on the same kernels: the lanes'
-//! compact states are gathered block by block and evaluated, and the third bind folds the
-//! gathered rows into the first table while it evaluates the next round. The round
-//! polynomial is unique, so the messages equal those of the scalar dense rounds byte for
-//! byte.
+//! When all of a generic group's pieces are at most quadratic in the lanes, the summand is
+//! the bilinear form with coefficient slots of `agg_simd::fused`, and the dense rounds run
+//! on lane-major `K` planes: a round is one fused pass that folds every lane by the previous
+//! challenge into the spare buffer and evaluates the round on the just-written pairs. This
+//! replaces the row-major table with its separate evaluation and fold passes. The two
+//! rounds before the table (levels 2 and 3) run on the same kernels without a stored table:
+//! the lanes' compact level-2 states are gathered block by block and evaluated (level 2), or
+//! gathered, folded by the challenge of bind 2 and evaluated (level 3). Bind 3 gathers
+//! and folds them twice into the first table, a sixteenth of the domain, while it evaluates
+//! the next round. The round polynomial is unique, so the messages equal those of the
+//! scalar dense rounds byte for byte.
 
 use agg_simd::buf::{AlignedVec, KPlanes};
 use agg_simd::fused::{self, Eval, Fill, RowSource, Terms, MAX_LANES, MAX_SLOTS};
@@ -18,6 +19,7 @@ use agg_simd::pattern::Columns;
 use akita_algebra::split_eq::GruenSplitEq;
 use jolt_field::{One, Zero};
 
+use super::arena::{give_planes, take_planes, SharedArena};
 use super::plan::{Pieces, PolyKind};
 use crate::OpeningField as E;
 
@@ -163,14 +165,15 @@ impl TailTerms {
 }
 
 /// The dense table of a group in lane-major planes (`rows` words per coordinate plane, the
-/// two planes of lane `l` at word offsets `2 l rows` and `(2 l + 1) rows`), with the buffer
-/// the next fold writes into.
+/// two planes of lane `l` at word offsets `2 l rows` and `(2 l + 1) rows`). Its buffers come
+/// from the plane pool of the group's arena and return there when a fold replaces them, so
+/// the groups of a stage reuse mapped pages instead of faulting fresh ones.
 pub(super) struct Tail {
     terms: TailTerms,
     width: usize,
     rows: usize,
     table: AlignedVec<u64>,
-    spare: Option<AlignedVec<u64>>,
+    arena: SharedArena,
     /// The challenge whose fold the next pass performs.
     pending: Option<E>,
     /// The slot sums of the next round, when the pass that built the table evaluated them,
@@ -180,24 +183,37 @@ pub(super) struct Tail {
 
 impl Tail {
     /// Build the table by folding the rows of `source` (twice the table's rows) by
-    /// `challenge`, and evaluate the next round on the new pairs in the same pass, block by
-    /// block while they are in cache. [`Self::message`] then returns the cached sums when
-    /// it is called with the same `full`.
-    pub fn from_rows(terms: TailTerms, challenge: E, source: &dyn RowSource, eq: &GruenSplitEq<E>, full: bool) -> Self {
+    /// `challenge`. With `eval = Some((eq, full))`, the next round is evaluated on the new
+    /// pairs in the same pass, block by block while they are in cache, and
+    /// [`Self::message`] then returns the cached sums (it must be called with the same
+    /// `full`); `None` builds the table of the last variable, after which no round follows.
+    pub fn from_rows(
+        terms: TailTerms,
+        challenge: E,
+        source: &dyn RowSource,
+        eval: Option<(&GruenSplitEq<E>, bool)>,
+        arena: SharedArena,
+    ) -> Self {
         let (width, rows) = (source.width(), source.rows() / 2);
-        let buffer = AlignedVec::<u64>::uninit(2 * width * rows);
-        let (first, second) = eq.remaining_eq_tables();
-        let first_planes = KPlanes::from_fn(first.len(), |i| first[i]);
-        let eval = Eval {
-            terms: terms.as_terms(),
-            first: first_planes.planes(),
-            second,
-            full,
-        };
+        let buffer = take_planes(&arena, 2 * width * rows);
+        let fill = Fill::Computed(Some(challenge), source);
         let input: [Planes<'_>; 0] = [];
-        let (table, total) =
-            fused::fused_pass_into::<Columns>(buffer, width, rows, &input, Fill::Computed(Some(challenge), source), Some(eval));
-        Self { terms, width, rows, table, spare: None, pending: None, cached: Some((full, total)) }
+        let (table, cached) = match eval {
+            Some((eq, full)) => {
+                let (first, second) = eq.remaining_eq_tables();
+                let first_planes = KPlanes::from_fn(first.len(), |i| first[i]);
+                let eval = Eval {
+                    terms: terms.as_terms(),
+                    first: first_planes.planes(),
+                    second,
+                    full,
+                };
+                let (table, total) = fused::fused_pass_into::<Columns>(buffer, width, rows, &input, fill, Some(eval));
+                (table, Some((full, total)))
+            }
+            None => (fused::fused_pass_into::<Columns>(buffer, width, rows, &input, fill, None).0, None),
+        };
+        Self { terms, width, rows, table, arena, pending: None, cached }
     }
 
     fn lanes(&self) -> Vec<Planes<'_>> {
@@ -223,17 +239,14 @@ impl Tail {
             return fused::fused_pass(None, &input, None::<Fill<'_, Columns>>, eval);
         };
         let rows_out = self.rows / 2;
-        // The first fold allocates only its output size and writes every word before
-        // reading it; subsequent folds reuse an initialized buffer.
-        let (out, total) = if let Some(mut out) = self.spare.take() {
+        // The fold writes every word of the new table before reading it, so a pooled buffer
+        // of any earlier contents serves; the replaced table returns to the pool.
+        let buffer = take_planes(&self.arena, 2 * self.width * rows_out);
+        let (out, total) = {
             let input = self.lanes();
-            let total = fused::fused_pass(Some((&mut out[..], self.width, rows_out)), &input, Some(Fill::<Columns>::Fold(r, &input)), eval);
-            (out, total)
-        } else {
-            let input = self.lanes();
-            fused::fold_new(r, &input, rows_out, eval)
+            fused::fused_pass_into(buffer, self.width, rows_out, &input, Fill::<Columns>::Fold(r, &input), eval)
         };
-        self.spare = Some(std::mem::replace(&mut self.table, out));
+        give_planes(&self.arena, std::mem::replace(&mut self.table, out));
         self.rows = rows_out;
         total
     }
@@ -244,8 +257,10 @@ impl Tail {
     pub fn message(&mut self, eq: &GruenSplitEq<E>, full: bool, constant: E) -> [E; 3] {
         let total = match self.cached.take() {
             Some((cached_full, total)) => {
-                debug_assert!(self.pending.is_none(), "cached sums belong to the current table");
-                debug_assert_eq!(cached_full, full, "cached sums of the same evaluation");
+                // Sums cached under another `full` would lack (or misplace) `q(1)` and give a
+                // wrong message, so both checks hold in release builds too (they are free).
+                assert!(self.pending.is_none(), "cached sums belong to the current table");
+                assert_eq!(cached_full, full, "cached sums of the same evaluation");
                 total
             }
             None => {
@@ -277,5 +292,13 @@ impl Tail {
         if last {
             self.pass(None);
         }
+    }
+}
+
+impl Drop for Tail {
+    /// The last table returns to the pool for the groups that are still running.
+    fn drop(&mut self) {
+        let table = std::mem::replace(&mut self.table, AlignedVec::fill_par(0, 1, |_| 0));
+        give_planes(&self.arena, table);
     }
 }
