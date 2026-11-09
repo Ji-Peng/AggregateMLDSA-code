@@ -23,7 +23,7 @@ export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-6}"
 export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.99.1}"
 
 usage() {
-  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 }
 
