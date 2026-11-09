@@ -6,16 +6,18 @@
 //! Variable-length items carry a `LE32` length; field elements use the canonical atom
 //! encoding of the transcript; the round and session counts follow from `N`, the stage-2 and
 //! stage-3 claim counts from the relation. The flags byte holds the
-//! relation id in its low nibble and the parameter set in its high nibble (0 = ML-DSA-44,
-//! 1 = ML-DSA-65, 2 = ML-DSA-87), so an ML-DSA-44 header is unchanged. The parser reads the
-//! relation and the set from the header; a verifier MUST compare both with the ones it
-//! expects before using the proof.
+//! relation id in bits 0 to 2, the hash field in bit 3 ([`HASH_FIELD_FP_FLAG`], set for
+//! `HashField::Fp`, clear for `HashField::Gf2`) and the parameter set in its high nibble
+//! (0 = ML-DSA-44, 1 = ML-DSA-65, 2 = ML-DSA-87), so an ML-DSA-44 `HashField::Gf2` header is
+//! unchanged. The parser reads the relation and the set from the header; a verifier MUST
+//! compare both with the ones it expects before using the proof.
 //!
-//! A `HashField::Fp` proof has the same header and `c~` list, then the round-1 commitments
-//! of `G_main16`, `G_main4` and the seven Keccak groups, the round-2 commitments of `G_k`
-//! and `G_m`, the lookup and the stages without pre-stage claims, the nonce stream and the
-//! opening: no Flock items, no final vectors. The header does not yet name the hash field,
-//! so the caller states it ([`AggregateProof::from_bytes_for`]).
+//! A `HashField::Fp` proof has the same header (with bit 3 set) and `c~` list, then the
+//! round-1 commitments of `G_main16`, `G_main4` and the seven Keccak groups, the round-2
+//! commitments of `G_k` and `G_m`, the lookup and the stages without pre-stage claims, the
+//! nonce stream and the opening: no Flock items, no final vectors. The caller states the hash
+//! field it expects ([`AggregateProof::from_bytes_for`]); a header naming the other one is
+//! refused.
 
 use agg_witness::dispatch_set;
 use agg_witness::params::{ParamSet, Set};
@@ -38,7 +40,7 @@ use crate::OpeningField as E;
 pub enum WireError {
     /// Unknown wire version.
     Version(u16),
-    /// Unknown feature flags (relation and parameter-set nibbles).
+    /// Unknown feature flags (relation, hash field or parameter set), or a hash field other than the expected one.
     Flags(u8),
     /// `N` outside `1..=2^15`, or below `prover::LANE_MIN_RECORDS` for ML-DSA-65 and ML-DSA-87.
     Records(u64),
@@ -132,10 +134,25 @@ pub const fn set_of_nibble(nibble: u8) -> Option<Set> {
     }
 }
 
-/// The header's flags byte: relation id in the low nibble, [`set_nibble`] in the high one.
+/// The header's flags byte of a `HashField::Gf2` proof: relation id in bits 0 to 2,
+/// [`set_nibble`] in the high nibble. A `HashField::Fp` proof also sets
+/// [`HASH_FIELD_FP_FLAG`].
 #[must_use]
 pub const fn flags(set: Set, relation: Relation) -> u8 {
     set_nibble(set) << 4 | relation.id()
+}
+
+/// The flags bit that marks a `HashField::Fp` proof.
+pub const HASH_FIELD_FP_FLAG: u8 = 0x08;
+
+/// The hash field a header's flags byte names.
+#[must_use]
+pub const fn hash_field_of_flags(flags: u8) -> HashField {
+    if flags & HASH_FIELD_FP_FLAG != 0 {
+        HashField::Fp
+    } else {
+        HashField::Gf2
+    }
 }
 
 /// Bytes of one `c~` of `set` (`lambda / 4`: 32, 48 or 64).
@@ -205,7 +222,8 @@ impl AggregateProof {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut w = Writer(Vec::new());
         w.bytes(&WIRE_VERSION.to_le_bytes());
-        w.bytes(&[flags(self.set, self.relation)]);
+        let field = if self.hash_field == HashField::Fp { HASH_FIELD_FP_FLAG } else { 0 };
+        w.bytes(&[flags(self.set, self.relation) | field]);
         w.bytes(&(self.records as u64).to_le_bytes());
         let width = c_tilde_bytes(self.set);
         for c in &self.c_tilde {
@@ -281,8 +299,8 @@ impl AggregateProof {
         Self::from_bytes_for(bytes, HashField::Gf2)
     }
 
-    /// Parse a proof of `hash_field` (the caller's: the header does not name it); the
-    /// shapes follow from the header's `N`.
+    /// Parse a proof of `hash_field`; a header naming the other hash field is refused with
+    /// [`WireError::Flags`]. The shapes follow from the header's `N`.
     pub fn from_bytes_for(bytes: &[u8], hash_field: HashField) -> Result<Self, WireError> {
         let mut r = Reader { bytes, at: 0 };
         let version = u16::from_le_bytes(r.array()?);
@@ -290,7 +308,10 @@ impl AggregateProof {
             return Err(WireError::Version(version));
         }
         let flags = r.array::<1>()?[0];
-        let relation = Relation::from_id(flags & 0x0F).ok_or(WireError::Flags(flags))?;
+        if hash_field_of_flags(flags) != hash_field {
+            return Err(WireError::Flags(flags));
+        }
+        let relation = Relation::from_id(flags & 0x07).ok_or(WireError::Flags(flags))?;
         let set = set_of_nibble(flags >> 4).ok_or(WireError::Flags(flags))?;
         if !relation.is_available(set) {
             // A relation the set does not define.
@@ -662,6 +683,14 @@ mod tests {
                 flags[2] = flag;
                 assert_eq!(AggregateProof::from_bytes(&flags), Err(WireError::Flags(flag)));
             }
+            // Bit 3 names the hash field: a GF(2) proof never sets it, a GF(2) parse refuses
+            // it, and an F_p parse refuses a header without it.
+            assert_eq!(hash_field_of_flags(bytes[2]), HashField::Gf2);
+            let mut fp_flag = bytes.clone();
+            fp_flag[2] |= HASH_FIELD_FP_FLAG;
+            assert_eq!(AggregateProof::from_bytes(&fp_flag), Err(WireError::Flags(fp_flag[2])));
+            assert_eq!(hash_field_of_flags(fp_flag[2]), HashField::Fp);
+            assert_eq!(AggregateProof::from_bytes_for(&bytes, HashField::Fp), Err(WireError::Flags(bytes[2])));
             let mut n = bytes.clone();
             n[3..11].copy_from_slice(&0_u64.to_le_bytes());
             assert_eq!(AggregateProof::from_bytes(&n), Err(WireError::Records(0)));

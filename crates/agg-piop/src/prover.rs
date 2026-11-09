@@ -13,7 +13,8 @@
 //! Two hooks connect the parts owned by other crates: [`BridgeDerivation`] maps the bridge
 //! seed `sd` to the matrices ([`SeededMatrices`] is the seed derivation,
 //! `agg_bridge::seed`) and [`KeccakSide`] produces the Flock commitments and sub-proofs
-//! (`agg-keccak`; `mode_b::PublicBits` in mode B). The stand-ins `FixedMatrices` (matrices
+//! (`agg-keccak`; `mode_b::PublicBits` in mode B; [`FpKeccakSide`] for the all-prime-field
+//! aggregate, whose Keccak chain is proven inside the PIOP). The stand-ins `FixedMatrices` (matrices
 //! that ignore the seed) and `NoKeccak` (Flock profile 0) exist only in unit tests and with
 //! the `test-hooks` feature.
 
@@ -202,13 +203,13 @@ impl KeccakSide for NoKeccak {
     }
 }
 
-/// The Keccak side of the all-prime-field aggregate (Flock profile `FpKeccak`): the Keccak
-/// chain is proven inside the PIOP, so the side has no commitments, share items or proofs
-/// (test stand-in: unit tests and the `test-hooks` feature only).
-#[cfg(any(test, feature = "test-hooks"))]
+/// The Keccak side of the all-prime-field aggregate (Flock profile `FpKeccak`). The prover
+/// builds the Keccak witness itself from the `mu` values and the committed `w_1` bits, and
+/// the permutation chain is committed and zero-checked inside the PIOP, so this side carries
+/// no data: no Flock commitments, share items or proofs, and nothing to run on a pool of its
+/// own. It is a production side, sound because the hash relation is proven in the PIOP.
 pub struct FpKeccakSide;
 
-#[cfg(any(test, feature = "test-hooks"))]
 impl KeccakSide for FpKeccakSide {
     fn commitments(&self, _segments: usize) -> Vec<Vec<u8>> {
         Vec::new()

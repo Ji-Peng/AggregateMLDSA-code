@@ -54,7 +54,7 @@ use crate::lane_public::{LaneKeyCache, LaneStreamedPublic};
 use crate::public_data::KeyCache;
 use crate::public_stream::StreamedPublic;
 use crate::stage::{suffix, Points, StageError};
-use crate::stage1::KeccakPublicInputs;
+use crate::stage1::{take_keccak_terminal, KeccakPublicInputs};
 use crate::stage3::{LookupInputs, Stage3Output};
 use crate::transcript::{
     commitment_site, flock_record_digest, Transcript, TranscriptError, BRIDGE_SEED_SITE,
@@ -150,13 +150,13 @@ impl KeccakVerifier for NoKeccakVerifier {
     }
 }
 
-/// The Keccak side of the all-prime-field aggregate (Flock profile `FpKeccak`): the Keccak
-/// chain is checked inside the PIOP, so there is nothing per segment to verify (test
-/// stand-in: unit tests and the `test-hooks` feature).
-#[cfg(any(test, feature = "test-hooks"))]
+/// The Keccak side of the all-prime-field aggregate (Flock profile `FpKeccak`). The Keccak
+/// chain is committed with the lattice witness and checked inside the PIOP (the zero-checks
+/// and the public `mu` and `c~` tables at the stage terminals), so the side has no Flock
+/// segment to verify: [`run_fp`] never calls [`KeccakVerifier::verify`], which refuses.
+/// It is a production verifier, sound because the hash relation is proven in the PIOP.
 pub struct FpKeccakVerifier;
 
-#[cfg(any(test, feature = "test-hooks"))]
 impl KeccakVerifier for FpKeccakVerifier {
     fn profile(&self) -> FlockProfile {
         FlockProfile::FpKeccak
@@ -278,6 +278,14 @@ pub enum VerifyError {
         /// The proof header's parameter set.
         found: Set,
     },
+    /// The proof header's hash-field bit differs from the hash field of the requested Flock
+    /// profile (checked before the full parse, like the relation and the set).
+    HashField {
+        /// The requested profile's hash field.
+        expected: HashField,
+        /// The proof header's hash field.
+        found: HashField,
+    },
     /// The record list does not match the proof's `N`, a `c~` has the wrong length, or `N` is
     /// below the minimum batch of a set with polynomial lanes.
     RecordCount,
@@ -322,6 +330,10 @@ impl std::fmt::Display for VerifyError {
             Self::ParamSet { expected, found } => {
                 write!(f, "the proof is for ML-DSA-{found}, the verifier expects ML-DSA-{expected}")
             }
+            Self::HashField { expected, found } => write!(
+                f,
+                "the proof's hash argument is over {found:?}, the verifier expects {expected:?}"
+            ),
             Self::RecordCount => write!(f, "record count differs from the proof or is below the set's minimum batch"),
             Self::PublicKey(i) => write!(f, "public key {i} is malformed"),
             Self::Commitment(g) => write!(f, "{g:?}: commitment bytes are malformed"),
@@ -404,6 +416,10 @@ pub struct VerifyTimings {
     pub public_a: Duration,
     /// The stage-3 terminal check.
     pub stage3_terminal: Duration,
+    /// The Keccak terminal work of the stages (`HashField::Fp` only): the public `mu` and
+    /// `c~` table evaluations and the stage-3 Keccak reduction weights. It is not counted in
+    /// `stage1`, `stage2` or `stage3_terminal`.
+    pub keccak_terminal: Duration,
     /// The Keccak side's check of the bits at `r^(3)`.
     pub bits: Duration,
     /// The Akita opening.
@@ -415,7 +431,7 @@ pub struct VerifyTimings {
 impl VerifyTimings {
     /// `(name, duration)` per step, in order.
     #[must_use]
-    pub fn steps(&self) -> [(&'static str, Duration); 15] {
+    pub fn steps(&self) -> [(&'static str, Duration); 16] {
         [
             ("parse", self.parse),
             ("public_data", self.public_data),
@@ -430,6 +446,7 @@ impl VerifyTimings {
             ("public_t", self.public_t),
             ("public_a", self.public_a),
             ("stage3_terminal", self.stage3_terminal),
+            ("keccak_terminal", self.keccak_terminal),
             ("bits", self.bits),
             ("opening", self.opening),
         ]
@@ -667,6 +684,18 @@ fn run(
     check_configuration(bridge, keccak, flock).map_err(VerifyError::Configuration)?;
     if set != Set::S44 && flock == FlockProfile::PublicBits {
         return Err(VerifyError::Configuration(ConfigurationError::PublicBitsSet(set)));
+    }
+    // The header names the hash field (bit 3 of the flags byte at offset 2); a proof of the
+    // other one is refused here, before the parse would fail on its shapes. Bytes of another
+    // wire version are left to the parser's version error.
+    if let [lo, hi, flags, ..] = *proof_bytes {
+        let found = crate::wire::hash_field_of_flags(flags);
+        if u16::from_le_bytes([lo, hi]) == crate::manifest::WIRE_VERSION && found != flock.hash_field() {
+            return Err(VerifyError::HashField {
+                expected: flock.hash_field(),
+                found,
+            });
+        }
     }
     if flock.hash_field() == HashField::Fp {
         return run_fp(set, records, proof_bytes, keccak, flock, relation, keys, timings);
@@ -1039,6 +1068,10 @@ fn run_fp(
         }
         _ => timings.stage3_rounds = verified.stage3_end - verified.stage3_start,
     }
+    // The stage-3 Keccak weights run after the public pass, inside the terminal check.
+    let keccak_terminal = take_keccak_terminal();
+    timings.stage3_terminal = timings.stage3_terminal.saturating_sub(keccak_terminal);
+    timings.keccak_terminal += keccak_terminal;
     let expanded_keys = pass_result.map_or(0, |pass| pass.2);
     let (_, stage3, pi_m) = verified.outcome?;
     drop(public);
@@ -1139,6 +1172,14 @@ fn verify_piop_with(
     }
     let mut clock = Lap(Instant::now());
     let mut stage3_start = clock.0;
+    // The Keccak terminal work is timed under `HashField::Fp` only, so the `HashField::Gf2`
+    // stage timings keep their meaning.
+    take_keccak_terminal();
+    let fp = manifest.hash_field() == HashField::Fp;
+    let take_terminal = || {
+        let elapsed = take_keccak_terminal();
+        if fp { elapsed } else { Duration::ZERO }
+    };
     let outcome = (|| {
         // `Psi` is transcript-owned: the bridge-seed step drew it before the round-2 commitments, and
         // the verifier reads it back instead of accepting one from the caller.
@@ -1191,10 +1232,14 @@ fn verify_piop_with(
             transcript_s,
         )?;
         points.r1 = stage1.point.clone();
-        timings.stage1 = clock.lap();
+        let keccak_terminal = take_terminal();
+        timings.stage1 = clock.lap().saturating_sub(keccak_terminal);
+        timings.keccak_terminal += keccak_terminal;
         let stage2 = stage2::verify(manifest, matrices, &points, &stage1, &proof.stage2, transcript_s)?;
         points.r2 = stage2.point.clone();
-        timings.stage2 = clock.lap();
+        let keccak_terminal = take_terminal();
+        timings.stage2 = clock.lap().saturating_sub(keccak_terminal);
+        timings.keccak_terminal += keccak_terminal;
 
         // The join, then stage 3 on the trunk.
         transcript.join(lookup_transcript, stages_transcript)?;

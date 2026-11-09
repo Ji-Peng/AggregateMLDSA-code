@@ -1133,7 +1133,7 @@ fn round_trip(n_records: usize) {
     use agg_piop::manifest::{HashField, Relation};
     use agg_piop::prover::{prove_with_tables, FpKeccakSide, ProveHooks, ProverInputs, SeededMatrices};
     use agg_piop::verifier::{verify, FpKeccakVerifier, VerifyError};
-    use agg_piop::wire::AggregateProof;
+    use agg_piop::wire::{AggregateProof, WireError, HASH_FIELD_FP_FLAG};
     use agg_witness::params::C_TILDE_BYTES;
 
     on_large_stack(move || {
@@ -1206,6 +1206,23 @@ fn round_trip(n_records: usize) {
         );
 
         if n != 8 { return; }
+
+        // The header names the hash field: bit 3 of the flags byte is set, the F_p parse
+        // round-trips, the GF(2) parse refuses it on the flags, and a cleared bit is refused.
+        assert_eq!(bytes[2] & HASH_FIELD_FP_FLAG, HASH_FIELD_FP_FLAG);
+        let reparsed = AggregateProof::from_bytes_for(&bytes, HashField::Fp).expect("Fp parse");
+        assert_eq!(reparsed.to_bytes(), bytes);
+        assert_eq!(AggregateProof::from_bytes(&bytes), Err(WireError::Flags(bytes[2])));
+        let mut cleared = bytes.clone();
+        cleared[2] &= !HASH_FIELD_FP_FLAG;
+        let outcome = verify_bytes(&cleared);
+        assert!(
+            matches!(
+                outcome,
+                Err(VerifyError::HashField { expected: HashField::Fp, found: HashField::Gf2 }) | Err(VerifyError::Wire(_))
+            ),
+            "{outcome:?}"
+        );
 
         // A changed c~ changes the record binding: the replayed transcript differs.
         let mut corrupted = bytes.clone();

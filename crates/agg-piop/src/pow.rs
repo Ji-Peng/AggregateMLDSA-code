@@ -881,4 +881,41 @@ mod tests {
         );
         assert!(WorkReader::new(&[], 0).unwrap().finish().is_ok());
     }
+
+    #[test]
+    fn fp_plans_keep_the_piop_site_classes() {
+        use crate::manifest::Relation;
+        use crate::transcript::stage_gammas;
+        use agg_witness::params::Set;
+        use std::collections::BTreeSet;
+        let classes = |plan: &PowPlan| plan.sites().iter().map(|s| s.class as u8).collect::<BTreeSet<_>>();
+        let bit_length = |count: usize| (usize::BITS - count.leading_zeros()) as u8;
+        for n in [8, 1024] {
+            let fp_manifest = CommitmentManifest::for_set_fp(Set::S44, n, Relation::Hu).unwrap();
+            let gf2_manifest = CommitmentManifest::for_set(Set::S44, n, Relation::Hu).unwrap();
+            let fp = PowPlan::new(&fp_manifest, FlockProfile::FpKeccak, &KeccakPlan::default());
+            let gf2 = PowPlan::new(&gf2_manifest, FlockProfile::PublicBits, &KeccakPlan::default());
+            // The same classes as the default: Psi, the lookup, tau and the stages; no site of
+            // the Keccak side (the bridge seed and the Flock tie sites are absent).
+            let piop = [
+                SiteClass::ProjPsi,
+                SiteClass::LookupX,
+                SiteClass::LookupMu,
+                SiteClass::LookupGamma,
+                SiteClass::LookupRound,
+                SiteClass::Tau,
+                SiteClass::StageGamma,
+                SiteClass::StageRound,
+            ];
+            assert_eq!(classes(&fp), classes(&gf2), "N = {n}");
+            assert_eq!(classes(&fp), piop.iter().map(|&c| c as u8).collect(), "N = {n}");
+            assert!(fp.sites().iter().all(|s| !s.class.is_keccak()));
+            assert_eq!((fp.sites()[0].class, fp.sites()[0].bits), (SiteClass::ProjPsi, 1));
+            // The stage batching vectors are ground to bit_length(count) bits.
+            let gammas: Vec<u8> =
+                fp.sites().iter().filter(|s| s.class == SiteClass::StageGamma).map(|s| s.bits).collect();
+            assert_eq!(gammas, stage_gammas(&fp_manifest).map(bit_length).to_vec(), "N = {n}");
+            assert_ne!(fp.digest(), gf2.digest(), "N = {n}");
+        }
+    }
 }

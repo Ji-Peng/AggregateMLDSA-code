@@ -1111,9 +1111,11 @@ pub(crate) fn verify_streamed(
     } else {
         vec![crate::projection::weight_at(manifest, psi, &stage2.point, &replay.point)]
     };
-    let keccak_values = keccak
-        .as_ref()
-        .map(|k| k.evaluate(&replay.gammas[k.gammas()], &stage1.point, &stage2.point, &replay.point));
+    let keccak_values = keccak.as_ref().map(|k| {
+        crate::stage1::timed_keccak_terminal(|| {
+            k.evaluate(&replay.gammas[k.gammas()], &stage1.point, &stage2.point, &replay.point)
+        })
+    });
     check_terminal(&spec, manifest, points, &replay, |id| match id {
         LaneId::Column(c) => proof.claims.column(manifest, c),
         LaneId::Weight(WeightId::Ring(s)) => ring_weights[usize::from(s)],

@@ -429,7 +429,9 @@ pub fn verify(
         }
         HashField::Fp => Vec::new(),
     };
-    let keccak = KeccakResolver::new(manifest, &spec, &replay.point, &proof.claims.keccak, None);
+    let keccak = crate::stage1::timed_keccak_terminal(|| {
+        KeccakResolver::new(manifest, &spec, &replay.point, &proof.claims.keccak, None)
+    });
     check_terminal(&spec, manifest, points, &replay, |id| {
         resolve(manifest, &all, &fips, &level1, &keccak, &proof.claims, id)
     })?;

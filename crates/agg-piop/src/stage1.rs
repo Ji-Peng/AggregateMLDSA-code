@@ -345,6 +345,26 @@ pub fn keccak_claim_lanes(spec: &StageSpec) -> Vec<LaneId> {
         .collect()
 }
 
+thread_local! {
+    /// Verifier time spent on this thread on the Keccak terminal work of the stages: the
+    /// public `mu` and `c~` table evaluations and the stage-3 Keccak reduction weights.
+    static KECCAK_TERMINAL: std::cell::Cell<std::time::Duration> =
+        const { std::cell::Cell::new(std::time::Duration::ZERO) };
+}
+
+/// Run `f` and add its wall time to this thread's Keccak terminal clock.
+pub(crate) fn timed_keccak_terminal<T>(f: impl FnOnce() -> T) -> T {
+    let started = std::time::Instant::now();
+    let out = f();
+    KECCAK_TERMINAL.with(|clock| clock.set(clock.get() + started.elapsed()));
+    out
+}
+
+/// This thread's Keccak terminal clock since the last call (the clock is reset).
+pub(crate) fn take_keccak_terminal() -> std::time::Duration {
+    KECCAK_TERMINAL.with(|clock| clock.replace(std::time::Duration::ZERO))
+}
+
 /// Precomputed verifier table of the terminal evaluations of every Keccak lane read by a
 /// stage: non-public Keccak lanes are indexed from `keccak_claims` (in [`keccak_claim_lanes`]
 /// order) and every public `KeccakMu` and `KeccakCTilde` lane read by `spec` is evaluated
@@ -579,7 +599,9 @@ pub fn verify(
         }
         HashField::Fp => None,
     };
-    let keccak = KeccakResolver::new(manifest, &spec, &replay.point, &proof.claims.keccak, keccak_public);
+    let keccak = timed_keccak_terminal(|| {
+        KeccakResolver::new(manifest, &spec, &replay.point, &proof.claims.keccak, keccak_public)
+    });
     check_terminal(&spec, manifest, points, &replay, |id| {
         resolve(manifest, weights.as_ref(), &keccak, &proof.claims, id)
     })?;

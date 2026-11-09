@@ -2049,6 +2049,7 @@ impl std::fmt::Display for VerifyCostReport {
             ("public_t", "T_i and T(r2)"),
             ("public_a", "ExpandA/cache, w_A(r3)"),
             ("stage3_terminal", "stage 3 terminal"),
+            ("keccak_terminal", "Keccak terminal (F_p only)"),
             ("bits", "bit check (mode B only)"),
             ("opening", "Akita opening"),
         ];
