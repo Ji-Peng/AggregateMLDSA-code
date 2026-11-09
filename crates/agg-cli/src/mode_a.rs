@@ -1509,7 +1509,8 @@ pub fn sponge_records(
             const _: () = assert!(agg_witness::params::W1_BITS == 6 && W1_ENCODE_BYTES * 8 == 6 * K * N);
             let cells = lanes.map(|lane| &lane[base..base + K * N]);
             let mut w1_encode = [0_u8; W1_ENCODE_BYTES];
-            for (m, out) in w1_encode.chunks_exact_mut(3).enumerate() {
+            let (triples, _) = w1_encode.as_chunks_mut::<3>();
+            for (m, out) in triples.iter_mut().enumerate() {
                 let mut word = 0_u32;
                 for u in 0..4 {
                     for (t, cell) in cells.iter().enumerate() {
