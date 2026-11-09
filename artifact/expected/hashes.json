@@ -1,5 +1,5 @@
 {
-  "commit": "c6142b83bcd92038d4de90a55177ddb20535be34",
+  "commit": "3eb0e06cdc1855b926b97a43b28a9a9a291deeb6",
   "records": "keygen-batch --params P --count 1024 --seed 42; sign-batch --params P --count 1024 --seed 43",
   "aggregates": {
     "44": {
