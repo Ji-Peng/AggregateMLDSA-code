@@ -672,6 +672,62 @@ impl Reader<'_> {
     }
 }
 
+/// The lanes of a group at a compact level as the rows of a fused pass: row `i` of lane `l`
+/// is the lane's value at cell `i`, written as canonical coordinate planes.
+struct LevelRows<'r> {
+    readers: Vec<Reader<'r>>,
+    rows: usize,
+}
+
+impl agg_simd::fused::RowSource for LevelRows<'_> {
+    fn width(&self) -> usize {
+        self.readers.len()
+    }
+
+    fn rows(&self) -> usize {
+        self.rows
+    }
+
+    #[allow(unsafe_code)]
+    unsafe fn fill(&self, row0: usize, row1: usize, out: &[agg_simd::fused::OutLane]) {
+        assert_eq!(out.len(), self.readers.len());
+        assert!(row0 <= row1 && row1 <= self.rows);
+        let n = row1 - row0;
+        for (reader, &(c0, c1)) in self.readers.iter().zip(out) {
+            // SAFETY: the caller guarantees `row1 - row0` writable rows at both addresses,
+            // which no other view borrows while the pass writes them.
+            let (c0, c1) = unsafe {
+                (
+                    std::slice::from_raw_parts_mut(c0 as *mut u64, n),
+                    std::slice::from_raw_parts_mut(c1 as *mut u64, n),
+                )
+            };
+            let mut put = |i: usize, x: E| {
+                c0[i] = x.c0().to_canonical_u64();
+                c1[i] = x.c1().to_canonical_u64();
+            };
+            // One match per lane and block; the loops index the codes and tables directly.
+            match *reader {
+                Reader::Quartet { pairs, lut, space } => {
+                    for (i, p) in pairs[2 * row0..2 * row1].chunks_exact(2).enumerate() {
+                        put(i, lut[p[0] as usize * space + p[1] as usize]);
+                    }
+                }
+                Reader::Table(table) => {
+                    for (i, &x) in table[row0..row1].iter().enumerate() {
+                        put(i, x);
+                    }
+                }
+                other => {
+                    for i in 0..n {
+                        put(i, other.at(row0 + i));
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The Taylor coefficients `P^(i)(v) / i!`, `i = 1..=4`, of a lane polynomial at one
 /// quartet-table entry, on one cache line.
 #[derive(Clone, Copy, Debug)]
@@ -1855,14 +1911,17 @@ impl<'a> Group<'a> {
         let lanes = self.sources.len();
         let rows = 1 << (self.local_vars - 3);
         if let Some(terms) = self.tail_terms.take() {
-            // The plane path has no lane shifts (checked when the tail was compiled).
-            let readers: Vec<Reader<'_>> = (0..lanes).map(|l| self.reader(l)).collect();
-            let table = Tail::new_filled(terms, lanes, rows, |l, row| {
-                let (even, odd) = readers[l].item(row);
-                let x = fold(&context, even, odd);
-                (x.c0().to_canonical_u64(), x.c1().to_canonical_u64())
-            });
-            drop(readers);
+            // The plane path has no lane shifts (checked when the tail was compiled). The
+            // level-2 values are gathered block by block, folded by the vector kernels and
+            // the next round is evaluated on the fresh rows in the same pass.
+            let eq = self.eq.as_ref().expect("plane groups have an equality factor");
+            let full = !eq.can_recover_linear_q_term_from_claim();
+            let source = LevelRows {
+                readers: (0..lanes).map(|l| self.reader(l)).collect(),
+                rows: 2 * rows,
+            };
+            let table = Tail::from_rows(terms, challenge, &source, eq, full);
+            drop(source);
             self.tail = Some(table);
             self.dense = Vec::new();
             self.dense_stride = 0;

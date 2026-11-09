@@ -268,6 +268,44 @@ fn every_path_matches_the_reference_on_an_equality_group_with_every_term_kind() 
     }
 }
 
+/// Quadratic equality groups run their dense rounds on the plane tail (with a vector
+/// backend), whose first table is built from the level-2 states of every kind (quartet and
+/// pair-fold tables, folded uncoded lanes) by one fused fold-and-evaluate pass. The domains
+/// cover one task and several parallel tasks of that pass.
+#[test]
+fn plane_tail_groups_match_the_reference() {
+    let mut rng = SplitMix64::new(15);
+    for vars in [6, 11, 16] {
+        let cells = eq_fixture(&mut rng, vars);
+        let wide: Vec<E> = point(&mut rng, 1 << vars);
+        let mut lanes = eq_lanes(&cells);
+        lanes.push(Lane::Folded(wide.clone())); // 10: an uncoded field lane
+        let instances = vec![
+            instance(&mut rng, vec![Term::Bool(0)]),
+            instance(&mut rng, vec![Term::Bool(1), Term::Link(8)]),
+            instance(&mut rng, vec![Term::Product(vec![5, 6])]),
+            instance(&mut rng, vec![Term::Product(vec![8, 10])]),
+            instance(&mut rng, vec![Term::Product(vec![10])]),
+            instance(
+                &mut rng,
+                vec![Term::Affine {
+                    weight: Some(2),
+                    lanes: vec![(9, -3), (8, 16), (3, 4096)],
+                    constant: 7,
+                }],
+            ),
+        ];
+        for (rounds, degree) in [(vars, 3), (vars + 1, 4)] {
+            let tau = point(&mut rng, vars);
+            let group = Group::new(lanes.clone(), instances.clone(), Some(&tau), rounds, degree).unwrap();
+            if layout() == Layout::Plane {
+                assert!(group.tail_terms.is_some(), "the tail is on");
+            }
+            check_all_paths(&lanes, &instances, Some(&tau), rounds, degree, 200 + vars as u64);
+        }
+    }
+}
+
 #[test]
 fn the_two_round_prefix_applies_when_the_quartets_dwarf_the_pattern_space() {
     let mut rng = SplitMix64::new(12);

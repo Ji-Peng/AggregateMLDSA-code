@@ -9,7 +9,7 @@
 //! dense rounds byte for byte.
 
 use agg_simd::buf::{AlignedVec, KPlanes};
-use agg_simd::fused::{self, Eval, Fill, Terms, MAX_LANES, MAX_SLOTS};
+use agg_simd::fused::{self, Eval, Fill, RowSource, Terms, MAX_LANES, MAX_SLOTS};
 use agg_simd::k::Planes;
 use agg_simd::pattern::Columns;
 use akita_algebra::split_eq::GruenSplitEq;
@@ -49,6 +49,15 @@ impl TailTerms {
     /// The coefficient slots of the summand.
     pub fn slot_count(&self) -> usize {
         self.slots.len()
+    }
+
+    /// The term lists as the fused kernels read them.
+    fn as_terms(&self) -> Terms<'_> {
+        Terms {
+            linear: &self.linear,
+            products: &self.products,
+            slots: self.slots.len(),
+        }
     }
 }
 
@@ -134,14 +143,31 @@ pub(super) struct Tail {
     spare: Option<AlignedVec<u64>>,
     /// The challenge whose fold the next pass performs.
     pending: Option<E>,
+    /// The slot sums of the next round, when the pass that built the table evaluated them,
+    /// with the `full` flag they were computed under.
+    cached: Option<(bool, Vec<[E; 3]>)>,
 }
 
 impl Tail {
-    /// Build both coordinate planes of every lane with parallel first touch.
-    pub fn new_filled(terms: TailTerms, width: usize, rows: usize,
-        f: impl Fn(usize, usize) -> (u64, u64) + Sync + Send) -> Self {
-        let table = agg_simd::buf::fill_lane_planes(width, rows, f);
-        Self { terms, width, rows, table, spare: None, pending: None }
+    /// Build the table by folding the rows of `source` (twice the table's rows) by
+    /// `challenge`, and evaluate the next round on the new pairs in the same pass, block by
+    /// block while they are in cache. [`Self::message`] then returns the cached sums when
+    /// it is called with the same `full`.
+    pub fn from_rows(terms: TailTerms, challenge: E, source: &dyn RowSource, eq: &GruenSplitEq<E>, full: bool) -> Self {
+        let (width, rows) = (source.width(), source.rows() / 2);
+        let buffer = AlignedVec::<u64>::uninit(2 * width * rows);
+        let (first, second) = eq.remaining_eq_tables();
+        let first_planes = KPlanes::from_fn(first.len(), |i| first[i]);
+        let eval = Eval {
+            terms: terms.as_terms(),
+            first: first_planes.planes(),
+            second,
+            full,
+        };
+        let input: [Planes<'_>; 0] = [];
+        let (table, total) =
+            fused::fused_pass_into::<Columns>(buffer, width, rows, &input, Fill::Computed(Some(challenge), source), Some(eval));
+        Self { terms, width, rows, table, spare: None, pending: None, cached: Some((full, total)) }
     }
 
     fn lanes(&self) -> Vec<Planes<'_>> {
@@ -186,21 +212,30 @@ impl Tail {
     /// pairs of the current table, weighted by the remaining equality tables of `eq` and
     /// shifted by the cell constant `constant`. `q(1)` is computed only when `full`.
     pub fn message(&mut self, eq: &GruenSplitEq<E>, full: bool, constant: E) -> [E; 3] {
-        let (first, second) = eq.remaining_eq_tables();
-        let first_planes = KPlanes::from_fn(first.len(), |i| first[i]);
-        // The pass borrows the buffers mutably: copy the small term lists out.
-        let (linear, products) = (self.terms.linear.clone(), self.terms.products.clone());
-        let eval = Eval {
-            terms: Terms {
-                linear: &linear,
-                products: &products,
-                slots: self.terms.slots.len(),
-            },
-            first: first_planes.planes(),
-            second,
-            full,
+        let total = match self.cached.take() {
+            Some((cached_full, total)) => {
+                debug_assert!(self.pending.is_none(), "cached sums belong to the current table");
+                debug_assert_eq!(cached_full, full, "cached sums of the same evaluation");
+                total
+            }
+            None => {
+                let (first, second) = eq.remaining_eq_tables();
+                let first_planes = KPlanes::from_fn(first.len(), |i| first[i]);
+                // The pass borrows the buffers mutably: copy the small term lists out.
+                let (linear, products) = (self.terms.linear.clone(), self.terms.products.clone());
+                let eval = Eval {
+                    terms: Terms {
+                        linear: &linear,
+                        products: &products,
+                        slots: self.terms.slots.len(),
+                    },
+                    first: first_planes.planes(),
+                    second,
+                    full,
+                };
+                self.pass(Some(eval))
+            }
         };
-        let total = self.pass(Some(eval));
         let mut q = [constant, constant, E::zero()];
         for (&c, s) in self.terms.slots.iter().zip(&total) {
             for k in 0..3 {
