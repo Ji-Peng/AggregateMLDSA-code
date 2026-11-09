@@ -183,20 +183,20 @@ reproduces every cell.
 
 | Set | Tier | 16C32T prove | 8C16T prove | 1T prove | 16C32T verify (unc. / cached) | Aggregate (B/sig) |
 | --- | --- | --- | --- | --- | --- | --- |
-| 44 | `ifma` | 2.81 s | 4.23 s | 31.01 s | 63 / 55 ms | 1,612,294 B (49.2) |
-| 44 | `avx512` | 2.84 s | 4.26 s | 31.09 s | -- | 1,612,294 B (49.2) |
-| 44 | `avx2` | 3.10 s | 4.85 s | 37.80 s | -- | 1,612,294 B (49.2) |
-| 65 | `ifma` | 3.37 s | 4.90 s | 35.52 s | 81 / 69 ms | 2,143,395 B (65.4) |
-| 65 | `avx512` | 3.42 s | 4.92 s | 35.72 s | -- | 2,143,395 B (65.4) |
-| 65 | `avx2` | 3.71 s | 5.59 s | 43.56 s | -- | 2,143,395 B (65.4) |
-| 87 | `ifma` | 4.24 s | 6.70 s | 46.41 s | 110 / 87 ms | 2,710,812 B (82.7) |
-| 87 | `avx512` | 4.26 s | 6.63 s | 46.50 s | -- | 2,710,812 B (82.7) |
-| 87 | `avx2` | 4.69 s | 7.49 s | 56.81 s | -- | 2,710,812 B (82.7) |
+| 44 | `ifma` | 2.34 s | 3.47 s | 24.69 s | 62 / 54 ms | 1,611,831 B (49.2) |
+| 44 | `avx512` | 2.40 s | 3.52 s | 24.79 s | -- | 1,611,831 B (49.2) |
+| 44 | `avx2` | 2.70 s | 4.27 s | 32.63 s | -- | 1,611,831 B (49.2) |
+| 65 | `ifma` | 2.94 s | 4.07 s | 29.69 s | 82 / 70 ms | 2,143,007 B (65.4) |
+| 65 | `avx512` | 2.96 s | 4.13 s | 29.83 s | -- | 2,143,007 B (65.4) |
+| 65 | `avx2` | 3.33 s | 4.99 s | 39.08 s | -- | 2,143,007 B (65.4) |
+| 87 | `ifma` | 3.72 s | 5.31 s | 38.92 s | 114 / 88 ms | 2,710,255 B (82.7) |
+| 87 | `avx512` | 3.74 s | 5.44 s | 38.92 s | -- | 2,710,255 B (82.7) |
+| 87 | `avx2` | 4.25 s | 6.64 s | 51.40 s | -- | 2,710,255 B (82.7) |
 
-On 16C32T with IFMA, the opt-in reference relation H-exact proves 9.9% (44),
-13.3% (65) and 11.2% (87) faster than H-FIPS. In `tab:ablation` (ML-DSA-44,
-32K, 16C32T), running Flock after the PIOP (`AGG_FLOCK_THREADS=0`) costs
-0.35 s against the default, and the mode-B public-bits aggregate takes 2.25 s
+On 16C32T with IFMA, the opt-in reference relation H-exact proves 3.4% (44),
+10.6% (65) and 6.6% (87) faster than H-FIPS. In `tab:ablation` (ML-DSA-44,
+32K, 16C32T, AVX2), running Flock after the PIOP (`AGG_FLOCK_THREADS=0`) costs
+0.43 s against the default, and the mode-B public-bits aggregate takes 2.08 s
 and 803.1 B/sig. Absolute times on another microarchitecture
 differ; the tier order and the byte identity are the portable parts of the
 result.
