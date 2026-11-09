@@ -559,6 +559,12 @@ fn keccak_stage12_groups_prove_and_replay() {
             .into_iter()
             .map(|id| s1_run.value(&s1_spec, id))
             .collect();
+        let at = agg_piop::stage::suffix(&s1_run.point, manifest.d_keccak());
+        for (id, claim) in keccak_claim_lanes(&s1_spec).into_iter().zip(&s1_keccak_claims) {
+            let lane = prover_tables.lane(id).expect("Keccak lane");
+            let table: Vec<OpeningField> = (0..(1 << manifest.d_keccak())).map(|i| lane.value(i)).collect();
+            assert_eq!(*claim, mle_at(&table, &at), "{id:?}");
+        }
         let s1_replay = replay_stage(
             &s1_spec,
             &manifest,
@@ -615,6 +621,12 @@ fn keccak_stage12_groups_prove_and_replay() {
             .into_iter()
             .map(|id| s2_run.value(&s2_spec, id))
             .collect();
+        let at = agg_piop::stage::suffix(&s2_run.point, manifest.d_keccak());
+        for (id, claim) in keccak_claim_lanes(&s2_spec).into_iter().zip(&s2_keccak_claims) {
+            let lane = prover_tables.lane(id).expect("Keccak lane");
+            let table: Vec<OpeningField> = (0..(1 << manifest.d_keccak())).map(|i| lane.value(i)).collect();
+            assert_eq!(*claim, mle_at(&table, &at), "{id:?}");
+        }
         let s2_replay = replay_stage(
             &s2_spec,
             &manifest,
@@ -1027,6 +1039,24 @@ fn keccak_stage3_reductions_round_trip() {
         assert_eq!(run.messages, drawn.messages);
         assert_eq!(run.point, drawn.point);
 
+        // The absorb reductions bind the trace to the committed bits of each record.
+        let mut swapped = batch.main.clone();
+        for t in 0..W1_BITS {
+            let (_, position) = manifest.locate(Column::W1Bit(t as u8, 0));
+            let column = &mut swapped.columns_mut()[position];
+            for i in 0..K * POLY_N { column[i] = column[K * POLY_N + i]; }
+        }
+        let sources = SourceTables { manifest: &manifest, main: &swapped, bridge: &batch.bridge };
+        let mut swapped_tables = ProverTables::new(sources, &batch.matrices);
+        swapped_tables.set_keccak(&keccak_prover);
+        let (mut swapped_tx, _, _) = transcript_at_stage3(&manifest);
+        let result = prove_stage(&spec, &manifest, &points, &claims, |id| match id {
+            LaneId::Weight(w @ (WeightId::KeccakReduce { .. } | WeightId::KeccakAbsorb { .. })) =>
+                Lane::Folded(weights.rank_one(w).expect("Keccak weight").materialize()),
+            other => swapped_tables.lane(other),
+        }, &mut swapped_tx);
+        assert!(matches!(result, Err(StageError::Terminal(3))), "swapped bits must fail the absorb reductions");
+
         // The verifier: replay, then the weights at r^(3) and the opening claims.
         let opening = |run: &agg_piop::stage::StageRun, id: LaneId| run.value(&spec, id);
         let verify = |claims: &[OpeningField], run: &agg_piop::stage::StageRun| -> Result<(), StageError> {
@@ -1098,8 +1128,7 @@ fn keccak_stage3_reductions_round_trip() {
 /// the three stages with the Keccak instances, and opens all eleven groups once; the
 /// verifier accepts the proof bytes from the public records alone. A witness with one `A'`
 /// bit flipped, proven without the prover's self-checks, is rejected by a stage.
-#[test]
-fn round_trip_8() {
+fn round_trip(n_records: usize) {
     use agg_piop::binding::FlockProfile;
     use agg_piop::manifest::{HashField, Relation};
     use agg_piop::prover::{prove_with_tables, FpKeccakSide, ProveHooks, ProverInputs, SeededMatrices};
@@ -1107,11 +1136,11 @@ fn round_trip_8() {
     use agg_piop::wire::AggregateProof;
     use agg_witness::params::C_TILDE_BYTES;
 
-    on_large_stack(|| {
+    on_large_stack(move || {
         let seed = 0x518_u64;
-        let batch = Batch::build(common::records(seed, 6, 2), seed);
+        let batch = Batch::build(common::records(seed, n_records, 0), seed);
         let n = batch.records.len();
-        assert_eq!(n, 8);
+        assert_eq!(n, n_records);
         let manifest = CommitmentManifest::for_batch_fp(n).expect("fp manifest");
         let inputs: Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> = batch
             .records
@@ -1167,7 +1196,7 @@ fn round_trip_8() {
         assert_eq!(verified.session, output.session);
         let size = proof.size();
         eprintln!(
-            "Fp N = 8: proof {} bytes (commitments {}, lookup {}, PIOP {}, opening {}), prover {prove_time:.2?} ({}), verifier {verify_time:.2?}",
+            "Fp N = {n}: proof {} bytes (commitments {}, lookup {}, PIOP {}, opening {}), prover {prove_time:.2?} ({}), verifier {verify_time:.2?}",
             bytes.len(),
             size.akita_commitments,
             size.lookup,
@@ -1176,20 +1205,58 @@ fn round_trip_8() {
             output.timings
         );
 
+        if n != 8 { return; }
+
         // A changed c~ changes the record binding: the replayed transcript differs.
         let mut corrupted = bytes.clone();
         corrupted[2 + 1 + 8] ^= 1;
         assert!(verify_bytes(&corrupted).is_err(), "a changed c~ is rejected");
 
-        // One A' bit flipped before the Keccak groups are committed.
-        let flip = |tables: &mut KeccakTables, _: &mut KeccakPublics| tables.flip_a_prime_bit(3, 24, 19, 1);
-        let hooks = ProveHooks {
-            unchecked: true,
-            tamper_keccak: Some(&flip),
-            ..ProveHooks::default()
+        let cases: [(&str, &dyn Fn(&mut KeccakTables, &mut KeccakPublics)); 3] = [
+            ("A prime", &|t, _| t.flip_a_prime_bit(3, 24, 19, 1)),
+            ("C", &|t, _| t.flip_c_bit(3, 24, 19, 1)),
+            ("C prime", &|t, _| t.flip_c_prime_bit(3, 24, 19, 1)),
+        ];
+        for (name, flip) in cases {
+            let hooks = ProveHooks { unchecked: true, tamper_keccak: Some(flip), ..ProveHooks::default() };
+            let tampered = prove(&hooks).expect("unchecked prove of a tampered witness");
+            let outcome = verify_bytes(&tampered.proof.to_bytes());
+            assert!(matches!(outcome, Err(VerifyError::Stage(_)) | Err(VerifyError::Opening(_))), "{name}: {outcome:?}");
+        }
+        // Keep the original Keccak trace while replacing one record's committed input bits.
+        let original_inputs = keccak_inputs_from_batch(&batch);
+        let layout = KeccakLayout::for_set(Set::S44);
+        let original_tables = KeccakTables::build(&layout, &original_inputs, manifest.padded_records());
+        let original_publics = KeccakPublics::from_records(&layout, &original_inputs, manifest.padded_records());
+        let mut swapped_main = batch.main.clone();
+        for t in 0..W1_BITS {
+            let (_, pos) = manifest.locate(Column::W1Bit(t as u8, 0));
+            let col = &mut swapped_main.columns_mut()[pos];
+            for i in 0..K * POLY_N { col[i] = col[K * POLY_N + i]; }
+        }
+        let restore = |tables: &mut KeccakTables, publics: &mut KeccakPublics| {
+            *tables = original_tables.clone();
+            *publics = original_publics.clone();
         };
-        let tampered = prove(&hooks).expect("unchecked prove of a tampered witness");
-        let outcome = verify_bytes(&tampered.proof.to_bytes());
-        assert!(matches!(outcome, Err(VerifyError::Stage(_))), "{outcome:?}");
+        let hooks = ProveHooks { unchecked: true, tamper_keccak: Some(&restore), ..ProveHooks::default() };
+        let changed = prove_with_tables(&prover_inputs, &manifest, &swapped_main, &SeededMatrices,
+            &FpKeccakSide, FlockProfile::FpKeccak, &hooks).expect("unchecked prove with swapped bits");
+        let result = verify_bytes(&changed.proof.to_bytes());
+        assert!(matches!(result, Err(VerifyError::Stage(_)) | Err(VerifyError::Opening(_))), "{result:?}");
+
+        // Dead slots are unconstrained, so changing one does not invalidate the proof.
+        let dead = |t: &mut KeccakTables, _: &mut KeccakPublics| t.flip_a_prime_bit(3, 168, 19, 1);
+        let hooks = ProveHooks { unchecked: true, tamper_keccak: Some(&dead), ..ProveHooks::default() };
+        let proof = prove(&hooks).expect("prove with a changed dead slot");
+        verify_bytes(&proof.proof.to_bytes()).expect("dead slot is unconstrained");
     });
 }
+
+#[test]
+fn round_trip_8() { round_trip(8); }
+
+#[test]
+fn round_trip_100() { round_trip(100); }
+
+#[test]
+fn round_trip_1024() { round_trip(1024); }

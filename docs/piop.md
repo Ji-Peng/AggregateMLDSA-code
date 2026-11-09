@@ -405,6 +405,20 @@ main `eq(r^(1))` group); `gamma^(2) in K^9`, terminal 10 (`b_t`, the leaves of `
 (54, 55); `gamma^(3) in K^56`, terminal 40. `F7` lives in two groups at `EqPoint::HalfR2` (main `delta^2`, `D_2` `u_h`). The
 proof-of-work plan equals H-exact's.
 
+### 7.5 Hash field F_p
+
+For ML-DSA-44 and H-u, stage 1 retains six `bool_b` instances and `range_w1` and adds
+`k_bool_a` (275), `k_bool_c` (55), `k_theta_c` (55), `k_parity` (55), `k_link`
+(275), and `k_out` (4): 726 batching coefficients. Stage 2 retains four leaves and adds
+150 `k_link_bnd` instances, for 154 coefficients. Stage 3 retains the ring, four links,
+the six bit reductions, two lookup stacks and the two projection reductions; Keccak
+claims are folded into 695 per-(polynomial, point) reductions and twelve `k_absorb` groups.
+Its 1,271 coefficients include the 740 stage-1 and 516 stage-2 Keccak claims. Stage 3 has
+401 terminal opening claims, including 385 Keccak and 16 lattice claims; the seven
+multiplicity digits are opened separately. The stage-1 and stage-2 Keccak terminal vectors
+have 740 and 516 claims respectively (746 and 520 including lattice claims). See `crates/agg-piop/src/keccak_fp/` for the
+constraints and reductions, and `crates/agg-fpkeccak` for the trace and layout.
+
 ## 8. Weight tables (`weights`)
 
 Point conventions (least significant coordinate first): a main point splits as

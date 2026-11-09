@@ -720,7 +720,8 @@ pub fn prove_stage_drawn<'a>(
         }
         for (g, group) in spec.groups.iter().enumerate() {
             eprintln!(
-                "  group {g:2} {:?} eq {:?}: {:3} lanes, {:3} instances, build {:6.1} ms, message {:8.1} ms, bind {:8.1} ms{}",
+                "  {}group {g:2} {:?} eq {:?}: {:3} lanes, {:3} instances, build {:6.1} ms, message {:8.1} ms, bind {:8.1} ms{}",
+                if matches!(group.domain, GroupRole::KeccakA(_) | GroupRole::KeccakC | GroupRole::KeccakCPrime) { "keccak " } else { "" },
                 group.domain,
                 group.eq,
                 group.lanes.len(),
