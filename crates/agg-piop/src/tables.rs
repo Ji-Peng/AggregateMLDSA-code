@@ -305,6 +305,12 @@ impl<'a> ProverTables<'a> {
                 Some(planes) => Lane::Source(Source::Planes(planes)),
                 None => Lane::Source(Source::Field(self.wp.as_deref().expect("W after r^(2)"))),
             },
+            LaneId::KeccakRot(_)
+            | LaneId::KeccakPrev(_)
+            | LaneId::KeccakPrevIota(_)
+            | LaneId::KeccakBlk { .. }
+            | LaneId::KeccakMu(_)
+            | LaneId::KeccakCTilde(_) => panic!("{id:?} is resolved by KeccakProverTables"),
         }
     }
 }

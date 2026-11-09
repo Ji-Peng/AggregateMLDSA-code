@@ -6,8 +6,12 @@ use crate::common::{self, mle_i64, point, Batch};
 
 use agg_fpkeccak::{evaluate, KeccakLayout, KeccakPublics, KeccakTables, KECCAK_GROUPS};
 use agg_pcs_config::commit::{evaluate_signed_table, GroupClaim, GroupCommitment};
+use agg_piop::keccak_fp::specs::{stage1_groups, stage2_groups};
+use agg_piop::keccak_fp::virtuals::{zero_message_c_tilde, KeccakProverTables};
+use agg_piop::kernel::{Lane, Source, Term};
 use agg_piop::manifest::{Column, CommitmentManifest, DigitValue, GroupRole, GROUP_COUNT_FP};
 use agg_piop::pcs::{group_points_fp, verifier_for, TableCommitter};
+use agg_piop::stage::{EqPoint, GroupSpec, StageSpec};
 use agg_piop::virtual_polys::{compose_table, w1_table, MainValues};
 use agg_piop::{BaseField, OpeningField};
 use agg_witness::gen::SplitMix64;
@@ -238,4 +242,199 @@ fn fp_keccak_and_lattice_groups_commit_and_open_at_64() {
 #[test]
 fn fp_keccak_and_lattice_groups_commit_and_open_at_1024() {
     on_large_stack(|| commit_and_open_fp(900, 124, 0x400, false));
+}
+
+fn lane_cell_i64(lane: &Lane<'_>, cell: usize) -> i64 {
+    match lane {
+        Lane::Source(Source::Bytes { cells, map }) => map[cells[cell] as u8 as usize],
+        Lane::Source(Source::Ints(cells)) => i64::from(cells[cell]),
+        other => panic!("unexpected non-integer Keccak lane: {other:?}"),
+    }
+}
+
+fn eval_term_i64(term: &Term, vals: &[i64]) -> i64 {
+    match term {
+        Term::Product(lanes) => lanes.iter().fold(1_i64, |acc, &l| acc * vals[l]),
+        Term::Bool(l) => vals[*l] * (vals[*l] - 1),
+        Term::Affine {
+            weight,
+            lanes,
+            constant,
+        } => {
+            let affine = lanes
+                .iter()
+                .fold(*constant, |acc, &(l, c)| acc + c * vals[l]);
+            match weight {
+                Some(w) => vals[*w] * affine,
+                None => affine,
+            }
+        }
+        Term::Monomials(monomials) => monomials.iter().fold(0_i64, |acc, (c, m)| {
+            acc + *c * m.iter().fold(1_i64, |p, &l| p * vals[l])
+        }),
+        other => panic!("unsupported term in Keccak spec: {other:?}"),
+    }
+}
+
+fn count_nonzero_terms(groups: &[GroupSpec], prover_tables: &KeccakProverTables) -> usize {
+    let n_star = prover_tables.n_star();
+    let mut nonzero = 0;
+    for group in groups {
+        let mask = group.eq.mask().unwrap_or(0xFFFF);
+        let lanes: Vec<Lane<'_>> = group
+            .lanes
+            .iter()
+            .map(|&id| prover_tables.lane(id).expect("Keccak lane"))
+            .collect();
+        let mut vals = vec![0_i64; lanes.len()];
+        for i in 0..n_star {
+            for s in 0..16 {
+                if (mask >> s) & 1 == 0 {
+                    continue;
+                }
+                let base = (i * 16 + s) * 64;
+                for z in 0..64 {
+                    let cell = base + z;
+                    for (dst, lane) in vals.iter_mut().zip(&lanes) {
+                        *dst = lane_cell_i64(lane, cell);
+                    }
+                    for instance in &group.instances {
+                        for term in &instance.terms {
+                            if eval_term_i64(term, &vals) != 0 {
+                                nonzero += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    nonzero
+}
+
+#[test]
+fn keccak_specs_count_and_degree() {
+    let manifest = CommitmentManifest::for_batch_fp(8).expect("fp manifest");
+    let keccak_domain = Column::KeccakA { x: 0, y: 0, q: 0 }.domain();
+
+    let gamma0_s1 = 7;
+    let (s1_groups, s1_used) = stage1_groups(&manifest, gamma0_s1);
+    assert_eq!(s1_used, 719);
+    let mut s1_seen = vec![0_usize; s1_used];
+    for group in &s1_groups {
+        assert_eq!(group.domain, keccak_domain);
+        assert_ne!(group.eq.mask(), Some(0));
+        assert_ne!(group.eq, EqPoint::TauMasked(0xFFFF));
+        for &lane in &group.lanes {
+            assert_eq!(lane.domain(), keccak_domain);
+        }
+        for instance in &group.instances {
+            assert!(
+                instance.gamma >= gamma0_s1 && instance.gamma < gamma0_s1 + s1_used,
+                "stage-1 gamma {} outside [{}..{})",
+                instance.gamma,
+                gamma0_s1,
+                gamma0_s1 + s1_used
+            );
+            s1_seen[instance.gamma - gamma0_s1] += 1;
+            for term in &instance.terms {
+                assert!(term.degree() <= 3, "stage-1 term degree {} > 3", term.degree());
+            }
+        }
+    }
+    assert!(s1_seen.iter().all(|&c| c == 1 || c == 2));
+    assert_eq!(s1_seen.iter().filter(|&&c| c == 2).count(), 25);
+
+    let (s1_zero, s1_count) = stage1_groups(&manifest, 0);
+    StageSpec {
+        stage: 1,
+        degree: 4,
+        gamma_count: s1_count,
+        groups: s1_zero,
+    }
+    .validate()
+    .expect("stage-1 Keccak spec validates");
+
+    let gamma0_s2 = 11;
+    let (s2_groups, s2_used) = stage2_groups(&manifest, gamma0_s2);
+    assert_eq!(s2_used, 150);
+    let mut s2_seen = vec![0_usize; s2_used];
+    for group in &s2_groups {
+        assert_eq!(group.domain, keccak_domain);
+        assert_ne!(group.eq.mask(), Some(0));
+        assert_ne!(group.eq, EqPoint::R1Masked(0xFFFF));
+        for &lane in &group.lanes {
+            assert_eq!(lane.domain(), keccak_domain);
+        }
+        for instance in &group.instances {
+            assert!(
+                instance.gamma >= gamma0_s2 && instance.gamma < gamma0_s2 + s2_used,
+                "stage-2 gamma {} outside [{}..{})",
+                instance.gamma,
+                gamma0_s2,
+                gamma0_s2 + s2_used
+            );
+            s2_seen[instance.gamma - gamma0_s2] += 1;
+            for term in &instance.terms {
+                assert!(term.degree() <= 4, "stage-2 term degree {} > 4", term.degree());
+            }
+        }
+    }
+    assert!(s2_seen.iter().all(|&c| c == 1));
+
+    let (s2_zero, s2_count) = stage2_groups(&manifest, 0);
+    StageSpec {
+        stage: 2,
+        degree: 5,
+        gamma_count: s2_count,
+        groups: s2_zero,
+    }
+    .validate()
+    .expect("stage-2 Keccak spec validates");
+}
+
+#[test]
+fn keccak_specs_vanish_on_the_boolean_domain() {
+    let k_layout = KeccakLayout::for_set(Set::S44);
+    let zero_ct = zero_message_c_tilde(&k_layout);
+
+    for (n_own, n_shared, seed) in [(6, 2, 0xA11_u64), (4, 1, 0xB22_u64)] {
+        let batch = Batch::build(common::records(seed, n_own, n_shared), seed);
+        let n_records = batch.records.len();
+        let manifest = CommitmentManifest::for_batch_fp(n_records).expect("fp manifest");
+        let n_star = manifest.padded_records();
+        let (s1_groups, _) = stage1_groups(&manifest, 0);
+        let (s2_groups, _) = stage2_groups(&manifest, 0);
+
+        let inputs = keccak_inputs_from_batch(&batch);
+        let keccak_tables = KeccakTables::build(&k_layout, &inputs, n_star);
+        let keccak_publics = KeccakPublics::from_records(&k_layout, &inputs, n_star);
+        for i in n_records..n_star {
+            assert_eq!(keccak_tables.c_tilde(i), zero_ct.as_slice());
+        }
+
+        let prover_tables = KeccakProverTables::build(&keccak_tables, &keccak_publics);
+        assert_eq!(count_nonzero_terms(&s1_groups, &prover_tables), 0);
+        assert_eq!(count_nonzero_terms(&s2_groups, &prover_tables), 0);
+
+        if n_records == n_star {
+            // Flip one A' bit at a live slot (t = 5 < 168): both the spec terms and
+            // agg_fpkeccak::evaluate report violations.
+            let mut live_flipped = keccak_tables.clone();
+            live_flipped.flip_a_prime_bit(3, 5, 19, 1);
+            assert!(!evaluate(&live_flipped, &keccak_publics).is_empty());
+            let bad_prover = KeccakProverTables::build(&live_flipped, &keccak_publics);
+            let bad_nonzero = count_nonzero_terms(&s1_groups, &bad_prover)
+                + count_nonzero_terms(&s2_groups, &bad_prover);
+            assert!(bad_nonzero > 0, "live-slot bit flip must make some instance nonzero");
+
+            // Flip one A' bit in a dead slot (t = 168 >= 168): unconstrained, stays 0.
+            let mut dead_flipped = keccak_tables.clone();
+            dead_flipped.flip_a_prime_bit(3, 168, 19, 1);
+            assert!(evaluate(&dead_flipped, &keccak_publics).is_empty());
+            let dead_prover = KeccakProverTables::build(&dead_flipped, &keccak_publics);
+            assert_eq!(count_nonzero_terms(&s1_groups, &dead_prover), 0);
+            assert_eq!(count_nonzero_terms(&s2_groups, &dead_prover), 0);
+        }
+    }
 }

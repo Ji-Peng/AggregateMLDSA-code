@@ -21,6 +21,7 @@
 pub mod alloc;
 pub mod binding;
 pub mod claims;
+pub mod keccak_fp;
 pub mod kernel;
 pub mod lane_public;
 pub mod lookup;

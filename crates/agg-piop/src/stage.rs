@@ -49,6 +49,27 @@ pub enum LaneId {
     Parity1(u8),
     /// A public weight.
     Weight(WeightId),
+    /// An `A'` lane rotated by its rho offset (or XORed with `RC_23` at the output slot for
+    /// lane `(0, 0)`), or a `C` lane rotated by one bit for `theta_c`.
+    KeccakRot(Column),
+    /// `Rot` of an `A'` lane read one slot earlier (slot `15` of `q - 1` when `s = 0`).
+    KeccakPrev(Column),
+    /// `Prev` of lane `(0, 0)` of slot group `q`, XORed with the previous round's constant.
+    KeccakPrevIota(u8),
+    /// The wired `b_t` cell at absorption slots, plus public padding constants, of lane
+    /// `(x, y)` in slot group `q`.
+    KeccakBlk {
+        /// Column coordinate `x in 0..5`.
+        x: u8,
+        /// Row coordinate `y in 0..5`.
+        y: u8,
+        /// Slot-group index `q in 0..Q`.
+        q: u8,
+    },
+    /// Public `mu` bits of lane `0..8` at `q = 0, s = 0`.
+    KeccakMu(u8),
+    /// Public `c~` bits of output lane `0..L` at the output slot of `q = Q - 1`.
+    KeccakCTilde(u8),
 }
 
 impl LaneId {
@@ -61,6 +82,12 @@ impl LaneId {
             Self::Weight(WeightId::Level1(_) | WeightId::Ring(_) | WeightId::Proj(_)) => GroupRole::Main,
             Self::Weight(WeightId::Level2) => GroupRole::Level1,
             Self::Weight(WeightId::Level3(_)) => GroupRole::Level2,
+            Self::KeccakRot(_)
+            | Self::KeccakPrev(_)
+            | Self::KeccakPrevIota(_)
+            | Self::KeccakBlk { .. }
+            | Self::KeccakMu(_)
+            | Self::KeccakCTilde(_) => GroupRole::KeccakA(0),
         }
     }
 }
