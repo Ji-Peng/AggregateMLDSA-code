@@ -390,14 +390,19 @@ impl TableCommitter {
             }
             .into());
         }
+        let polynomials =
+            group_polynomials(columns, descriptor.physical_vars, Some(self.dense_shape(role)))?;
+        Ok(self.prover.commit_polynomials(role, polynomials)?)
+    }
+
+    /// The inner decomposition of `role`'s work-plan profile.
+    fn dense_shape(&self, role: GroupRole) -> DenseShape {
         let profile = self.prover.plan().profile(role);
-        let shape = DenseShape {
+        DenseShape {
             ring_dimension: profile.inner.matrix.ring_dimension(),
             num_digits: profile.inner.digits.num_digits,
             log_basis: profile.inner.digits.log_basis,
-        };
-        let polynomials = group_polynomials(columns, descriptor.physical_vars, Some(shape))?;
-        Ok(self.prover.commit_polynomials(role, polynomials)?)
+        }
     }
 
     /// Round 1 (before the bridge seed): `G_main16` and `G_main4`, concurrently
@@ -414,25 +419,69 @@ impl TableCommitter {
     }
 
     /// Commit the seven `HashField::Fp` Keccak groups (`KeccakA(0..4)`, `KeccakC`,
-    /// `KeccakCPrime`) from the packed [`agg_fpkeccak::KeccakTables`], expanding and
-    /// committing at most `AGG_COMMIT_PARALLEL` (default 2) groups at a time.
+    /// `KeccakCPrime`) from the packed [`agg_fpkeccak::KeccakTables`], at most
+    /// `AGG_COMMIT_PARALLEL` (default 2) groups at a time.
     pub fn commit_keccak(
         &self,
         keccak: &agg_fpkeccak::KeccakTables,
     ) -> Result<[GroupCommitment; KECCAK_GROUP_COUNT], PcsError> {
+        self.commit_keccak_bounded(keccak, commit_parallel_limit())
+    }
+
+    /// [`Self::commit_keccak`] with at most `limit` groups in flight.
+    ///
+    /// Each polynomial is expanded from the packed words straight into the `i8` buffer of its
+    /// zero-extended length, and that buffer becomes the polynomial's signed mirror (no copy):
+    /// a group's only per-cell image is the one the commitment handle keeps for the opening
+    /// (one byte per cell). The commitments equal those of [`Self::commit_group_cells`] over
+    /// `expand_i8` columns.
+    pub fn commit_keccak_bounded(
+        &self,
+        keccak: &agg_fpkeccak::KeccakTables,
+        limit: usize,
+    ) -> Result<[GroupCommitment; KECCAK_GROUP_COUNT], PcsError> {
         let commit_one = |group_idx: usize| -> Result<GroupCommitment, PcsError> {
             let role = GroupRole::KECCAK[group_idx];
             let descriptor = self.manifest.group(role);
-            let cells_per_poly = descriptor.logical_cells();
-            let expanded = keccak.expand_i8(keccak.layout().group_poly_range(group_idx));
-            let columns: Vec<Cells<'_>> = expanded
-                .chunks_exact(cells_per_poly)
-                .map(Cells::Narrow)
-                .collect();
-            self.commit(role, &columns)
+            let polys = keccak.layout().group_poly_range(group_idx);
+            if polys.len() != descriptor.polynomial_count() {
+                return Err(CommitError::PolynomialCount {
+                    group: role,
+                    expected: descriptor.polynomial_count(),
+                    actual: polys.len(),
+                }
+                .into());
+            }
+            let cells = agg_fpkeccak::RECORD_CELLS_PER_POLY * keccak.n_star();
+            let physical_vars = descriptor.physical_vars;
+            if cells != descriptor.logical_cells() || cells > 1 << physical_vars {
+                return Err(CommitError::TableLength {
+                    group: role,
+                    expected: descriptor.logical_cells(),
+                    actual: cells,
+                }
+                .into());
+            }
+            let shape = self.dense_shape(role);
+            let polynomials = polys
+                .into_par_iter()
+                .map(|poly| {
+                    // Zeroed: fresh zero pages, faulted in by this task's writes.
+                    let mut mirror = vec![0_i8; 1 << physical_vars];
+                    keccak.expand_poly_i8_into(poly, &mut mirror);
+                    let polynomial = DensePoly::from_small_i8(physical_vars, mirror)?;
+                    polynomial.prime_digit_cache(
+                        shape.ring_dimension,
+                        shape.num_digits,
+                        shape.log_basis,
+                    )?;
+                    Ok(polynomial)
+                })
+                .collect::<Result<Vec<_>, AkitaError>>()?;
+            Ok(self.prover.commit_polynomials(role, polynomials)?)
         };
         let [ka0, ka1, ka2, ka3, ka4, kc, kcp] = bounded_concurrent_commits(
-            commit_parallel_limit(),
+            limit,
             [
                 &|| commit_one(0),
                 &|| commit_one(1),

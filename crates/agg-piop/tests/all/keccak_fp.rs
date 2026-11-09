@@ -14,7 +14,7 @@ use agg_piop::keccak_fp::virtuals::{zero_message_c_tilde, KeccakProverTables};
 use agg_piop::kernel::{Lane, Source, Term};
 use agg_piop::manifest::{Column, CommitmentManifest, DigitValue, GroupRole, Relation, GROUP_COUNT_FP};
 use agg_piop::pcs::{group_points_fp, verifier_for, TableCommitter};
-use agg_piop::source_tables::SourceTables;
+use agg_piop::source_tables::{Cells, SourceTables};
 use agg_piop::stage::{
     check_terminal, prove_stage, prove_stage_unchecked, replay_stage, EqPoint, GroupSpec,
     InstanceSpec, Points, StageError, StageSpec,
@@ -252,6 +252,50 @@ fn fp_keccak_and_lattice_groups_commit_and_open_at_64() {
 #[test]
 fn fp_keccak_and_lattice_groups_commit_and_open_at_1024() {
     on_large_stack(|| commit_and_open_fp(900, 124, 0x400, false));
+}
+
+/// The Keccak group commitments do not depend on how many groups commit at once, and the
+/// direct per-polynomial mirrors commit exactly as the `expand_i8` group image does, also
+/// with a non-Boolean cell override.
+#[test]
+fn keccak_commit_parallel_is_byte_identical() {
+    on_large_stack(|| {
+        let seed = 0x6c;
+        let batch = Batch::build_as(Relation::HExact, common::records(seed, 50, 14), seed);
+        let manifest = CommitmentManifest::for_relation_fp(batch.records.len(), Relation::HExact)
+            .expect("fp manifest");
+        let layout = KeccakLayout::for_set(Set::S44);
+        let inputs = keccak_inputs_from_batch(&batch);
+        let mut tables = KeccakTables::build(&layout, &inputs, manifest.padded_records());
+        let committer = TableCommitter::new(manifest.clone()).expect("fp committer setup");
+        let serialized = |groups: &[GroupCommitment]| -> Vec<Vec<u8>> {
+            groups.iter().map(|g| g.serialized().expect("serialize")).collect()
+        };
+        for pass in 0..2 {
+            if pass == 1 {
+                tables.set_a_prime_cell(7, 3, 11, 2, 2);
+                tables.set_c_prime_cell(4, 30, 63, 61, -1);
+            }
+            let cells_per_poly = manifest.group(GroupRole::KECCAK[0]).logical_cells();
+            let reference: Vec<GroupCommitment> = (0..KECCAK_GROUPS)
+                .map(|g| {
+                    let image = tables.expand_i8(layout.group_poly_range(g));
+                    let columns: Vec<Cells<'_>> =
+                        image.chunks_exact(cells_per_poly).map(Cells::Narrow).collect();
+                    committer
+                        .commit_group_cells(GroupRole::KECCAK[g], &columns)
+                        .expect("commit the expanded group")
+                })
+                .collect();
+            let reference = serialized(&reference);
+            for limit in [1, 2, 7] {
+                let groups = committer
+                    .commit_keccak_bounded(&tables, limit)
+                    .expect("bounded Keccak commit");
+                assert_eq!(serialized(&groups), reference, "pass {pass}, limit {limit}");
+            }
+        }
+    });
 }
 
 fn lane_cell_i64(lane: &Lane<'_>, cell: usize) -> i64 {

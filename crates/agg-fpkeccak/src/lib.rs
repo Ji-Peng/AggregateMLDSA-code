@@ -475,6 +475,17 @@ mod tests {
                 }
             }
 
+            // One polynomial into a longer buffer: the cells, then a zeroed tail; overrides apply.
+            let mut tables = tables;
+            tables.set_c_cell(2, 5, 9, 3, -3);
+            let poly = layout.c_poly(2, layout.slot_of(5).0);
+            let cells = RECORD_CELLS_PER_POLY * n_star;
+            let mut out = vec![7_i8; 2 * cells];
+            tables.expand_poly_i8_into(poly, &mut out);
+            assert_eq!(out[..cells], tables.expand_i8(poly..poly + 1)[..]);
+            assert_eq!(out[9 + 64 * layout.slot_of(5).1 + 1024 * 3], -3);
+            assert!(out[cells..].iter().all(|&c| c == 0));
+
             // Also verify rotated(word, rot) bit correspondence.
             for _ in 0..64 {
                 let w = rng.next_u64();

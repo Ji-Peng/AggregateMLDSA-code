@@ -409,39 +409,38 @@ impl KeccakTables {
     #[must_use]
     pub fn expand_i8(&self, poly_range: Range<usize>) -> Vec<i8> {
         assert!(poly_range.start <= poly_range.end && poly_range.end <= self.layout.num_polys());
-        let num_polys = poly_range.len();
         let cells_per_poly = RECORD_CELLS_PER_POLY * self.n_star;
-        let words_per_poly = SLOTS * self.n_star;
-        let mut out = vec![0i8; num_polys * cells_per_poly];
-
-        if cells_per_poly == 0 || num_polys == 0 {
+        // A zeroed allocation takes fresh zero pages; the parallel writers below fault them in.
+        let mut out = vec![0i8; poly_range.len() * cells_per_poly];
+        if cells_per_poly == 0 {
             return out;
         }
-
         out.par_chunks_mut(cells_per_poly)
-            .enumerate()
-            .for_each(|(offset, poly_out)| {
-                let poly = poly_range.start + offset;
-                let poly_words =
-                    &self.words[poly * words_per_poly..(poly + 1) * words_per_poly];
-                for (w_idx, &word) in poly_words.iter().enumerate() {
-                    let base = w_idx * LANE_BITS;
-                    for z in 0..LANE_BITS {
-                        poly_out[base + z] = ((word >> z) & 1) as i8;
-                    }
-                }
-            });
+            .zip(poly_range)
+            .for_each(|(poly_out, poly)| self.expand_poly_i8_into(poly, poly_out));
+        out
+    }
 
-        if !self.overrides.is_empty() {
-            for (&(poly, s, i, z), &val) in &self.overrides {
-                if poly_range.contains(&poly) {
-                    let offset = poly - poly_range.start;
-                    let cell = z + LANE_BITS * s + RECORD_CELLS_PER_POLY * i;
-                    out[offset * cells_per_poly + cell] = val as i8;
-                }
+    /// Writes the `i8` cells of polynomial `poly` (cell `z + 64 * s + 1024 * i` is bit `z` of
+    /// slot `s` and record `i`, cell overrides applied) to `out[..16 * 64 * n_star]` and zeroes
+    /// the rest of `out`, so a polynomial can be expanded straight into a buffer of its
+    /// zero-extended length without a group-sized intermediate.
+    ///
+    /// # Panics
+    /// If `poly` is out of range or `out` is shorter than the polynomial's cells.
+    pub fn expand_poly_i8_into(&self, poly: usize, out: &mut [i8]) {
+        let cells_per_poly = RECORD_CELLS_PER_POLY * self.n_star;
+        assert!(out.len() >= cells_per_poly, "output shorter than the polynomial");
+        let (cells, tail) = out.split_at_mut(cells_per_poly);
+        for (lane, &word) in cells.chunks_exact_mut(LANE_BITS).zip(self.poly_words(poly)) {
+            for (z, cell) in lane.iter_mut().enumerate() {
+                *cell = ((word >> z) & 1) as i8;
             }
         }
-
-        out
+        tail.fill(0);
+        let first = (poly, 0, 0, 0);
+        for (&(_, s, i, z), &val) in self.overrides.range(first..(poly + 1, 0, 0, 0)) {
+            cells[z + LANE_BITS * s + RECORD_CELLS_PER_POLY * i] = val as i8;
+        }
     }
 }
