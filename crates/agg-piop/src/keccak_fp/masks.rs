@@ -59,7 +59,8 @@ pub fn output_mask(layout: &KeccakLayout) -> u16 {
 }
 
 /// The `perms - 1` slot groups `q` that contain a boundary block-absorption round `t = 24 m`
-/// (`1 <= m < perms`), in increasing `q` order (`[1, 3, 4, 6, 7, 9]` for `perms = 7`).
+/// (`1 <= m < perms`), in increasing `q` order (`[1, 3, 4, 6, 7, 9]` for `perms = 7`, and
+/// `[1, 3, 4, 6, 7, 9, 10, 12]` for `perms = 9`).
 #[must_use]
 pub fn boundary_slot_groups(layout: &KeccakLayout) -> Vec<u8> {
     (0..layout.slot_groups)
@@ -118,7 +119,7 @@ pub fn perm_lane_has_mu(layout: &KeccakLayout, m: usize, x: usize, y: usize) -> 
 }
 
 /// The `(x, y)` lanes at `t = 0` (`m = 0`, `q = 0, s = 0`) that absorb `w1` bits, in canonical
-/// `lane(x, y)` order (`lanes 8..17`).
+/// `lane(x, y)` order (`lanes 8..17` for every set: `mu` fills lanes `0..8` exactly).
 #[must_use]
 pub fn t0_w1_lanes(layout: &KeccakLayout) -> Vec<(u8, u8)> {
     (0..LANES)

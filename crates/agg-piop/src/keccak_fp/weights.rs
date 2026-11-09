@@ -21,7 +21,12 @@
 //! the absorbed blocks reduce, on the main domain, to the committed bits themselves:
 //! `sum_k c_k (Blk_k(R) - pad_k(R)) = sum_t sum_{(j, rho, i)} u_t(j, rho) eq(r_i, i) b_t(j, rho, i)`
 //! with `u_t(j, rho) = sum_{k wired to (t, j, rho)} c_k eq(r_z, z_k) eq(r_s, s_k)`, so no second
-//! copy of the bits exists. The coefficients are folded into the weights, so the stage-3
+//! copy of the bits exists. ML-DSA-65 and ML-DSA-87 commit one polynomial `W1Bit(t, lane)` per
+//! row on the lane domain `(j, i)` (`d_main = 8 + d_sig`, two variables fewer than the Keccak
+//! domain), so their bit weights are `u_{t,lane}(j) eq(r_i, i)`, one per bit, lane and point
+//! with a wired cell. Both domains end in the `d_sig` record variables, so `eq(r_i, i)` is the
+//! same factor on either side, and a weight is evaluated at the `d_main`-suffix of `r^(3)`.
+//! The coefficients are folded into the weights, so the stage-3
 //! parts that read them are unbatched and their gamma indices are declared folded
 //! ([`StageSpec::folded`](crate::stage::StageSpec::folded)).
 
@@ -182,7 +187,8 @@ pub struct AbsorbCell {
     pub z: u8,
     /// Slot `s`.
     pub s: u8,
-    /// `j + 256 (rho mod lanes)`, the cell of `b_t` in its polynomial lane inside one record.
+    /// `j + 256 (rho mod 2^d_vec)`, the cell of `b_t` in its polynomial lane inside one record
+    /// (`j` on the lane domain of ML-DSA-65 and ML-DSA-87, one polynomial per row).
     pub cell: u32,
 }
 
@@ -542,13 +548,35 @@ mod tests {
     use crate::test_support::point;
     use agg_fpkeccak::{KeccakPublics, KeccakTables};
     use agg_witness::gen::SplitMix64;
-    use agg_witness::params::TR_BYTES;
+    use agg_witness::params::{Set, TR_BYTES};
     use jolt_field::{One, Ring};
 
     fn manifest() -> CommitmentManifest {
         let manifest = CommitmentManifest::for_batch_fp(8).unwrap();
         assert_eq!(manifest.d_sig(), 3);
         manifest
+    }
+
+    /// The `N* = 8` manifest of `set`: ML-DSA-44's main domain has `d_main = d_K`, the lane
+    /// domain of ML-DSA-65 and ML-DSA-87 is two variables shorter.
+    fn manifest_of(set: Set) -> CommitmentManifest {
+        let manifest = if set == Set::S44 {
+            manifest()
+        } else {
+            CommitmentManifest::for_set_fp(set, 8, crate::manifest::Relation::default()).unwrap()
+        };
+        assert_eq!((manifest.d_sig(), manifest.d_stage(), manifest.d_keccak()), (3, 13, 13));
+        manifest
+    }
+
+    /// Random `(mu, w1Encode)` records of `layout`'s set.
+    fn random_records(rng: &mut SplitMix64, layout: &KeccakLayout, count: usize) -> Vec<([u8; TR_BYTES], Vec<u8>)> {
+        (0..count)
+            .map(|_| {
+                let mu: [u8; TR_BYTES] = std::array::from_fn(|_| rng.next_u64() as u8);
+                (mu, (0..layout.w1_encode_bytes).map(|_| rng.next_u64() as u8).collect())
+            })
+            .collect()
     }
 
     fn mle(table: &[E], point: &[E]) -> E {
@@ -683,12 +711,99 @@ mod tests {
             // reach every bit of every lane.
             let at = |p: KeccakPoint| plan.absorbs().iter().filter(|w| w.point == p).count();
             assert_eq!((at(KeccakPoint::R1), at(KeccakPoint::R2)), (shape.w1_bits, shape.w1_bits * shape.lanes_k), "{set:?}");
+            // Stage 1 reads every committed polynomial; stage 2 the 35 of each boundary slot
+            // group and the A' lanes of the slot groups before them (ten distinct q for seven
+            // permutations, thirteen for nine).
+            let layout = KeccakLayout::for_set(set);
+            let at = |p: KeccakPoint| plan.weights().iter().filter(|w| w.point == p).count();
+            let (a_qs, bnd) = if set == Set::S87 { (13, 8) } else { (10, 6) };
+            assert_eq!((at(KeccakPoint::R1), at(KeccakPoint::R2)), (layout.num_polys(), 25 * a_qs + 10 * bnd), "{set:?}");
+        }
+    }
+
+    /// The bit weights against their definition, cell by cell: `u_{t,lane}(j)` sums
+    /// `c_k eq(r_z, z) eq(r_s, s)` over every block claim `k` and cell `(z, s)` at an
+    /// absorption slot that the sponge wires to bit `t` of coefficient `j` of row `lane`, and
+    /// the weight on the lane domain is `u_{t,lane}(j) eq(r_i, i)` with `r_i` the record
+    /// coordinates the Keccak and lane domains share.
+    #[test]
+    fn absorb_weights_equal_a_brute_force_sum_over_the_wired_cells() {
+        for set in Set::ALL {
+            let manifest = manifest_of(set);
+            let layout = KeccakLayout::for_set(set);
+            let shape = manifest.shape();
+            let (n_star, lane_cells, d_sig) = (manifest.padded_records(), manifest.lane_cells(), manifest.d_sig());
+            let plan = KeccakReductions::for_manifest(&manifest, 0);
+            let mut rng = SplitMix64::new(0x5EED_0006 ^ manifest.d_main() as u64);
+            let d_stage = manifest.d_stage();
+            let (r1, r2) = (point(&mut rng, d_stage), point(&mut rng, d_stage));
+            let coeffs = point(&mut rng, plan.claims().len());
+            let tables = plan.tables(&coeffs, &r1, &r2);
+            for (p, r) in [(KeccakPoint::R1, &r1), (KeccakPoint::R2, &r2)] {
+                let r_k = suffix(r, manifest.d_keccak());
+                let r_main = suffix(r, manifest.d_main());
+                assert_eq!(&r_k[10..], &r_main[manifest.d_main() - d_sig..], "shared record coordinates");
+                let (eq_z, eq_s, eq_i) = (eq_table(&r_k[..6]), eq_table(&r_k[6..10]), eq_table(&r_k[10..]));
+                // u[t][row][j], with no shortcut through the absorption masks.
+                let mut u = vec![vec![vec![E::zero(); 256]; shape.k]; shape.w1_bits];
+                for (k, &(point, id)) in plan.claims().iter().enumerate() {
+                    let LaneId::KeccakBlk { x, y, q } = id else { continue };
+                    if point != p {
+                        continue;
+                    }
+                    for s in 0..SLOTS {
+                        let t = layout.time(usize::from(q), s);
+                        if t >= layout.rounds || t % ROUNDS_PER_PERM != 0 {
+                            continue;
+                        }
+                        for z in 0..LANE_BITS {
+                            if let Absorbed::W1Bit { t: bit, j, rho } =
+                                layout.wire(t / ROUNDS_PER_PERM, usize::from(x), usize::from(y), z)
+                            {
+                                u[bit][rho][j] += coeffs[k] * eq_z[z] * eq_s[s];
+                            }
+                        }
+                    }
+                }
+                for (bit, rows) in u.iter().enumerate() {
+                    for (row, u_row) in rows.iter().enumerate() {
+                        let (lane, base) = shape.row_lane(row);
+                        let id = WeightId::KeccakAbsorb { t: bit as u8, lane: lane as u8, point: p };
+                        let Some(weight) = tables.rank_one(id) else {
+                            assert!(u_row.iter().all(Zero::is_zero), "{set:?} {id:?}: wired cells without a weight");
+                            continue;
+                        };
+                        let weight = weight.materialize();
+                        assert_eq!(weight.len(), lane_cells * n_star);
+                        for i in 0..n_star {
+                            for (j, &uj) in u_row.iter().enumerate() {
+                                assert_eq!(weight[base + j + lane_cells * i], uj * eq_i[i], "{set:?} {id:?} j = {j}, i = {i}");
+                            }
+                        }
+                    }
+                }
+            }
+            // The lane sets: one weight per (t, row) at r^(2), and only row 0 is wired in the
+            // first block (stage 1).
+            if set != Set::S44 {
+                let keys: Vec<(u8, u8, KeccakPoint)> = plan.absorbs().iter().map(|w| (w.t, w.lane, w.point)).collect();
+                let mut want: Vec<_> = (0..4).map(|t| (t, 0, KeccakPoint::R1)).collect();
+                want.extend((0..4).flat_map(|t| (0..shape.k as u8).map(move |lane| (t, lane, KeccakPoint::R2))));
+                assert_eq!(keys.len(), want.len());
+                assert!(want.iter().all(|k| keys.contains(k)), "{set:?}");
+            }
         }
     }
 
     #[test]
     fn weighted_sums_equal_the_combined_reindexed_claims() {
-        let manifest = manifest();
+        for set in Set::ALL {
+            weighted_sums_equal_the_combined_reindexed_claims_of(set);
+        }
+    }
+
+    fn weighted_sums_equal_the_combined_reindexed_claims_of(set: Set) {
+        let manifest = manifest_of(set);
         let layout = KeccakLayout::for_set(manifest.set());
         let n_star = manifest.padded_records();
         let plan = KeccakReductions::for_manifest(&manifest, 0);
@@ -732,7 +847,13 @@ mod tests {
 
     #[test]
     fn verifier_values_match_the_materialized_weights() {
-        let manifest = manifest();
+        for set in Set::ALL {
+            verifier_values_match_the_materialized_weights_of(set);
+        }
+    }
+
+    fn verifier_values_match_the_materialized_weights_of(set: Set) {
+        let manifest = manifest_of(set);
         let plan = KeccakReductions::for_manifest(&manifest, 0);
         let mut rng = SplitMix64::new(0x5EED_0004);
         let d_stage = manifest.d_stage();
@@ -757,17 +878,18 @@ mod tests {
 
     #[test]
     fn honest_tables_satisfy_the_reductions_and_a_changed_bit_breaks_the_absorption() {
-        let manifest = manifest();
+        for set in Set::ALL {
+            honest_tables_satisfy_the_reductions_of(set);
+        }
+    }
+
+    fn honest_tables_satisfy_the_reductions_of(set: Set) {
+        let manifest = manifest_of(set);
         let layout = KeccakLayout::for_set(manifest.set());
         let n_star = manifest.padded_records();
         let shape = manifest.shape();
         let mut rng = SplitMix64::new(0x5EED_0005);
-        let records: Vec<([u8; TR_BYTES], Vec<u8>)> = (0..n_star)
-            .map(|_| {
-                let mu: [u8; TR_BYTES] = std::array::from_fn(|_| rng.next_u64() as u8);
-                (mu, (0..layout.w1_encode_bytes).map(|_| rng.next_u64() as u8).collect())
-            })
-            .collect();
+        let records = random_records(&mut rng, &layout, n_star);
         let witness = KeccakTables::build(&layout, &records, n_star);
         let publics = KeccakPublics::from_records(&layout, &records, n_star);
         let keccak = KeccakProverTables::build(&witness, &publics);
@@ -824,8 +946,9 @@ mod tests {
             })
         };
         assert_eq!(absorbed(&bits), combined(true));
-        // A changed bit in the last block (read at r^(2)) and one in the first (read at r^(1)).
-        for (t, j, rho, record) in [(5, 255, 3, 6), (0, 0, 0, 1)] {
+        // A changed bit in the last block with a w1 bit (read at r^(2)) and one in the first
+        // (read at r^(1)).
+        for (t, j, rho, record) in [(shape.w1_bits - 1, 255, shape.k - 1, 6), (0, 0, 0, 1)] {
             let mut changed = bits.clone();
             let (poly_lane, base) = shape.row_lane(rho);
             let cell = &mut changed[t][poly_lane][base + j + lane_cells * record];

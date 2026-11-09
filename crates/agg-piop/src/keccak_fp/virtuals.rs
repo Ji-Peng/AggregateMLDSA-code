@@ -767,7 +767,8 @@ pub fn pad_blk_mle_at(layout: &KeccakLayout, x: usize, y: usize, q: usize, r_k: 
     total
 }
 
-/// Helper for ML-DSA-44 tests that only have `MainTables` and `mu_list`: builds `(KeccakTables, KeccakPublics)`.
+/// Builds `(KeccakTables, KeccakPublics)` of a batch from its `MainTables` (the committed `w1Encode`
+/// bits, on ML-DSA-44's main domain or the lane domain of ML-DSA-65 and ML-DSA-87) and `mu_list`.
 #[must_use]
 pub fn build_keccak_witness(
     manifest: &CommitmentManifest,

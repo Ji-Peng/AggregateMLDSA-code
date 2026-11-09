@@ -617,4 +617,51 @@ mod tests {
             }
         }
     }
+
+    /// The honest trace of real signatures: `mu` from the public instance, `w1Encode(w1')`
+    /// from the derived witness, and the public `c~` taken from the signature itself (not
+    /// recomputed), so a clean evaluation shows the output lanes equal the signed `c~`.
+    fn real_records_evaluate_clean<P: agg_witness::ParamSet>(seed: u64) {
+        use agg_witness::derive::derive_for;
+        use agg_witness::gen::records_for;
+        use agg_witness::instance::PublicInstance;
+
+        let layout = KeccakLayout::for_set(P::SET);
+        let (live, n_star) = (3, 4);
+        let records = records_for::<P>(seed, live);
+        let instance = PublicInstance::<P>::from_records_for(&records).expect("instance");
+        let witnesses: Vec<([u8; TR_BYTES], Vec<u8>)> = instance
+            .records
+            .iter()
+            .zip(&records)
+            .map(|(p, r)| {
+                let w = derive_for::<P>(&p.key, &p.mu, &r.sig).expect("the signature is accepted");
+                assert_eq!(w.mu, p.mu);
+                (w.mu, w.w1_bytes.as_ref().to_vec())
+            })
+            .collect();
+        let tables = KeccakTables::build(&layout, &witnesses, n_star);
+        let mut publics = KeccakPublics::from_records(&layout, &witnesses, n_star);
+        for (i, r) in records.iter().enumerate() {
+            let signed = &r.sig[..layout.c_tilde_bytes];
+            assert_eq!(tables.c_tilde(i), signed, "{}: record {i}", P::SET);
+            publics.records_mut()[i].c_tilde = signed.to_vec();
+        }
+        let violations = evaluate(&tables, &publics);
+        assert!(violations.is_empty(), "{}: {:?}", P::SET, &violations[..violations.len().min(8)]);
+
+        // A changed signed c~ byte is caught by the output constraint only.
+        publics.records_mut()[1].c_tilde[layout.c_tilde_bytes - 1] ^= 0x10;
+        let violations = evaluate(&tables, &publics);
+        assert_eq!(violations.len(), 1, "{}", P::SET);
+        let v = violations[0];
+        assert_eq!((v.family, v.lane, v.z, v.record), (ConstraintFamily::Out, layout.output_lanes - 1, 60, 1));
+    }
+
+    #[test]
+    fn real_records_of_every_set_evaluate_clean_against_the_signed_c_tilde() {
+        real_records_evaluate_clean::<agg_witness::Set44>(0x44);
+        real_records_evaluate_clean::<agg_witness::Set65>(0x65);
+        real_records_evaluate_clean::<agg_witness::Set87>(0x87);
+    }
 }
