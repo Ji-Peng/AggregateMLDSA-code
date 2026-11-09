@@ -1175,7 +1175,9 @@ impl<'a> Group<'a> {
         // constant coefficient of `q` follows from the others (exact field arithmetic: the
         // same polynomial as a direct evaluation).
         let level = self.level();
-        let on_planes = level >= 3 && self.tail.is_some();
+        // A group with plane-tail terms evaluates its rounds on the fused kernels from the
+        // third active round on: over the computed level-2 rows, then over its planes.
+        let on_planes = (level >= 3 && self.tail.is_some()) || (level == 2 && self.tail_terms.is_some());
         let recovery = if level == 0 || on_planes { None } else { self.recovery() };
         let upper = recovery.is_some();
         let mut q = match level {
@@ -1184,8 +1186,8 @@ impl<'a> Group<'a> {
                 None => self.level0(),
             },
             1 => self.level1(upper),
-            2 => self.level2(upper),
             _ if on_planes => self.plane_round(),
+            2 => self.level2(upper),
             _ => {
                 let mut q = match self.cached_next.take() {
                     Some(q) => q,
@@ -1217,14 +1219,24 @@ impl<'a> Group<'a> {
         message
     }
 
-    /// A round over the dense planes: the coefficients of the inner polynomial `q`, the
+    /// A round over the dense planes (or, at level 2, over the rows gathered from the
+    /// compact states): the coefficients of the inner polynomial `q`, the
     /// linear one from the evaluation at one, or from the running claim when the equality
     /// factor allows it.
     fn plane_round(&mut self) -> Vec<E> {
         let eq = self.eq.as_ref().expect("plane groups have an equality factor");
-        let tail = self.tail.as_mut().expect("the plane table");
         let full = !eq.can_recover_linear_q_term_from_claim();
-        let [q0, at_one, q2] = tail.message(eq, full, self.plan.constant);
+        let [q0, at_one, q2] = if let Some(tail) = self.tail.as_mut() {
+            tail.message(eq, full, self.plan.constant)
+        } else {
+            // Level 2: the lanes' compact states are read block by block.
+            let source = LevelRows {
+                readers: (0..self.sources.len()).map(|l| self.reader(l)).collect(),
+                rows: 2 * self.pairs(),
+            };
+            let terms = self.tail_terms.as_ref().expect("the plane tail's terms");
+            terms.rows_message(&source, eq, full, self.plan.constant)
+        };
         let q1 = if full {
             at_one - q0 - q2
         } else {
@@ -1876,7 +1888,9 @@ impl<'a> Group<'a> {
         self.states = states;
         // Taylor tables of the polynomials (degree 2 to 4) on quartet lanes.
         self.taylor.clear();
-        if self.policy.taylor && self.local_vars >= 3 {
+        // (A plane-tail group evaluates level 2 on the fused kernels, which read no Taylor
+        // tables.)
+        if self.policy.taylor && self.local_vars >= 3 && self.tail_terms.is_none() {
             for (l, kind) in &self.plan.folded.polys {
                 let degree = kind.degree();
                 if let (State::Quartet(lut), true) = (&self.states[*l], (2..=4).contains(&degree)) {

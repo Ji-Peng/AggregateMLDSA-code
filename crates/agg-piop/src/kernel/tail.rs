@@ -5,8 +5,11 @@
 //! form with coefficient slots of `agg_simd::fused`, and a round is one fused pass: fold
 //! every lane by the previous challenge into the spare buffer and evaluate the round on the
 //! just-written pairs. This replaces the row-major table with its separate evaluation and
-//! fold passes. The round polynomial is unique, so the messages equal those of the scalar
-//! dense rounds byte for byte.
+//! fold passes. The round before the table (level 2) runs on the same kernels: the lanes'
+//! compact states are gathered block by block and evaluated, and the third bind folds the
+//! gathered rows into the first table while it evaluates the next round. The round
+//! polynomial is unique, so the messages equal those of the scalar dense rounds byte for
+//! byte.
 
 use agg_simd::buf::{AlignedVec, KPlanes};
 use agg_simd::fused::{self, Eval, Fill, RowSource, Terms, MAX_LANES, MAX_SLOTS};
@@ -49,6 +52,33 @@ impl TailTerms {
     /// The coefficient slots of the summand.
     pub fn slot_count(&self) -> usize {
         self.slots.len()
+    }
+
+    /// `[q(0), q(1), q_2]` from the slot sums of a pass and the cell constant.
+    fn message(&self, total: &[[E; 3]], constant: E) -> [E; 3] {
+        let mut q = [constant, constant, E::zero()];
+        for (&c, s) in self.slots.iter().zip(total) {
+            for k in 0..3 {
+                q[k] += c * s[k];
+            }
+        }
+        q
+    }
+
+    /// `[q(0), q(1), q_2]` of a round over the pairs of `source`'s rows, which are
+    /// evaluated block by block as they are computed (no table is written); the remaining
+    /// equality tables of `eq` weight the pairs, as in [`Tail::message`].
+    pub fn rows_message(&self, source: &dyn RowSource, eq: &GruenSplitEq<E>, full: bool, constant: E) -> [E; 3] {
+        let (first, second) = eq.remaining_eq_tables();
+        let first_planes = KPlanes::from_fn(first.len(), |i| first[i]);
+        let eval = Eval {
+            terms: self.as_terms(),
+            first: first_planes.planes(),
+            second,
+            full,
+        };
+        let total = fused::fused_pass::<Columns>(None, &[], Some(Fill::Computed(None, source)), Some(eval));
+        self.message(&total, constant)
     }
 
     /// The term lists as the fused kernels read them.
@@ -236,13 +266,7 @@ impl Tail {
                 self.pass(Some(eval))
             }
         };
-        let mut q = [constant, constant, E::zero()];
-        for (&c, s) in self.terms.slots.iter().zip(&total) {
-            for k in 0..3 {
-                q[k] += c * s[k];
-            }
-        }
-        q
+        self.terms.message(&total, constant)
     }
 
     /// Bind a variable to `challenge`: the fold happens in the next [`Self::message`], or

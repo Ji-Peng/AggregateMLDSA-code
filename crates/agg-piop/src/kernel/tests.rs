@@ -911,3 +911,48 @@ fn integer_pair_group_rejects_out_of_range_lanes() {
     assert!(IntPairGroup::new([&big_m, &small], None, c, &eq_point).is_none());
     assert!(IntPairGroup::new([&small, &small], Some([&small, &small]), c, &eq_point).is_some());
 }
+
+/// Round times of a quadratic plane-tail group (diagnostic: `AGG_TAIL_TIMING_VARS` sets the
+/// domain, default 2^22; run with `-- --ignored --nocapture tail_round_timing`).
+#[test]
+#[ignore = "diagnostic: round times"]
+fn tail_round_timing() {
+    let vars: usize = std::env::var("AGG_TAIL_TIMING_VARS").ok().and_then(|v| v.parse().ok()).unwrap_or(22);
+    let mut rng = SplitMix64::new(16);
+    // Twelve lanes on quartet lookup tables at level 2 (as the stage-3 main groups).
+    let mut cells = eq_fixture(&mut rng, vars);
+    cells.extend((0..4).map(|_| bits(&mut rng, 1 << vars)));
+    let mut lanes: Vec<Lane<'_>> = (0..4).map(|c| Lane::column(&cells[c])).collect();
+    lanes.push(Lane::mapped(&cells[4], square_map()));
+    lanes.push(Lane::mapped(&cells[4], lo_map()));
+    lanes.push(Lane::mapped(&cells[4], hi_map()));
+    lanes.push(Lane::mapped(&cells[6], square_map()));
+    lanes.extend((7..11).map(|c| Lane::column(&cells[c])));
+    let mut instances: Vec<GroupInstance> = [0, 1, 2, 3, 8, 9, 10, 11].iter().map(|&l| instance(&mut rng, vec![Term::Bool(l)])).collect();
+    for pair in [[5, 6], [4, 7], [0, 8], [1, 9], [2, 10]] {
+        instances.push(instance(&mut rng, vec![Term::Product(pair.to_vec())]));
+    }
+    instances.push(instance(
+        &mut rng,
+        vec![Term::Affine {
+            weight: Some(3),
+            lanes: vec![(7, -3), (4, 16), (11, 4096)],
+            constant: 7,
+        }],
+    ));
+    let tau = point(&mut rng, vars);
+    let challenges = point(&mut rng, vars);
+    for rep in 0..4 {
+        let mut group = Group::new(lanes.clone(), instances.clone(), Some(&tau), vars, 3).unwrap();
+        let mut times = Vec::new();
+        for (round, &r) in challenges.iter().enumerate().take(8) {
+            let start = std::time::Instant::now();
+            let _ = group.round_message(round);
+            let message = start.elapsed().as_secs_f64() * 1e3;
+            let start = std::time::Instant::now();
+            group.bind(round, r);
+            times.push(format!("{message:.1}+{:.1}", start.elapsed().as_secs_f64() * 1e3));
+        }
+        eprintln!("rep {rep} vars {vars} tail {:?}: message+bind (ms) per round: {}", group.tail_shape(), times.join(" "));
+    }
+}
