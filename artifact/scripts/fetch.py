@@ -100,6 +100,10 @@ def main():
                 }
             )
             continue
+        if source.get("role") == "optional comparison":
+            print(f"{name}: optional; fetched by its comparison script")
+            resolved.append({"name": name, "kind": "optional", "commit": commit})
+            continue
         if source.get("path", "").startswith("artifact/vendor/"):
             path = REPO / source["path"]
             clone(source["url"], path, commit)

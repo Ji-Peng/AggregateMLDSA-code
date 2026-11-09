@@ -61,3 +61,13 @@ url = "https://github.com/arkworks-rs/spongefish"
 commit = "ef9741346a150039427d9e0c02d6b2d73e93ec81"
 license = "MIT OR Apache-2.0"
 role = "dependency"
+
+[[source]]
+name = "alloul26"
+url = "https://github.com/qlyphs/geode"
+tag = "lab-bc4788b"
+commit = "7b31f4a7c5241ae0e9287b8be78411fe6c81d32f"
+toolchain = "1.96.0"
+license = "BUSL-1.1"
+role = "optional comparison"
+path = "artifact/build/geode-lab-bc4788b"

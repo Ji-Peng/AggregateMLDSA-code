@@ -9,6 +9,7 @@
 #   ./run.sh full     the experiment matrix of the evaluation
 #   ./run.sh tables   raw JSON -> LaTeX tables
 #   ./run.sh all      fetch, build, gates, quick (or full with --full), tables
+#   ./run.sh alloul26  run the optional Alloul26 comparison
 #   ./run.sh freeze   maintainers: re-pin hashes.json and sources.lock to HEAD
 #
 # Every run uses relation H-FIPS. gates, quick, full and all take
@@ -46,13 +47,22 @@ case "$mode" in
     exec python3 scripts/gates.py "$@"
     ;;
   quick | full)
-    python3 scripts/runner.py "$mode" "$@" || exit 1
+    extra=()
+    alloul26=0
+    for arg in "$@"; do
+      case "$arg" in --alloul26) alloul26=1 ;; *) extra+=("$arg") ;; esac
+    done
+    python3 scripts/runner.py "$mode" "${extra[@]}" || exit 1
     for arg in "$@"; do
       case "$arg" in
         --dry-run | -n) exit 0 ;;
       esac
     done
-    exec python3 scripts/gen_tables.py
+    python3 scripts/gen_tables.py || exit 1
+    if (( alloul26 )); then bash scripts/alloul26.sh; fi
+    ;;
+  alloul26)
+    exec bash scripts/alloul26.sh "$@"
     ;;
   tables)
     exec python3 scripts/gen_tables.py "$@"
@@ -62,11 +72,13 @@ case "$mode" in
     ;;
   all)
     run_mode=quick
+    alloul26=0
     extra=()
     relations=()
     while [ $# -gt 0 ]; do
       case "$1" in
         --full) run_mode=full ;;
+        --alloul26) alloul26=1 ;;
         --relations)
           relations=(--relations "${2:-}")
           extra+=("$1" "${2:-}")
@@ -85,6 +97,7 @@ case "$mode" in
     python3 scripts/gates.py ${relations[@]+"${relations[@]}"} || exit 1
     python3 scripts/runner.py "$run_mode" "${extra[@]}" || exit 1
     python3 scripts/gen_tables.py || exit 1
+    if (( alloul26 )); then bash scripts/alloul26.sh; fi
     ;;
   -h | --help | help)
     usage

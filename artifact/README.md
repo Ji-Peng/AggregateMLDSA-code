@@ -333,3 +333,29 @@ Nix packaging (a flake with both Rust toolchains) is future work.
 ## License
 
 Our code is under the MIT licence (`../LICENSE`); vendored dependencies keep their upstream licences (`sources.lock`).
+
+## Comparison with Alloul26
+
+`./run.sh alloul26 --n 128 --family J --isa avx2 --threads 16 --runs 1`
+fetches the pinned Geode tag into `build/`, builds it with Rust 1.96.0, and
+creates and verifies an ML-DSA-87 certificate from distinct real signatures.
+It prints one JSON line per run. Choose family `J` or `U`, ISA `avx2`
+(x86-64-v3) or `avx512` (x86-64-v4), and any supported power of two from
+32 to 65536. `--soundness default` is the only available profile. The CLI
+runs one proof per process, so there is no in-process warm-up; each result
+records the upstream prover and in-process verifier times and process peak
+RSS from `/usr/bin/time -v`. Compare with separate process runs of our
+ML-DSA-87 H-FIPS prover on the same allocation and thread count. Alloul26
+uses a stronger fixed soundness target (family J has a 2^-188 classical
+bound; family U has a QROM bound); an approximately 128-bit profile is not
+configurable. H-u is no longer available in the current code.
+
+The optional `--alloul26` flag on `quick`, `full`, or `all` runs the default
+128-signature smoke comparison after the usual work; it is off by default.
+For aligned measurements invoke `alloul26` explicitly at each matching N,
+ISA, and thread count, pinning both programs to the same CPUs. Large cases
+can require tens of GiB of memory and substantial disk-backed spill space;
+set `H9_SPILL_DIR`, `H9_SPILL_MIN`, and `H9_SPILL_SEQ` as appropriate.
+The upstream report gives about 19 s and 6 GiB RSS for J at 2048 on its
+24-vCPU host; larger cases take minutes and may spill hundreds of GiB.
+Geode is licensed under BSL 1.1 and is fetched from upstream, not redistributed.
