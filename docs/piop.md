@@ -402,6 +402,18 @@ main `eq(r^(1))` group); `gamma^(2) in K^9`, terminal 10 (`b_t`, the leaves of `
 (54, 55); `gamma^(3) in K^56`, terminal 40. `F7` lives in two groups at `EqPoint::HalfR2` (main `delta^2`, `D_2` `u_h`). The
 proof-of-work plan equals H-exact's.
 
+### 7.5 Stage placement of the w1Encode checks (deviation K26)
+
+7.2 to 7.4 list `bool_b[t]` and `range_w1` in stage 1 and the reductions of `b_t` from
+`r^(1)` in stage 3, as first implemented. Now stage 1 (degree 3 for every set) holds only
+`bool_y1[t]`, `level2[t]`, `level3`, `bool_y2[t]` (`gamma^(1) in K^19`; 13 for the four-bit
+sets) on `D_1`, `D_2`, terminal 12 (`y1`, `y2`). `range_w1` (ML-DSA-44) is the last stage-2
+instance, in the main `eq(r^(1))` group (`gamma^(2) in K^10` under both relations; with
+`leaf6[U_hi]` under H-exact, with `F3` under H-FIPS). `bool_b[t]` is a stage-3 zero-check in
+the main `eq(r^(2))` group at the positions the `b_t` reductions from `r^(1)` held
+(`stage3::Gammas::bool_b`), so `gamma^(3)` keeps 50 and 56 coefficients and stage 3 has no
+main `eq(r^(1))` group.
+
 ## 8. Weight tables (`weights`)
 
 Point conventions (least significant coordinate first): a main point splits as

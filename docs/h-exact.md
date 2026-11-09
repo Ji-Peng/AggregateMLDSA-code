@@ -941,6 +941,13 @@ plan digest equal H-exact's and H-u's (`pow.rs` test `h_fips_plans_equal_h_exact
 (relation byte 2, the `G_main4` and `G_2` descriptors, the catalog row), as 3.7 argues for
 H-exact; the round-by-round ledger before work is H-exact's `1,354/|K|` at `2^15`.
 
+Since the stage reshuffle (`docs/deviations.md` K26) the counts above read: stage gammas
+(19, 10, 56) (H-exact (19, 10, 50)), stage terminals (12, 10, 40), stage degrees (3, 5, 3);
+PIOP stage bytes `16 (13 + 12 + 6 + 10 + 1 + 40 + 11 d_main)` = 5,712 B at `2^15`; nonce
+stream 4,178 bits, 523 bytes, 2,546 units of work; ledger `1,329/|K|`. `bool_b[t]` sits in
+the stage-3 `eq(r^(2))` group, `range_w1` beside `F3` in the stage-2 `eq(r^(1))` group, and
+the plans of H-FIPS and H-exact are still equal.
+
 Header and verifier: relation byte 2 in the proof header and byte 3 of event 0;
 `Relation::from_id(2)` is H-FIPS (byte 3 and above are unknown); the verifier takes the relation
 from its caller and rejects another relation's proof before event 0 (`VerifyError::Relation`);

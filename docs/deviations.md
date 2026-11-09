@@ -1117,6 +1117,37 @@ Soundness: docs/soundness.md Section 12 places the tied parts' stages in the seg
 `sd`, before `X`, with addresses that omit `X`; the fold coordinates' addresses omit the
 parts (Lemma 12.3 (ii) weakened); no decoder at `X`.
 
+## K26. Stage reshuffle: no main-domain instance in stage 1 (spec Sections 7.1, 7.3 to 7.5, 9.3, 10, 12.1; docs/soundness.md 3.1, 3.4, 10)
+
+Stage 1 tested the Booleanity `bool_b[t]` of the w1Encode bits and ML-DSA-44's range
+identity `range_w1` at `tau` on the main domain: its only main-domain group, of degree 4,
+whose terminal claims `b_t(r^(1))` cost stage 3 a separate `eq(r^(1))` reduction group.
+
+Code (`agg_piop::{stage1, stage2, stage3, claims}`):
+
+- `bool_b[t]` (every lane of every set) is a stage-3 zero-check at `r^(2)` in the main
+  `eq(r^(2))` group, whose lanes hold the bits for the ring identity and their reductions;
+  it takes the `gamma^(3)` positions of the removed reductions of `b_t` from `r^(1)`, so
+  `gamma^(3)` keeps its length.
+- `range_w1` (ML-DSA-44) is the last stage-2 instance, in the main `eq(r^(1))` group (with
+  `leaf6[U_hi]` under H-exact, with `F3` under H-FIPS); its terminals `b_t(r^(2))` are
+  `def_y1`'s. `gamma^(2)`: 10 under both relations of ML-DSA-44; 18 and 22 for 65 and 87.
+- Stage 1 keeps `bool_y1`, `level2`, `level3`, `bool_y2` on `D_1`, `D_2`: degree 3 for every
+  set, 19 coefficients (ML-DSA-44) or 13 (four-bit sets), terminal claims `y1`, `y2` only
+  (12 or 8). `transcript::STAGE_DEGREES` is `(3, 5, 3)` for every set.
+- Proof of work: stage-1 rounds grind `bit_length(3) = 2` bits (ML-DSA-44: 3 before), the
+  stage-1 batching site 5 (ML-DSA-44) or 4 (65, 87; 6 before) bits; every site keeps
+  `2^-128`. At `2^15` (ML-DSA-44): 4,178 bits, 523 bytes, 2,546 units of work (4,203, 526,
+  2,646 before); new plan digests in `docs/soundness.md` 10.
+- Wire: the stage-1 messages have 3 elements and its terminal 12 claims; PIOP wire version 4,
+  unreleased, kept. Every aggregate changes.
+
+Soundness: both moved identities test tables committed in round 1 at a point drawn by the
+preceding stage, the argument of `docs/soundness.md` 3.4 for the leaves, links and H-exact's
+Booleanity; no site is added. Cost (local direction, 8K, AVX2, PIOP branches run one after
+the other): stages 1 to 3 together 863 ms to 722 ms (stage 1 about 240 to 50 ms, stage 2
++75 to +115 ms, stage 3 about equal); the 32K effect is to be measured on xcni.
+
 ## A1. Mode-A driver: inputs, checks and caches (spec Sections 2, 10, 11, 13)
 
 Code (`agg_cli::mode_a::{Aggregator, AggregateVerifier}`):

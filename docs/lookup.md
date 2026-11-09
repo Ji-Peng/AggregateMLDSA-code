@@ -205,10 +205,11 @@ one challenge or `368/|K|` with two at `2^15`, in place of `26/|K|`; the total s
 below `2^-116`). The root check is exact; the merge at `mu_s` costs `1/|K|` per session
 because one false claim suffices to carry on.
 
-Ledger at `N = 2^15` (round by round, spec 12.1): stage sum-checks `12 d_main` (degrees
-4, 5, 3, set by `range_w1` in stage 1 and `leaf8[K_2]`, `leaf8[K_3]` in stage 2), the
-zero-check point `tau` `d_main`, the three stage batching vectors 3: `328/|K|`; plus GKR
-`1,026/|K|`: `1,354/|K| = 2^-117.6` for every field term except the LogUp one.
+Ledger at `N = 2^15` (round by round, spec 12.1): stage sum-checks `11 d_main` (degrees
+3, 5, 3, set by the bridge Booleanity in stage 1 and `leaf8[K_2]`, `leaf8[K_3]` in stage 2;
+before deviation K26 `range_w1` gave stage 1 degree 4), the zero-check point `tau` `d_main`,
+the three stage batching vectors 3: `303/|K|`; plus GKR `1,026/|K|`: `1,329/|K| = 2^-117.6`
+for every field term except the LogUp one.
 
 **The LogUp term is the critical one** (`2^-101` at `2^15` with one challenge, above every
 other term). Decision: two independent challenges. Section 2.1 records the bounded search;
