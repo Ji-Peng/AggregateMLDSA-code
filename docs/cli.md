@@ -98,6 +98,48 @@ Flock side's records taken from the tampered tables, tampered Flock records, a c
 Flock witness per part, and stale round-2 tables (the honest bits' parities and `Y_sigma`
 over tampered round-1 bits).
 
+### 1.1 Hash field
+
+`AggregatorConfig::hash_field` and `AggregateVerifier::hash_field` select the field in which
+the commitment hash `c~ = H(mu || w1Encode(w_1'))` is proven. `HashField::Gf2` (the default)
+is the path above: Flock proves the Keccak sponge over GF(2), and the parity bridge ties it
+to the PIOP. `HashField::Fp` proves the Keccak chain of every record over `F_p` inside the
+PIOP: seven more Akita groups in round 1, their zero-checks in stages 1 and 2, and one
+Akita opening of all eleven groups (spec Section 10.1). There are no Flock parts, no span,
+no bridge seed and no `Y_sigma`. The Keccak-side profile bound at event 0 is
+`FlockProfile::FpKeccak` (id 6). The aggregator runs `Aggregator::aggregate_44_fp`, which
+calls `agg_piop::prover::prove_with_tables_using` with `FpKeccakSide`. The verifier runs
+`AggregateVerifier::verify_fp`, which calls `agg_piop::verifier::verify_timed` with
+`FpKeccakVerifier`.
+
+The `F_p` hash field is defined for ML-DSA-44 under relation H-u only. The aggregator
+refuses another set (`AggregateError::HashFieldSet`) or relation
+(`AggregateError::HashFieldRelation`). A verifier of another set rejects every aggregate
+(`ConfigurationError::FpKeccakSet`). The test hooks (`AggregateHooks`) are not available
+under `F_p`.
+
+`agg aggregate`, `agg verify` and `agg bench` take `--hash-field gf2|fp` (default `gf2`).
+Under `fp` the options `--flock-profile`, `--flock-span` and `--part-log2` have no meaning.
+A command given one of them exits with status 2 and a message that names the option and
+`--hash-field`. `AGG_FLOCK_THREADS` is ignored under `fp`, since no Flock pool runs beside
+the PIOP; when it is set, the command prints `AGG_FLOCK_THREADS is ignored under
+--hash-field fp` on stderr and continues. `bench` prints `hash field gf2|fp` in its header
+and writes `"hash_field": "gf2"` or `"fp"` to its JSON.
+
+The proof header names the hash field: an `F_p` aggregate sets bit 3 of the flags byte
+(`agg_piop::wire::HASH_FIELD_FP_FLAG = 0x08`), and a GF(2) aggregate leaves it clear, so
+GF(2) bytes are unchanged. The verifier takes the hash field from its caller, never from the
+header. An aggregate whose header names the other field is rejected before parsing
+(`VerifyError::HashField`, from `agg_piop::wire::hash_field_of_flags`); a parse under the
+other field fails with `WireError::Flags`. Verifying an aggregate therefore needs the
+`--hash-field` it was made with.
+
+The byte gate of the `fp` mode is `artifact/expected/hashes-fp.json`, kept apart from
+`hashes.json` so that the default digests stay as they are. It pins the 1K ML-DSA-44 H-u
+`fp` aggregate of the artifact records, which must be byte-identical under every `AGG_ISA`
+tier and with `RAYON_NUM_THREADS=1`. The artifact gate writes the file; until then,
+`fp_single_thread_byte_identical` (Section 3) checks the identity at 100 records.
+
 ## 2. Files and the `agg` binary
 
 | File | Format (`agg_cli::record`, `agg_cli::cache`) |
@@ -181,6 +223,8 @@ verified under another profile: `slim` and `slim8` are opt-in, since `slim`'s 15
 zero-check rounds reach only `2^-127.8` (`docs/soundness.md` Section 4.3). `--flock-span off` proves every
 segment on its own (K10 parts) instead of one span over all segments (K16).
 
+`--hash-field gf2|fp` on `aggregate`, `verify` and `bench` selects the hash field (Section 1.1; tests in `tests/all/hash_field.rs`).
+
 `verify` reads only `(pk, M)` from the record file and exits with status 0 on accept, 1 on
 reject, 2 on a usage or file error. `bench` generates the records in memory and follows
 the benchmark protocol: `--warmup W` runs (default 1, discarded), then `--reps R` timed runs
@@ -252,6 +296,7 @@ CPU 2 after `crypto_bench off`; the numbers below are not benchmarks.
   aggregate; every variant is rejected without a panic. The span path above one segment
   (8,193 records of ML-DSA-44 and 65: one tied part, accepted; a flipped proof byte
   rejected) is `#[ignore]` and runs with `--ignored span_path` on the benchmark machine;
+- the `F_p` hash field (`tests/all/hash_field.rs`, Section 1.1): round trips at 17, 100 and 1,024 records, the wire round trip, flipped bytes and cuts, cross-field rejection, refused sets and relations, the `agg` options, and byte identity across thread counts and ISA caps;
 - the SIMD tiers (`simd_backends.rs`, `docs/engineering.md` Section 9) and the `AGG_ISA` cap
   of every kernel family (`isa_cap.rs`, through `AGG_SIMD_REPORT=1`).
 
