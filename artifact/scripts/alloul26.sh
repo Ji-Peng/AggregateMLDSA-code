@@ -55,6 +55,12 @@ trap 'rm -rf "$tmp"' EXIT
 export R3_OUT=$tmp
 for ((run=1; run<=runs; run++)); do
   /usr/bin/time -v -o "$tmp/time" "$CARGO_TARGET_DIR/release/r3-cert" h9 "$n" >"$tmp/log"
+  if [[ -n "${ALLOUL_LOG_DIR:-}" ]]; then
+    mkdir -p "$ALLOUL_LOG_DIR"
+    cp "$tmp/log" "$ALLOUL_LOG_DIR/alloul-$family-$n-$isa-run$run.log"
+    cp "$tmp/time" "$ALLOUL_LOG_DIR/alloul-$family-$n-$isa-run$run.time"
+    [[ -f "$tmp/h9-cert-$n.bin" ]] && cp "$tmp/h9-cert-$n.bin" "$ALLOUL_LOG_DIR/alloul-$family-$n-$isa-run$run.bin"
+  fi
   python3 - "$tmp/log" "$tmp/time" "$tmp/h9-cert-$n.bin" "$family" "$n" "$threads" "$isa" "$run" <<'PY'
 import json, pathlib, re, sys
 log = pathlib.Path(sys.argv[1]).read_text()
