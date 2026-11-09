@@ -1500,17 +1500,23 @@ pub fn sponge_records(
         .par_iter()
         .enumerate()
         .map(|(i, record)| {
+            // A record's cells are contiguous: cell `256 rho + j` of the record is at
+            // `main_index(j, rho, i)`, and its bits sit at `6 (256 rho + j) + t`, so four
+            // cells fill three bytes. The bits are gathered without branches into a 24-bit
+            // little-endian word per four cells (the low bit of a cell is either bit).
+            let base = main_index(0, 0, i);
+            debug_assert_eq!(main_index(N - 1, K - 1, i), base + K * N - 1);
+            const _: () = assert!(agg_witness::params::W1_BITS == 6 && W1_ENCODE_BYTES * 8 == 6 * K * N);
+            let cells = lanes.map(|lane| &lane[base..base + K * N]);
             let mut w1_encode = [0_u8; W1_ENCODE_BYTES];
-            for rho in 0..K {
-                for j in 0..N {
-                    let x = main_index(j, rho, i);
-                    for (t, lane) in lanes.iter().enumerate() {
-                        if lane[x] & 1 == 1 {
-                            let q = 1536 * rho + 6 * j + t;
-                            w1_encode[q / 8] |= 1 << (q % 8);
-                        }
+            for (m, out) in w1_encode.chunks_exact_mut(3).enumerate() {
+                let mut word = 0_u32;
+                for u in 0..4 {
+                    for (t, cell) in cells.iter().enumerate() {
+                        word |= u32::from(cell[4 * m + u] as u8 & 1) << (6 * u + t);
                     }
                 }
+                out.copy_from_slice(&word.to_le_bytes()[..3]);
             }
             SpongeRecord {
                 mu: record.mu,
