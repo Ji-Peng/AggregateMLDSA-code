@@ -145,6 +145,8 @@ fn policies() -> Vec<(&'static str, Policy)> {
         ("pair fold at level 2", Policy { quartet_lut: Choice::Forbid, ..AUTO }),
         ("without the claim recovery", Policy { recover: false, ..AUTO }),
         ("quartet tables without the claim recovery", Policy { recover: false, quartet_lut: Choice::Force, ..AUTO }),
+        ("row-major dense rounds", Policy { plane_tail: false, ..AUTO }),
+        ("row-major dense rounds without the claim recovery", Policy { plane_tail: false, recover: false, ..AUTO }),
     ]
 }
 
@@ -259,6 +261,11 @@ fn every_path_matches_the_reference_on_an_equality_group_with_every_term_kind() 
             check_all_paths(&lanes, &instances, Some(&tau), rounds, degree, 100 + rounds as u64);
             let group = Group::new(lanes.clone(), instances.clone(), Some(&tau), rounds, degree).unwrap();
             assert!(group.is_bucketed());
+            // The summand has degree four (the leaves, the edge and range identities), so the
+            // dense rounds run on the monomial form of the plane tail.
+            if layout() == Layout::Plane {
+                assert!(group.tail_terms.is_some(), "the tail is on");
+            }
             // Every lane is coded: bits (2 classes), the digit square / leaf maps (8), the
             // digit B under its square and the identity (16), the base-4 square (3).
             let classes: Vec<usize> = group.columns.iter().map(|c| c.classes).collect();
@@ -462,7 +469,8 @@ fn quartet_and_taylor_tables_reproduce_the_folded_lanes() {
     let lanes = eq_lanes(&cells);
     let instances = eq_instances(&mut rng);
     let tau = point(&mut rng, vars);
-    let policy = Policy { quartet_lut: Choice::Force, ..AUTO };
+    // Taylor tables serve the row-major dense rounds only.
+    let policy = Policy { quartet_lut: Choice::Force, plane_tail: false, ..AUTO };
     let mut group = Group::with_policy(lanes.clone(), instances, Some(&tau), vars, 5, policy).unwrap();
     let (r0, r1) = (field(&mut rng), field(&mut rng));
     group.round_message(0);
@@ -978,5 +986,106 @@ fn tail_round_timing() {
             times.push(format!("{message:.1}+{:.1}", start.elapsed().as_secs_f64() * 1e3));
         }
         eprintln!("rep {rep} vars {vars} tail {:?}: message+bind (ms) per round: {}", group.tail_shape(), times.join(" "));
+    }
+}
+
+/// Round times of the cubic and quartic equality groups of stage 2 (the edge and range
+/// identities on six lanes; the eight-valued leaves on two digit squares), on the plane tail
+/// and on the row-major dense rounds (diagnostic: `AGG_TAIL_TIMING_VARS` sets the domain,
+/// default 2^22; run with `-- --ignored --nocapture high_tail_round_timing`).
+#[test]
+#[ignore = "diagnostic: round times"]
+fn high_tail_round_timing() {
+    let vars: usize = std::env::var("AGG_TAIL_TIMING_VARS").ok().and_then(|v| v.parse().ok()).unwrap_or(22);
+    let mut rng = SplitMix64::new(17);
+    let signs = |rng: &mut SplitMix64| -> Vec<i8> { (0..1 << vars).map(|_| rng.below(3) as i8 - 1).collect() };
+    let mut cells = vec![signs(&mut rng), signs(&mut rng)];
+    cells.extend((0..4).map(|_| bits(&mut rng, 1 << vars)));
+    cells.extend((0..2).map(|_| digits(&mut rng, 1 << vars)));
+    let edge: Vec<Lane<'_>> = (0..6).map(|c| Lane::column(&cells[c])).collect();
+    let edge_instances = vec![
+        instance(&mut rng, vec![Term::Monomials(vec![(1, vec![1, 1, 1]), (-1, vec![1, 1]), (-1, vec![1, 1, 0]), (1, vec![1, 0])])]),
+        instance(&mut rng, vec![Term::RangeW1([2, 3, 4, 5])]),
+    ];
+    let leaf: Vec<Lane<'_>> = (6..8).map(|c| Lane::mapped(&cells[c], square_map())).collect();
+    let leaf_instances = vec![instance(&mut rng, vec![Term::Leaf(0, LeafPoly::Q8)]), instance(&mut rng, vec![Term::Leaf(1, LeafPoly::Q8)])];
+    let tau = point(&mut rng, vars);
+    let challenges = point(&mut rng, vars);
+    for (name, lanes, instances) in [("edge", &edge, &edge_instances), ("leaf", &leaf, &leaf_instances)] {
+        for rep in 0..3 {
+            for plane_tail in [true, false] {
+                let policy = Policy { plane_tail, ..AUTO };
+                let mut group = Group::with_policy(lanes.clone(), instances.clone(), Some(&tau), vars, 5, policy).unwrap();
+                let mut times = Vec::new();
+                let mut total = 0.0;
+                for (round, &r) in challenges.iter().enumerate().take(12) {
+                    let start = std::time::Instant::now();
+                    let _ = group.round_message(round);
+                    let message = start.elapsed().as_secs_f64() * 1e3;
+                    let start = std::time::Instant::now();
+                    group.bind(round, r);
+                    let bind = start.elapsed().as_secs_f64() * 1e3;
+                    if round >= 2 {
+                        total += message + bind;
+                    }
+                    times.push(format!("{message:.1}+{bind:.1}"));
+                }
+                eprintln!(
+                    "{name} rep {rep} vars {vars} tail {:?}: rounds 2+ {total:.1} ms; message+bind per round: {}",
+                    group.tail_shape(),
+                    times.join(" ")
+                );
+            }
+        }
+    }
+}
+
+/// Cubic and quartic equality groups run their dense rounds on the monomial form of the
+/// plane tail: lane polynomials up to degree four (their coefficients merged into one slot),
+/// products of three and four lanes, the bit-range identity, an uncoded field lane and a
+/// weighted affine form beside them. The domains and the second equality point (zero
+/// coordinates at the variables of levels 2 and 3, so those rounds evaluate `q(1)`) are those
+/// of the quadratic tail's test.
+#[test]
+fn plane_tail_monomial_groups_match_the_reference() {
+    let mut rng = SplitMix64::new(18);
+    for vars in [4, 5, 6, 11, 16] {
+        let cells = eq_fixture(&mut rng, vars);
+        let wide: Vec<E> = point(&mut rng, 1 << vars);
+        let mut lanes = eq_lanes(&cells);
+        lanes.push(Lane::Folded(wide.clone())); // 10: an uncoded field lane
+        let edge = Term::Monomials(vec![(1, vec![8, 8, 8]), (-1, vec![8, 8]), (-1, vec![8, 8, 1]), (1, vec![8, 1])]);
+        let quartic = vec![
+            instance(&mut rng, vec![Term::Leaf(4, LeafPoly::Q8)]),
+            instance(&mut rng, vec![Term::Leaf(7, LeafPoly::Q8)]),
+            instance(&mut rng, vec![Term::Product(vec![0, 1, 2, 10])]),
+            instance(&mut rng, vec![edge.clone(), Term::Bool(3)]),
+        ];
+        let cubic = vec![
+            instance(&mut rng, vec![edge]),
+            instance(&mut rng, vec![Term::RangeW1([3, 2, 1, 0])]),
+            instance(&mut rng, vec![Term::Product(vec![5, 6, 10])]),
+            instance(
+                &mut rng,
+                vec![Term::Affine {
+                    weight: Some(2),
+                    lanes: vec![(9, -3), (8, 16), (3, 4096)],
+                    constant: 7,
+                }],
+            ),
+        ];
+        for (instances, degree) in [(&quartic, 5), (&cubic, 4)] {
+            let tau = point(&mut rng, vars);
+            let mut sparse = point(&mut rng, vars);
+            sparse[2] = E::zero();
+            sparse[3] = E::zero();
+            for tau in [tau, sparse] {
+                let group = Group::new(lanes.clone(), instances.clone(), Some(&tau), vars, degree).unwrap();
+                if layout() == Layout::Plane {
+                    assert!(group.tail_terms.is_some(), "the tail is on");
+                }
+                check_all_paths(&lanes, instances, Some(&tau), vars, degree, 300 + vars as u64);
+            }
+        }
     }
 }

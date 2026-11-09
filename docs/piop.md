@@ -316,6 +316,18 @@ A self-check compares the final claim with `eq` times the summand at the termina
   challenge as they are gathered (`FoldedRows`). Its fourth bind gathers and folds them twice
   into the first plane table, a sixteenth of the domain, while evaluating the fifth round in
   the same pass; no level-3 table is written. Its quartet lanes need no Taylor tables.
+  A group whose summand is not bilinear but a sum of monomials of degree at most four (at
+  most four lanes each: cubic and quartic lane polynomials such as the leaves `Q_8` and
+  H-FIPS's `F_e`, products of three or four lanes, `range_w1`) runs the same rounds on the
+  monomial form (`agg_simd::high`): per pair the kernel returns, per slot, the inner
+  polynomial's values at `0..D` and its coefficient of `X^D` (`D` its degree), from lane
+  powers computed once per point and item, and the prover interpolates `q` (with `q(1)` from
+  the claim when the equality factor allows it). Slots that hold single lane powers only
+  merge into one slot with the coefficients inside the kernel. The tail reads the folded
+  pieces, so the depressed quartics and their lane translations serve the row-major dense
+  table only. Stage 2's `eq(r^(1))` groups (the edge and range identities on the main
+  domain, the projection leaves) run on it in every set; `AGG_TAIL_HIGH=0` keeps such groups
+  on the row-major dense rounds (an A/B switch with the same messages).
 - A projection weight kept as its two factors (`RankOneGroup`) folds only the combination
   `g = V_lo + 2^16 V_hi + 2^15` by the low challenges (one integer dot per high row) for the
   high rounds.
