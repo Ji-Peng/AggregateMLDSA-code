@@ -137,8 +137,8 @@ other field fails with `WireError::Flags`. Verifying an aggregate therefore need
 The byte gate of the `fp` mode is `artifact/expected/hashes-fp.json`, kept apart from
 `hashes.json` so that the default digests stay as they are. It pins the 1K ML-DSA-44 H-u
 `fp` aggregate of the artifact records, which must be byte-identical under every `AGG_ISA`
-tier and with `RAYON_NUM_THREADS=1`. The artifact gate writes the file; until then,
-`fp_single_thread_byte_identical` (Section 3) checks the identity at 100 records.
+tier and with `RAYON_NUM_THREADS=1`. The tier identity is checked at 1K against this file;
+`fp_single_thread_byte_identical` (Section 3) checks the single-thread identity at 100 records.
 
 ## 2. Files and the `agg` binary
 
