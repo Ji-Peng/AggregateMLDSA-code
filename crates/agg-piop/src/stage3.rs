@@ -681,6 +681,7 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
         degree: DEGREE,
         gamma_count: gammas.count(),
         groups,
+        folded: 0..0,
     }
 }
 

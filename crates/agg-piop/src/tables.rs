@@ -11,6 +11,7 @@
 use agg_witness::bridge::BridgeMatrices;
 
 use crate::keccak_fp::virtuals::KeccakProverTables;
+use crate::keccak_fp::weights::KeccakReduceTables;
 use crate::kernel::{Lane, Source};
 use crate::manifest::{Column, HashField};
 use crate::public_data::PublicData;
@@ -109,6 +110,8 @@ pub struct ProverTables<'a> {
     pub wp_lanes: (Vec<Vec<E>>, Vec<E>),
     /// The committed and virtual Keccak tables under `HashField::Fp`.
     pub keccak: Option<&'a KeccakProverTables>,
+    /// The stage-3 Keccak reduction weights (after `gamma^(3)`, under `HashField::Fp`).
+    pub keccak_reduce: Option<KeccakReduceTables>,
 }
 
 impl<'a> ProverTables<'a> {
@@ -143,12 +146,24 @@ impl<'a> ProverTables<'a> {
             wp_planes: None,
             wp_lanes: (Vec::new(), Vec::new()),
             keccak: None,
+            keccak_reduce: None,
         }
     }
 
     /// Attach the prime-field Keccak tables for resolving Keccak lanes.
     pub fn set_keccak(&mut self, keccak: &'a KeccakProverTables) {
         self.keccak = Some(keccak);
+    }
+
+    /// Attach the stage-3 Keccak reduction weights, built once `gamma^(3)` is drawn.
+    pub fn set_keccak_reduce(&mut self, weights: KeccakReduceTables) {
+        self.keccak_reduce = Some(weights);
+    }
+
+    fn keccak_reduce(&self, id: WeightId) -> &KeccakReduceTables {
+        self.keccak_reduce
+            .as_ref()
+            .unwrap_or_else(|| panic!("the Keccak reduction weights are not set for {id:?}"))
     }
 
     /// Materialize the parities of the committed bits under the bridge matrices (`Gf2`), or an
@@ -255,10 +270,19 @@ impl<'a> ProverTables<'a> {
         }
     }
 
-    /// A weight lane kept as two factors (the projection weights of the sets with lanes).
+    /// A weight lane kept as two factors (the projection weights of the sets with lanes, the
+    /// stage-3 Keccak reduction weights).
+    ///
+    /// # Panics
+    /// On a Keccak reduction weight before [`Self::set_keccak_reduce`] or outside its tables.
     #[must_use]
     pub fn rank_one(&self, id: LaneId) -> Option<RankOneWeight<'_>> {
         match id {
+            LaneId::Weight(w @ (WeightId::KeccakReduce { .. } | WeightId::KeccakAbsorb { .. })) => Some(
+                self.keccak_reduce(w)
+                    .rank_one(w)
+                    .unwrap_or_else(|| panic!("{w:?} is not in the Keccak reduction weights")),
+            ),
             LaneId::Weight(WeightId::Proj(lane)) if self.has_lanes() => Some(RankOneWeight {
                 low: self.wp_lanes.0.get(usize::from(lane))?,
                 high: &self.wp_lanes.1,
@@ -328,6 +352,12 @@ impl<'a> ProverTables<'a> {
             // The stage takes the factors ([`Self::rank_one`]); a group that cannot use them
             // materializes the table from them.
             LaneId::Weight(WeightId::Proj(_)) if self.has_lanes() => Lane::Folded(Vec::new()),
+            // The stage takes the factors ([`Self::rank_one`]) or materializes them; the lane is
+            // only a placeholder, resolved once the weights are set.
+            LaneId::Weight(w @ (WeightId::KeccakReduce { .. } | WeightId::KeccakAbsorb { .. })) => {
+                let _ = self.keccak_reduce(w);
+                Lane::Folded(Vec::new())
+            }
             LaneId::Weight(WeightId::Proj(_)) => match &self.wp_planes {
                 Some(planes) => Lane::Source(Source::Planes(planes)),
                 None => Lane::Source(Source::Field(self.wp.as_deref().expect("W after r^(2)"))),
@@ -391,6 +421,33 @@ mod tests {
         let cached = ProverTables::from_parity1_cache(tables, cache, &matrices);
         assert_eq!(cached.parity1, ProverTables::new(tables, &matrices).parity1);
         assert_eq!(cached.parity1.value(0, 0), 2);
+    }
+
+    #[test]
+    fn keccak_reduction_weights_resolve_to_their_factors_once_set() {
+        use crate::keccak_fp::weights::KeccakReductions;
+        use crate::manifest::CommitmentManifest;
+        use crate::source_tables::{BridgeGroupTables, MainTables, RecordValues};
+        let manifest = CommitmentManifest::for_batch(3).unwrap();
+        let main = MainTables::from_values(&manifest, &vec![RecordValues::zero(); 3]).unwrap();
+        let matrices = BridgeMatrices::random_for_tests(941);
+        let bridge = BridgeGroupTables::build(&manifest, &main, &matrices, &crate::projection::test_psi(1)).unwrap();
+        let tables = SourceTables { manifest: &manifest, main: &main, bridge: &bridge };
+        let mut prover = ProverTables::new(tables, &matrices);
+        let fp = CommitmentManifest::for_batch_fp(8).unwrap();
+        let plan = KeccakReductions::for_manifest(&fp, 0);
+        let mut rng = agg_witness::gen::SplitMix64::new(942);
+        let mut point = |len: usize| -> Vec<E> { (0..len).map(|_| E::from_u64(rng.next_u64())).collect() };
+        let (r1, r2) = (point(fp.d_stage()), point(fp.d_stage()));
+        let weights = plan.tables(&point(plan.claims().len()), &r1, &r2);
+        let (w, a) = (&plan.weights()[3], &plan.absorbs()[1]);
+        let reduce = WeightId::KeccakReduce { poly: w.poly, point: w.point };
+        let absorb = WeightId::KeccakAbsorb { t: a.t, lane: a.lane, point: a.point };
+        let expected = (weights.rank_one(reduce).unwrap().materialize(), weights.rank_one(absorb).unwrap().materialize());
+        prover.set_keccak_reduce(weights);
+        assert_eq!(prover.rank_one(LaneId::Weight(reduce)).unwrap().materialize(), expected.0);
+        assert_eq!(prover.rank_one(LaneId::Weight(absorb)).unwrap().materialize(), expected.1);
+        assert!(matches!(prover.lane(LaneId::Weight(reduce)), Lane::Folded(ref cells) if cells.is_empty()));
     }
 
     #[test]

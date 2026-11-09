@@ -16,6 +16,7 @@ use crate::kernel::{
     evaluate_compressed, expected_terminal, layout, Group, GroupInstance, Lane, Layout, LinearIntGroup,
     PlaneLinearIntGroup, PlaneWeightIntGroup, Source, Term, WeightIntGroup,
 };
+use crate::keccak_fp::masks::KeccakPoint;
 use crate::manifest::{Column, CommitmentManifest, GroupRole};
 use crate::split_weight::{LaneSplitGroup, Level1Split, RankOneGroup, RankOneWeight, SplitGroup};
 use crate::transcript::{gamma_site, round_sites, Transcript, TranscriptError};
@@ -36,6 +37,26 @@ pub enum WeightId {
     /// The projection weight `W(pos, i) = P(pos) eq(r'_sig, i)` on the main domain
     /// (`projection`), in polynomial lane `rho` of `v`.
     Proj(u8),
+    /// The stage-3 reduction weight `P(z, s) eq(r_i, i)` of the committed Keccak polynomial
+    /// `poly` on the Keccak domain: every claim of stage 1 or 2 at `point` that reads `poly`
+    /// (its own value, a rotation, a slot shift), weighted by its stage-3 coefficient.
+    KeccakReduce {
+        /// The committed Keccak polynomial (`KeccakA`, `KeccakC`, `KeccakCPrime`).
+        poly: Column,
+        /// The stage whose Keccak claims the weight reduces.
+        point: KeccakPoint,
+    },
+    /// The stage-3 weight `u_t(j, rho) eq(r_i, i)` on the main domain that reduces the claims on
+    /// the absorbed blocks at `point` to the committed bits `b_t` of polynomial lane `lane`
+    /// (lane 0 for ML-DSA-44).
+    KeccakAbsorb {
+        /// Bit index of `w_1'`.
+        t: u8,
+        /// Polynomial lane of the bits.
+        lane: u8,
+        /// The stage whose block claims the weight reduces.
+        point: KeccakPoint,
+    },
 }
 
 /// A table read by a stage.
@@ -79,7 +100,10 @@ impl LaneId {
         match self {
             Self::Column(c) | Self::DigitSquare(c) => c.domain(),
             Self::Parity1(_) => GroupRole::Level1,
-            Self::Weight(WeightId::Level1(_) | WeightId::Ring(_) | WeightId::Proj(_)) => GroupRole::Main,
+            Self::Weight(
+                WeightId::Level1(_) | WeightId::Ring(_) | WeightId::Proj(_) | WeightId::KeccakAbsorb { .. },
+            ) => GroupRole::Main,
+            Self::Weight(WeightId::KeccakReduce { .. }) => GroupRole::KeccakA(0),
             Self::Weight(WeightId::Level2) => GroupRole::Level1,
             Self::Weight(WeightId::Level3(_)) => GroupRole::Level2,
             Self::KeccakRot(_)
@@ -210,13 +234,24 @@ pub struct StageSpec {
     pub gamma_count: usize,
     /// The groups.
     pub groups: Vec<GroupSpec>,
+    /// Gamma indices whose coefficients are folded into public weight lanes read by
+    /// [`UNBATCHED`] parts (the stage-3 reductions of the Keccak claims): they carry claimed
+    /// sums but appear in no instance.
+    pub folded: std::ops::Range<usize>,
 }
 
 impl StageSpec {
     /// Check that every gamma index appears (an instance may spread its summands over
-    /// several groups) and every lane sits on its group's domain.
+    /// several groups, and the folded indices count as used) and every lane sits on its
+    /// group's domain.
     pub fn validate(&self) -> Result<(), String> {
+        if self.folded.end > self.gamma_count {
+            return Err(format!("folded gamma indices {:?} out of range", self.folded));
+        }
         let mut seen = vec![false; self.gamma_count];
+        for slot in &mut seen[self.folded.clone()] {
+            *slot = true;
+        }
         for group in &self.groups {
             if group.eq.mask() == Some(0) {
                 return Err("masked equality point has an empty slot mask".into());
@@ -1861,6 +1896,7 @@ mod tests {
                 lanes: vec![LaneId::Column(col0), LaneId::Column(col1)],
                 instances,
             }],
+            folded: 0..0,
         };
         spec.validate().expect("valid masked stage spec");
 

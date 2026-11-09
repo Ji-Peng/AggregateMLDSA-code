@@ -363,6 +363,7 @@ fn keccak_specs_count_and_degree() {
         degree: 4,
         gamma_count: s1_count,
         groups: s1_zero,
+        folded: 0..0,
     }
     .validate()
     .expect("stage-1 Keccak spec validates");
@@ -400,6 +401,7 @@ fn keccak_specs_count_and_degree() {
         degree: 5,
         gamma_count: s2_count,
         groups: s2_zero,
+        folded: 0..0,
     }
     .validate()
     .expect("stage-2 Keccak spec validates");
@@ -542,6 +544,7 @@ fn keccak_stage12_groups_prove_and_replay() {
             degree: stage1::DEGREE,
             gamma_count: s1_gamma_count,
             groups: s1_groups,
+            folded: 0..0,
         };
         s1_spec.validate().expect("stage 1 Keccak spec validates");
 
@@ -556,6 +559,7 @@ fn keccak_stage12_groups_prove_and_replay() {
             degree: stage2::DEGREE,
             gamma_count: s2_gamma_count,
             groups: s2_groups,
+            folded: 0..0,
         };
         s2_spec.validate().expect("stage 2 Keccak spec validates");
 

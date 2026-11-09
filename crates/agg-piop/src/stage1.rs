@@ -283,6 +283,7 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
         degree: degree(manifest),
         gamma_count: gammas.count(),
         groups,
+        folded: 0..0,
     }
 }
 
