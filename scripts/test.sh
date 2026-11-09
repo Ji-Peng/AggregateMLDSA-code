@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the workspace tests on CPUs 0,1,3-15 (CPU 2 is reserved), then the lib
+# Run the workspace tests (pinned with taskset to $AGG_CPUS when it is set), then the lib
 # tests of the vendored flock-core, which the workspace excludes (Cargo.toml `exclude`) and
 # whose patched verifier the Keccak side depends on.
 # Usage: scripts/test.sh [extra cargo test args...]   e.g. scripts/test.sh --release -p agg-witness
@@ -21,11 +21,13 @@ for arg in "$@"; do
   esac
 done
 [[ -n "${SKIP_FLOCK_CORE:-}" ]] && vendored=0
+pin=()
+[[ -n "${AGG_CPUS:-}" ]] && pin=(taskset -c "$AGG_CPUS")
 
-taskset -c 0,1,3-15 cargo test --workspace "$@"
+"${pin[@]}" cargo test --workspace "$@"
 
 if [[ "$vendored" == 1 ]]; then
   CARGO_TARGET_DIR="${FLOCK_CORE_TARGET_DIR:-target/flock-core}" \
-    taskset -c 0,1,3-15 cargo test "${release[@]}" \
+    "${pin[@]}" cargo test "${release[@]}" \
     --manifest-path vendor/flock-core/Cargo.toml --lib -- --skip ligerito_size_breakdown_m20
 fi

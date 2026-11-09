@@ -2,13 +2,11 @@
 #
 # `fetch` clones the two external trees under `artifact/vendor/`, verifies the
 # full commit below, and checks that Cargo.lock names the same revisions for
-# the crates cargo resolves. The archive URL of this repository is a
-# placeholder until the anonymous artifact is deposited.
+# the crates cargo resolves.
 
 [[source]]
 name = "ours"
-url = "PLACEHOLDER (anonymous repository URL to be filled at submission)"
-archive_url = "PLACEHOLDER (anonymous archive URL and DOI to be filled at submission)"
+url = "https://anonymous.4open.science/r/AggregateMLDSA/"
 commit = "c1c7590ef7a4bbeff08c47b5015eb1f796b46bf9"
 license = "MIT OR Apache-2.0"
 role = "prover, verifier"

@@ -2088,7 +2088,7 @@ mod lane_tests {
                     }
                     let mut x = 0x9e37_79b9_i64;
                     for _ in 0..4096 {
-                        x = (x * 6_364_136_223_846_793 + 1) % (1 << 33);
+                        x = x.wrapping_mul(6_364_136_223_846_793).wrapping_add(1) % (1 << 33);
                         probes.push((x - (1 << 32) / 2) as i32);
                         probes.push(((x % (1 << 21)) - (1 << 20)) as i32);
                     }
