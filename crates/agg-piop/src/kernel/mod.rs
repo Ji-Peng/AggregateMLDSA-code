@@ -141,10 +141,178 @@ pub enum Source<'a> {
         /// The map applied to every cell (identity for a committed column).
         map: &'a [i64; 256],
     },
+    /// Bit-packed 0/1 cells (a Keccak lane, possibly rotated and slot-shifted), read as
+    /// identity-mapped bytes: every path gives the same values as the expanded `i8` column.
+    Bits(BitCells<'a>),
     /// A small-integer table (the virtual parities `y^(1)` when a value exceeds `i8`).
     Ints(&'a [i32]),
     /// A materialized field table (a public weight).
     Field(&'a [E]),
+}
+
+/// Slots per record of a bit-packed lane: one word per slot, `BIT_SLOTS` words per record.
+pub const BIT_SLOTS: usize = 16;
+
+/// Which word a slot of a bit-packed lane reads.
+#[derive(Clone, Copy, Debug)]
+pub enum SlotShift<'a> {
+    /// Slot `s` reads word `s` of its record.
+    None,
+    /// Slot `s > 0` reads word `s - 1` of its record, slot 0 the last word of the same record
+    /// in this table of the previous slot group (as long as `words`).
+    Prev(&'a [u64]),
+    /// Slot `s > 0` reads word `s - 1` of its record, slot 0 is zero (the first slot group).
+    Zero,
+}
+
+/// 0/1 cells packed 64 to a word: lane word `w` is the word that slot `w % BIT_SLOTS` of
+/// record `w / BIT_SLOTS` reads (by `shift`) rotated left by `rot`, and cell `64 w + z` is
+/// its bit `z`, that is bit `(z - rot) mod 64` of the stored word.
+#[derive(Clone, Copy, Debug)]
+pub struct BitCells<'a> {
+    words: &'a [u64],
+    rot: u32,
+    shift: SlotShift<'a>,
+}
+
+impl<'a> BitCells<'a> {
+    /// The lane over `words` (a whole number of records when shifted).
+    ///
+    /// # Panics
+    /// On `rot >= 64`, a shifted lane of a partial record, or a previous table of another length.
+    #[must_use]
+    pub fn new(words: &'a [u64], rot: u32, shift: SlotShift<'a>) -> Self {
+        assert!(rot < 64, "rotation below the word size");
+        match shift {
+            SlotShift::None => {}
+            SlotShift::Prev(prev) => assert!(prev.len() == words.len() && words.len().is_multiple_of(BIT_SLOTS)),
+            SlotShift::Zero => assert!(words.len().is_multiple_of(BIT_SLOTS)),
+        }
+        Self { words, rot, shift }
+    }
+
+    /// Number of cells.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        64 * self.words.len()
+    }
+
+    /// True when empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.words.is_empty()
+    }
+
+    /// Lane word `w`: the 64 cells `64 w..64 w + 64`, cell `64 w + z` at bit `z`.
+    #[inline(always)]
+    #[must_use]
+    pub fn word(&self, w: usize) -> u64 {
+        let stored = match self.shift {
+            SlotShift::None => self.words[w],
+            _ if !w.is_multiple_of(BIT_SLOTS) => self.words[w - 1],
+            SlotShift::Prev(prev) => prev[w + BIT_SLOTS - 1],
+            SlotShift::Zero => 0,
+        };
+        stored.rotate_left(self.rot)
+    }
+
+    /// Cell `i` (0 or 1).
+    #[inline(always)]
+    #[must_use]
+    pub fn bit(&self, i: usize) -> i64 {
+        ((self.word(i / 64) >> (i % 64)) & 1) as i64
+    }
+
+    /// Identity key of the lane (the coded columns are shared by equal keys).
+    fn key(&self) -> (usize, usize, usize, usize) {
+        let shift = match self.shift {
+            SlotShift::None => 0,
+            SlotShift::Zero => 1,
+            SlotShift::Prev(prev) => prev.as_ptr() as usize,
+        };
+        (self.words.as_ptr() as usize, self.words.len(), self.rot as usize, shift)
+    }
+
+    /// The coded column of the lane, as [`coded::code_column`] codes its expanded `i8`
+    /// cells under the identity map: classes in increasing value (0, then 1, of those
+    /// present), pair code `class(cell 2k) * classes + class(cell 2k + 1)`, built from
+    /// the words in one parallel pass.
+    fn code(&self) -> Option<Column> {
+        let n = self.words.len();
+        if n == 0 {
+            return None;
+        }
+        let (any, all) = (0..n)
+            .into_par_iter()
+            .with_min_len(1 << 12)
+            .map(|w| self.word(w))
+            .fold(|| (0_u64, !0_u64), |(o, a), x| (o | x, a & x))
+            .reduce(|| (0, !0), |(o1, a1), (o2, a2)| (o1 | o2, a1 & a2));
+        let mut reps = Vec::new();
+        if all != !0 {
+            reps.push(0);
+        }
+        if any != 0 {
+            reps.push(1);
+        }
+        let classes = reps.len();
+        if classes == 1 {
+            return Some(Column { classes, reps, pairs: vec![0; 32 * n] });
+        }
+        // Two classes: class = bit, so pair code `2 b(2k) + b(2k + 1)` in 0..4. One table
+        // gives the four codes of the four pairs of a byte, one code per output byte.
+        const CODES: [u32; 256] = {
+            let mut table = [0_u32; 256];
+            let mut byte = 0;
+            while byte < 256 {
+                let mut j = 0;
+                while j < 4 {
+                    let code = 2 * ((byte >> (2 * j)) & 1) + ((byte >> (2 * j + 1)) & 1);
+                    table[byte] |= (code as u32) << (8 * j);
+                    j += 1;
+                }
+                byte += 1;
+            }
+            table
+        };
+        const WORDS_PER_TASK: usize = 1 << 9;
+        let mut pairs = buf::uninit::<u8>(32 * n);
+        pairs.par_chunks_mut(32 * WORDS_PER_TASK).enumerate().for_each(|(task, out)| {
+            for (j, slots) in out.chunks_exact_mut(32).enumerate() {
+                let word = self.word(task * WORDS_PER_TASK + j);
+                for (k, quad) in slots.chunks_exact_mut(4).enumerate() {
+                    let codes = CODES[(word >> (8 * k)) as u8 as usize].to_le_bytes();
+                    for (slot, code) in quad.iter_mut().zip(codes) {
+                        slot.write(code);
+                    }
+                }
+            }
+        });
+        // SAFETY: the tasks cover every word, and each word wrote its 32 pair codes.
+        #[allow(unsafe_code)]
+        let pairs = unsafe { pairs.assume_init() }.into_vec();
+        Some(Column { classes, reps, pairs })
+    }
+}
+
+impl agg_simd::eval::IntColumn for BitCells<'_> {
+    fn len(&self) -> usize {
+        BitCells::len(self)
+    }
+    fn read(&self, start: usize, out: &mut [i64]) {
+        // One lane word per run of up to 64 cells.
+        let mut i = start;
+        let mut rest = out;
+        while !rest.is_empty() {
+            let (word, z) = (self.word(i / 64), i % 64);
+            let take = (64 - z).min(rest.len());
+            for (k, o) in rest[..take].iter_mut().enumerate() {
+                *o = ((word >> (z + k)) & 1) as i64;
+            }
+            i += take;
+            rest = &mut rest[take..];
+        }
+    }
 }
 
 /// The identity map of a committed column.
@@ -172,6 +340,7 @@ impl Source<'_> {
     pub fn len(&self) -> usize {
         match self {
             Self::Bytes { cells, .. } => cells.len(),
+            Self::Bits(cells) => cells.len(),
             Self::Ints(cells) => cells.len(),
             Self::Field(cells) => cells.len(),
             Self::Planes(cells) => cells.rows,
@@ -191,6 +360,7 @@ impl Source<'_> {
     pub fn value(&self, index: usize) -> E {
         match self {
             Self::Bytes { cells, map } => E::from_i64(map[cells[index] as u8 as usize]),
+            Self::Bits(cells) => E::from_i64(cells.bit(index)),
             Self::Ints(cells) => E::from_i64(i64::from(cells[index])),
             Self::Field(cells) => cells[index],
             Self::Planes(cells) => cells.get(index),
@@ -206,6 +376,10 @@ impl Source<'_> {
             Self::Bytes { cells, map } => {
                 let low = map[cells[2 * k] as u8 as usize];
                 let high = map[cells[2 * k + 1] as u8 as usize];
+                E::from_i64(low) + fmi(challenge, high - low)
+            }
+            Self::Bits(cells) => {
+                let (low, high) = (cells.bit(2 * k), cells.bit(2 * k + 1));
                 E::from_i64(low) + fmi(challenge, high - low)
             }
             Self::Ints(cells) => {
@@ -245,6 +419,12 @@ impl<'a> Lane<'a> {
             cells,
             map: &IDENTITY_MAP,
         })
+    }
+
+    /// A lane over bit-packed cells.
+    #[must_use]
+    pub fn bits(cells: BitCells<'a>) -> Self {
+        Self::Source(Source::Bits(cells))
     }
 
     /// A lane over a mapped column.
@@ -1197,21 +1377,24 @@ impl<'a> Group<'a> {
         let is_field: Vec<bool> = lanes.iter().map(Lane::is_field).collect();
         let plan = Plan::compile(lanes.len(), &instances, &is_field);
 
-        // Code the byte columns (by pointer) under the maps of all lanes reading them.
+        // Code the byte columns (by pointer) under the maps of all lanes reading them, and the
+        // bit lanes (by words, rotation and shift) under the identity.
         let mut columns: Vec<Column> = Vec::new();
         let mut lane_column: Vec<Option<usize>> = vec![None; lanes.len()];
         if policy.coding && local_vars >= 1 {
-            let mut keys: Vec<(*const i8, usize)> = Vec::new();
+            let mut keys: Vec<(usize, usize, usize, usize)> = Vec::new();
             let mut lane_key: Vec<Option<usize>> = vec![None; lanes.len()];
             for (l, lane) in lanes.iter().enumerate() {
-                if let Lane::Source(Source::Bytes { cells, .. }) = lane {
-                    let key = (cells.as_ptr(), cells.len());
-                    let index = keys.iter().position(|k| *k == key).unwrap_or_else(|| {
-                        keys.push(key);
-                        keys.len() - 1
-                    });
-                    lane_key[l] = Some(index);
-                }
+                let key = match lane {
+                    Lane::Source(Source::Bytes { cells, .. }) => (cells.as_ptr() as usize, cells.len(), usize::MAX, 0),
+                    Lane::Source(Source::Bits(cells)) => cells.key(),
+                    _ => continue,
+                };
+                let index = keys.iter().position(|k| *k == key).unwrap_or_else(|| {
+                    keys.push(key);
+                    keys.len() - 1
+                });
+                lane_key[l] = Some(index);
             }
             // The columns are coded side by side (each pass is parallel inside as well); the
             // results are placed in key order, so the column indices do not depend on it.
@@ -1219,8 +1402,10 @@ impl<'a> Group<'a> {
                 .into_par_iter()
                 .map(|key| {
                     let members: Vec<usize> = (0..lanes.len()).filter(|&l| lane_key[l] == Some(key)).collect();
-                    let Lane::Source(Source::Bytes { cells, .. }) = lanes[members[0]] else {
-                        unreachable!("a byte lane")
+                    let cells = match lanes[members[0]] {
+                        Lane::Source(Source::Bits(bits)) => return (members, bits.code()),
+                        Lane::Source(Source::Bytes { cells, .. }) => cells,
+                        _ => unreachable!("a byte lane"),
                     };
                     let maps: Vec<&[i64; 256]> = members
                         .iter()
@@ -1729,8 +1914,10 @@ impl<'a> Group<'a> {
 
     /// The source values `(a, b)` of a lane at level-0 pattern classes.
     fn class_values(&self, l: usize, column: &Column, k0: usize, k1: usize) -> (E, E) {
-        let Lane::Source(Source::Bytes { map, .. }) = self.sources[l] else {
-            unreachable!("coded lanes are byte lanes")
+        let map = match self.sources[l] {
+            Lane::Source(Source::Bytes { map, .. }) => map,
+            Lane::Source(Source::Bits(_)) => &IDENTITY_MAP,
+            _ => unreachable!("coded lanes are byte or bit lanes"),
         };
         let a = map[column.reps[k0] as u8 as usize];
         let b = map[column.reps[k1] as u8 as usize];

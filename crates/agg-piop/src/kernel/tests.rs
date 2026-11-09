@@ -1173,3 +1173,173 @@ fn tail_round_timing() {
         eprintln!("rep {rep} vars {vars} tail {:?}: message+bind (ms) per round: {}", group.tail_shape(), times.join(" "));
     }
 }
+
+/// A bit-packed lane expanded cell by cell from its definition: cell `z + 64 s + 1024 i`
+/// is bit `(z - rot) mod 64` of the word slot `s` of record `i` reads (word `s`, or with a
+/// slot shift word `s - 1`, and at `s = 0` the last word of the previous table or zero).
+fn expand_bits(words: &[u64], rot: u32, shift: SlotShift<'_>) -> Vec<i8> {
+    let mut out = vec![0_i8; 64 * words.len()];
+    for w in 0..words.len() {
+        let (i, s) = (w / BIT_SLOTS, w % BIT_SLOTS);
+        let stored = match shift {
+            SlotShift::None => words[w],
+            _ if s > 0 => words[i * BIT_SLOTS + s - 1],
+            SlotShift::Prev(prev) => prev[i * BIT_SLOTS + BIT_SLOTS - 1],
+            SlotShift::Zero => 0,
+        };
+        for z in 0..64 {
+            out[64 * w + z] = ((stored >> ((z + 64 - rot as usize) % 64)) & 1) as i8;
+        }
+    }
+    out
+}
+
+/// Drive a group through its rounds; the messages, claims and terminal values.
+fn drive_group(mut group: Group<'_>, challenges: &[E]) -> (Vec<Vec<E>>, Vec<E>, Vec<E>) {
+    let (mut messages, mut claims) = (Vec::new(), Vec::new());
+    for (round, &r) in challenges.iter().enumerate() {
+        messages.push(group.round_message(round));
+        group.bind(round, r);
+        claims.push(group.claim());
+    }
+    (messages, claims, group.terminal_values())
+}
+
+/// Bit-packed lanes (every rotation class, with and without the slot shift, constant
+/// lanes of one class) give the coded columns, round polynomials, claims and terminal
+/// values of the same group over their expanded `i8` cells, under every kernel strategy,
+/// with a full and a masked equality factor, next to a field lane.
+#[test]
+fn bits_source_groups_match_expanded_bytes() {
+    let mut rng = SplitMix64::new(0xB175);
+    for vars in [10_usize, 12, 14] {
+        let n = 1 << (vars - 6);
+        let words: Vec<Vec<u64>> = (0..3).map(|_| (0..n).map(|_| rng.next_u64()).collect()).collect();
+        let (zeros, ones) = (vec![0_u64; n], vec![!0_u64; n]);
+        let weight = point(&mut rng, 1 << vars);
+        let tau = point(&mut rng, vars);
+        for rot in [0_u32, 1, 13, 63] {
+            let shapes = [
+                BitCells::new(&words[0], rot, SlotShift::None),
+                BitCells::new(&words[1], rot, SlotShift::Zero),
+                BitCells::new(&words[2], rot, SlotShift::Prev(&words[1])),
+                BitCells::new(&words[0], 0, SlotShift::None),
+                BitCells::new(&zeros, rot, SlotShift::Prev(&ones)),
+                BitCells::new(&ones, rot, SlotShift::None),
+                BitCells::new(&ones, rot, SlotShift::Zero),
+            ];
+            let cells: Vec<Vec<i8>> = shapes.iter().map(|b| expand_bits(b.words, b.rot, b.shift)).collect();
+            for (shape, cells) in shapes.iter().zip(&cells) {
+                assert_eq!(shape.len(), cells.len());
+                assert!(cells.iter().enumerate().step_by(7).all(|(i, &c)| shape.bit(i) == i64::from(c)));
+            }
+            let field_lane = || Lane::Source(Source::Field(&weight));
+            let bit_lanes: Vec<Lane<'_>> =
+                shapes.iter().map(|b| Lane::bits(*b)).chain(std::iter::once(field_lane())).collect();
+            let byte_lanes: Vec<Lane<'_>> =
+                cells.iter().map(|c| Lane::column(c)).chain(std::iter::once(field_lane())).collect();
+            let instances = vec![
+                instance(&mut rng, vec![Term::Bool(0), Term::Bool(2)]),
+                instance(&mut rng, vec![Term::Product(vec![0, 1, 2])]),
+                instance(&mut rng, vec![Term::Product(vec![1, 7])]),
+                instance(&mut rng, vec![Term::Product(vec![3, 7, 2])]),
+                instance(
+                    &mut rng,
+                    vec![Term::Affine { weight: None, lanes: vec![(0, 5), (1, -3), (3, 7), (5, 2)], constant: 2 }],
+                ),
+                instance(&mut rng, vec![Term::Monomials(vec![(1, vec![0, 0, 1]), (-2, vec![2, 3]), (1, vec![])])]),
+                instance(&mut rng, vec![Term::Product(vec![4, 2]), Term::Product(vec![5, 0]), Term::Bool(6)]),
+                instance(&mut rng, vec![Term::Product(vec![6, 1, 7])]),
+            ];
+            let degree = 4;
+            let lifted = if vars == 10 { vec![vars, vars + 1] } else { vec![vars] };
+            for rounds in lifted {
+                let challenges = point(&mut rng, rounds);
+                let claim = direct_sum(&byte_lanes, &instances, Some(&tau));
+                for (name, policy) in policies() {
+                    let bits = Group::with_policy(bit_lanes.clone(), instances.clone(), Some(&tau), rounds, degree, policy);
+                    let bytes = Group::with_policy(byte_lanes.clone(), instances.clone(), Some(&tau), rounds, degree, policy);
+                    let (bits, bytes) = (bits.unwrap(), bytes.unwrap());
+                    for l in 0..shapes.len() {
+                        let column = |g: &Group<'_>| g.lane_column[l].map(|c| g.columns[c].clone());
+                        let (a, b) = (column(&bits), column(&bytes));
+                        assert_eq!(a.is_some(), b.is_some(), "lane {l} coded, {name}");
+                        if let (Some(a), Some(b)) = (a, b) {
+                            assert_eq!((a.classes, &a.reps, &a.pairs), (b.classes, &b.reps, &b.pairs), "lane {l}, {name}");
+                        }
+                    }
+                    let want = run(bytes, &instances, rounds, degree, Some(&tau), claim, &challenges);
+                    let got = run(bits, &instances, rounds, degree, Some(&tau), claim, &challenges);
+                    assert_eq!(got, want, "{vars} vars, rot {rot}, {rounds} rounds, {name}");
+                }
+            }
+            // A masked equality factor needs a record variable besides the 10 of a record.
+            for mask in [0x00FF_u16, 0x5A3C].into_iter().filter(|_| vars > 10) {
+                let challenges = point(&mut rng, vars);
+                for policy in [AUTO, Policy { buckets: false, ..AUTO }, Policy { coding: false, ..AUTO }] {
+                    let masked = |lanes: Vec<Lane<'_>>| {
+                        let group = Group::with_policy_masked(lanes, instances.clone(), Some(&tau), Some(mask), vars, degree, policy);
+                        drive_group(group.unwrap(), &challenges)
+                    };
+                    assert_eq!(masked(bit_lanes.clone()), masked(byte_lanes.clone()), "{vars} vars, rot {rot}, mask {mask:#x}");
+                }
+            }
+        }
+    }
+}
+
+/// The dedicated integer groups (row and plane weight groups, the row linear group) read
+/// bit-packed lanes as they read the expanded byte columns.
+#[test]
+fn bits_source_dedicated_groups_match_bytes() {
+    let mut rng = SplitMix64::new(0xB176);
+    for vars in [10_usize, 13] {
+        let rows = 1 << vars;
+        let n = rows / 64;
+        let words: Vec<Vec<u64>> = (0..2).map(|_| (0..n).map(|_| rng.next_u64()).collect()).collect();
+        let shapes = [BitCells::new(&words[0], 13, SlotShift::Prev(&words[1])), BitCells::new(&words[1], 63, SlotShift::None)];
+        let cells: Vec<Vec<i8>> = shapes.iter().map(|b| expand_bits(b.words, b.rot, b.shift)).collect();
+        let ints: Vec<i32> = (0..rows).map(|_| rng.below(1 << 16) as i32 - (1 << 15)).collect();
+        let weight = point(&mut rng, rows);
+        let planes = agg_simd::buf::KPlanes::from_fn(rows, |i| weight[i]);
+        let challenges = point(&mut rng, vars);
+        let eq_point = point(&mut rng, vars);
+        let gamma = field(&mut rng);
+        let bit_row = vec![Source::Field(&weight), Source::Ints(&ints), Source::Bits(shapes[0]), Source::Bits(shapes[1])];
+        let byte_row = vec![
+            Source::Field(&weight),
+            Source::Ints(&ints),
+            Source::Bytes { cells: &cells[0], map: &IDENTITY_MAP },
+            Source::Bytes { cells: &cells[1], map: &IDENTITY_MAP },
+        ];
+        let (mut bit_planes, mut byte_planes) = (bit_row.clone(), byte_row.clone());
+        bit_planes[0] = Source::Planes(&planes);
+        byte_planes[0] = Source::Planes(&planes);
+        macro_rules! drive {
+            ($group:expr) => {{
+                let group = $group;
+                let mut messages = Vec::new();
+                for (round, &r) in challenges.iter().enumerate() {
+                    messages.push(group.round_message(round));
+                    group.bind(round, r);
+                }
+                assert!(group.terminal_consistent());
+                (messages, group.claim())
+            }};
+        }
+        let coefficients = [0, 1, -3, 1 << 16];
+        let mut bits = WeightIntGroup::new(&bit_row, 0, &coefficients, 7, gamma, vars).unwrap();
+        let mut bytes = WeightIntGroup::new(&byte_row, 0, &coefficients, 7, gamma, vars).unwrap();
+        assert_eq!(drive!(&mut bits), drive!(&mut bytes), "row weight group, {vars} vars");
+        assert_eq!(bits.terminal_values(), bytes.terminal_values());
+        let mut pool = agg_simd::buf::Pool::default();
+        let mut bytes = PlaneWeightIntGroup::new(&byte_planes, 0, &coefficients, 7, gamma, vars, &mut pool).unwrap();
+        let mut bits = PlaneWeightIntGroup::new(&bit_planes, 0, &coefficients, 7, gamma, vars, &mut pool).unwrap();
+        assert_eq!(drive!(&mut bits), drive!(&mut bytes), "plane weight group, {vars} vars");
+        assert_eq!(bits.terminal_values(), bytes.terminal_values());
+        let linear_coefficients = point(&mut rng, 3);
+        let mut bits = LinearIntGroup::new(bit_row[1..].to_vec(), linear_coefficients.clone(), &eq_point).unwrap();
+        let mut bytes = LinearIntGroup::new(byte_row[1..].to_vec(), linear_coefficients, &eq_point).unwrap();
+        assert_eq!(drive!(&mut bits), drive!(&mut bytes), "linear group, {vars} vars");
+    }
+}

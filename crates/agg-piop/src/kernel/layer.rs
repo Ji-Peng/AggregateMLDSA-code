@@ -1685,6 +1685,7 @@ fn int_cell(lane: &super::Source<'_>, i: usize) -> i64 {
     match lane {
         super::Source::Ints(cells) => i64::from(cells[i]),
         super::Source::Bytes { cells, map } => map[cells[i] as u8 as usize],
+        super::Source::Bits(cells) => cells.bit(i),
         super::Source::Field(_)
         | super::Source::Planes(_)
         | super::Source::PlaneSlice(_) => unreachable!("integer lanes only"),

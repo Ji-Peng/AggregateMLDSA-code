@@ -1270,11 +1270,13 @@ enum Folding<'a> {
     Ints(&'a [i32], [i128; 2]),
     /// A byte column with the canonical coordinates of `c map[byte]` for every byte.
     Bytes(&'a [i8], Box<[[u64; 2]; 256]>),
+    /// A bit-packed column with the canonical coordinates of its coefficient.
+    Bits(crate::kernel::BitCells<'a>, [i128; 2]),
 }
 
 /// `g = sum_l c_l f_l` over `rows` cells for integer or byte lanes `f_l` with coefficients
 /// `c_l` given by their canonical coordinates. Per coordinate every lane adds below 2^95 in
-/// magnitude (a canonical coefficient below 2^64 times an `i32` cell, or a canonical table
+/// magnitude (a canonical coefficient below 2^64 times an `i32` cell or a bit, or a canonical table
 /// entry below 2^64), so fewer than 2^30 lanes sum exactly inside an `i128`, reduced once per
 /// cell. A byte lane adds its table entry at the cell's byte instead of multiplying. Every
 /// cell is written by the parallel pass (first touch there, no zero fill).
@@ -1283,6 +1285,7 @@ fn fold_combination(folded: &[(Source<'_>, [u64; 2])], rows: usize) -> Vec<E> {
         .iter()
         .map(|(source, [c0, c1])| match source {
             Source::Ints(column) => Folding::Ints(column, [i128::from(*c0), i128::from(*c1)]),
+            Source::Bits(column) => Folding::Bits(*column, [i128::from(*c0), i128::from(*c1)]),
             Source::Bytes { cells, map } => {
                 let c = E::new(agg_simd::F::from_u64(*c0), agg_simd::F::from_u64(*c1));
                 Folding::Bytes(
@@ -1307,6 +1310,13 @@ fn fold_combination(folded: &[(Source<'_>, [u64; 2])], rows: usize) -> Vec<E> {
                 Folding::Ints(column, [c0, c1]) => {
                     for (a, &v) in acc.iter_mut().zip(&column[first..first + n]) {
                         let x = i128::from(v);
+                        a[0] += c0 * x;
+                        a[1] += c1 * x;
+                    }
+                }
+                Folding::Bits(column, [c0, c1]) => {
+                    for (j, a) in acc.iter_mut().enumerate() {
+                        let x = i128::from(column.bit(first + j));
                         a[0] += c0 * x;
                         a[1] += c1 * x;
                     }
@@ -1338,7 +1348,7 @@ fn linear_parts(lanes: &[Lane<'_>], instances: &[GroupInstance], candidate: &[bo
         .zip(candidate)
         .map(|(lane, &c)| {
             !c && match lane {
-                Lane::Source(source @ Source::Ints(_)) => source.len() == rows,
+                Lane::Source(source @ (Source::Ints(_) | Source::Bits(_))) => source.len() == rows,
                 Lane::Source(source @ Source::Bytes { map, .. }) => {
                     source.len() == rows && map.iter().all(|v| i32::try_from(*v).is_ok())
                 }
@@ -1393,7 +1403,7 @@ impl<'a> FoldedGroup<'a> {
             .map(|lane| {
                 let narrow = |v: &i64| i32::try_from(*v).is_ok();
                 match lane {
-                    Lane::Source(source @ Source::Ints(_)) => source.len() == rows,
+                    Lane::Source(source @ (Source::Ints(_) | Source::Bits(_))) => source.len() == rows,
                     Lane::Source(source @ Source::Bytes { map, .. }) => source.len() == rows && map.iter().all(narrow),
                     _ => false,
                 }
@@ -1523,6 +1533,7 @@ impl<'a> FoldedGroup<'a> {
                 FoldedLane::Dropped(Source::Bytes { cells, map }) => {
                     agg_simd::eval::column_at(&agg_simd::eval::Mapped { cells, map }, &first, &second)
                 }
+                FoldedLane::Dropped(Source::Bits(cells)) => agg_simd::eval::column_at(cells, &first, &second),
                 FoldedLane::Dropped(_) => unreachable!("integer lanes only"),
             })
             .collect()
@@ -1836,6 +1847,42 @@ mod tests {
         let mut partial = want.clone();
         partial[0] = E::zero();
         assert_eq!(split.terminal_values(&[false, true, true, true, true, true, true]), partial);
+    }
+
+    /// A folded group whose linear-only and Boolean-plus-linear lanes are bit-packed gives the
+    /// messages and terminal values of the generic group over the expanded byte columns.
+    #[test]
+    fn bits_source_folded_group_matches_bytes() {
+        use crate::kernel::{BitCells, SlotShift};
+        let mut rng = SplitMix64::new(31);
+        let vars = 11;
+        let len = 1_usize << vars;
+        let ints: Vec<i32> = (0..len).map(|_| (rng.next_u64() % (1 << 16)) as i32 - (1 << 15)).collect();
+        let words: Vec<Vec<u64>> = (0..2).map(|_| (0..len / 64).map(|_| rng.next_u64()).collect()).collect();
+        let shapes = [BitCells::new(&words[0], 13, SlotShift::Prev(&words[1])), BitCells::new(&words[1], 1, SlotShift::Zero)];
+        let cells: Vec<Vec<i8>> = shapes.iter().map(|b| (0..len).map(|i| b.bit(i) as i8).collect()).collect();
+        let digits: Vec<i8> = (0..len).map(|_| (rng.next_u64() % 9) as i8 - 4).collect();
+        let instances: Vec<GroupInstance> = vec![
+            GroupInstance { gamma: field(&mut rng), terms: vec![Term::Affine { weight: None, lanes: vec![(0, 3), (1, -7)], constant: 11 }] },
+            GroupInstance { gamma: field(&mut rng), terms: vec![Term::Bool(2), Term::Product(vec![2])] },
+            GroupInstance { gamma: field(&mut rng), terms: vec![Term::Product(vec![3, 3]), Term::Product(vec![3])] },
+        ];
+        let bit_lanes = vec![Lane::Source(Source::Ints(&ints)), Lane::bits(shapes[0]), Lane::bits(shapes[1]), Lane::column(&digits)];
+        let byte_lanes = vec![Lane::Source(Source::Ints(&ints)), Lane::column(&cells[0]), Lane::column(&cells[1]), Lane::column(&digits)];
+        let eq_point = point(&mut rng, vars);
+        let mut want = Group::new(byte_lanes, instances.clone(), Some(&eq_point), vars, 3).unwrap();
+        let mut folded = match FoldedGroup::new(bit_lanes, instances, &eq_point, vars, 3) {
+            Ok(group) => group.unwrap(),
+            Err(_) => panic!("the group folds"),
+        };
+        assert_eq!(folded.group.claim(), want.claim());
+        for round in 0..vars {
+            assert_eq!(folded.group.round_message(round), want.round_message(round), "round {round}");
+            let r = field(&mut rng);
+            want.bind(round, r);
+            folded.bind(round, r);
+        }
+        assert_eq!(folded.terminal_values(&[true; 4]), want.terminal_values());
     }
 
     /// Eight integer columns (the main lookup stack of ML-DSA-65 and ML-DSA-87) in two plane

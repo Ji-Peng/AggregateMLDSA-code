@@ -962,6 +962,7 @@ impl WeightSource<'_> {
                 match lane {
                     super::Source::Ints(cells) => column_at(cells, &first, &second),
                     super::Source::Bytes { cells, map } => column_at(&Mapped { cells, map }, &first, &second),
+                    super::Source::Bits(cells) => column_at(cells, &first, &second),
                     _ => unreachable!("integer lanes only"),
                 }
             })
@@ -1037,6 +1038,11 @@ impl<'a> WeightIntGroup<'a> {
                     (super::Source::Bytes { cells: column, .. }, Some(map)) => {
                         for (g, &x) in cells.iter_mut().zip(&column[range.clone()]) {
                             *g += map[x as u8 as usize];
+                        }
+                    }
+                    (super::Source::Bits(column), _) => {
+                        for (j, g) in cells.iter_mut().enumerate() {
+                            *g += c * column.bit(first + j);
                         }
                     }
                     _ => unreachable!("integer lanes only"),
