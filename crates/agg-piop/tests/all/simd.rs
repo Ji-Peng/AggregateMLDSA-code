@@ -8,7 +8,7 @@ use agg_witness::gen::{self, Record};
 use agg_witness::instance::PublicInstance;
 use agg_witness::params::{C_TILDE_BYTES, L, OMEGA, Z_BITS};
 
-const RELATIONS: [Relation; 3] = [Relation::Hu, Relation::HExact, Relation::HFips];
+const RELATIONS: [Relation; 2] = Relation::ALL;
 
 fn engines() -> Vec<Engine> {
     [Backend::Scalar, Backend::Avx2, Backend::Avx512]
@@ -65,7 +65,7 @@ fn main_tables_match_the_reference_build() {
     // The default entry point is the process-wide engine's build.
     let inst = PublicInstance::from_records(&small).unwrap();
     let sigs: Vec<&[u8]> = small.iter().map(|r| r.sig.as_slice()).collect();
-    let manifest = CommitmentManifest::for_relation(small.len(), Relation::Hu).unwrap();
+    let manifest = CommitmentManifest::for_relation(small.len(), Relation::HFips).unwrap();
     assert!(
         MainTables::build(&manifest, &inst, &sigs).unwrap()
             == MainTables::build_reference(&manifest, &inst, &sigs).unwrap()

@@ -143,9 +143,9 @@ fn keygen_sign_aggregate_verify_and_bench() {
     assert_eq!(code, 1, "{out}");
     assert!(out.contains(": reject"), "{out}");
 
-    // Relation H-exact: aggregate and verify with --relation h-exact; the default (H-u)
-    // verifier and an H-u aggregate verified as H-exact are rejected.
-    assert!(out.contains("relation H-u"), "{out}");
+    // Relation H-exact: aggregate and verify with --relation h-exact; the default (H-FIPS)
+    // verifier and an H-FIPS aggregate verified as H-exact are rejected.
+    assert!(out.contains("relation H-FIPS"), "{out}");
     let exact = dir.join("exact.agg");
     let (code, out) = agg(&[
         "aggregate",
@@ -170,11 +170,12 @@ fn keygen_sign_aggregate_verify_and_bench() {
     assert!(out.contains("relation H-exact: accept"), "{out}");
     let (code, out) = verify_as(&exact, None);
     assert_eq!(code, 1, "{out}");
-    assert!(out.contains("the proof claims relation H-exact, the verifier expects H-u"), "{out}");
+    assert!(out.contains("the proof claims relation H-exact, the verifier expects H-FIPS"), "{out}");
     let (code, out) = verify_as(&aggregate, Some("h-exact"));
     assert_eq!(code, 1, "{out}");
-    assert!(out.contains("the proof claims relation H-u, the verifier expects H-exact"), "{out}");
+    assert!(out.contains("the proof claims relation H-FIPS, the verifier expects H-exact"), "{out}");
     assert_eq!(verify_as(&aggregate, Some("fips")).0, 2);
+    assert_eq!(verify_as(&aggregate, Some("h-u")).0, 2);
     // Relation H-FIPS: --relation h-fips round trip, crossed with H-exact.
     let fips = dir.join("fips.agg");
     let (code, out) = agg(&["aggregate", "--records", s(&recs), "--out", s(&fips), "--relation", "h-fips"]);
@@ -290,7 +291,7 @@ fn ml_dsa_65_and_87_through_the_binary() {
         assert_eq!(code, 2, "{out}");
         let (code, out) = verify(&["--aggregate", s(&aggregate), "--relation", "h-exact"]);
         assert_ne!(code, 0, "{out}");
-        // H-exact through the binary: accepted under h-exact, rejected under h-u.
+        // H-exact through the binary: accepted under h-exact, rejected under the default.
         let exact = file(&format!("exact{params}.bin"));
         let (code, out) = run(&["aggregate", "--records", s(&recs), "--out", s(&exact), "--relation", "h-exact"]);
         assert_eq!(code, 0, "{out}");

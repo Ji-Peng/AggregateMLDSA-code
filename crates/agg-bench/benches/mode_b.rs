@@ -21,7 +21,7 @@
 //! builds the public instance (key expansion, `mu`, `c`, `T`) inside its timed span and starts
 //! with the allocation caches released. Times are medians over the timed runs. With `AGG_PROOF_OUT=<dir>` the prover child writes the aggregate of its last run
 //! to `<dir>/mode_b-<N>.bin` (byte-identity checks across builds). `AGG_RELATION=h-exact`
-//! proves and verifies relation H-exact (default `h-u`); the relation is
+//! proves and verifies relation H-exact (default `h-fips`); the relation is
 //! printed in the header and in every row.
 
 use std::io::{Read, Write};
@@ -132,11 +132,11 @@ fn median_steps(samples: &[VerifyTimings]) -> Vec<(&'static str, Duration)> {
     out
 }
 
-/// The relation of this run (`AGG_RELATION`, default H-u); prover and verifier children
+/// The relation of this run (`AGG_RELATION`, default H-FIPS); prover and verifier children
 /// inherit the environment.
 fn relation() -> Relation {
-    std::env::var("AGG_RELATION").map_or(Relation::Hu, |v| {
-        Relation::parse(&v).unwrap_or_else(|| panic!("AGG_RELATION: h-u, h-exact or h-fips, not {v:?}"))
+    std::env::var("AGG_RELATION").map_or(Relation::default(), |v| {
+        Relation::parse(&v).unwrap_or_else(|| panic!("AGG_RELATION: h-fips or h-exact, not {v:?}"))
     })
 }
 

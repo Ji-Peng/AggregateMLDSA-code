@@ -5,7 +5,7 @@
 use crate::common;
 
 use agg_piop::lookup::compose_multiplicity;
-use agg_piop::manifest::{Column, CommitmentManifest, GroupRole, LOOKUP_SHIFT};
+use agg_piop::manifest::{Column, CommitmentManifest, GroupRole, Relation, LOOKUP_SHIFT};
 use agg_piop::pcs::{PcsError, TableCommitter};
 use agg_piop::source_tables::{BridgeGroupTables, Cells, MainTables, RecordValues, SourceTableError};
 use agg_witness::bridge::{BridgeError, BridgeMatrices, SparseMatrix};
@@ -22,19 +22,19 @@ fn instance_and_main(records: &[agg_witness::gen::Record], manifest: &Commitment
 #[test]
 fn main_tables_encode_l16_and_reject_wrong_shapes_and_alphabets() {
     let records = common::records(0x77, 15, 5);
-    let manifest = CommitmentManifest::for_batch(20).unwrap();
+    let manifest = CommitmentManifest::for_relation(20, Relation::HExact).unwrap();
     let (instance, main) = instance_and_main(&records, &manifest);
-    assert_eq!(main.columns().len(), 8);
+    assert_eq!(main.columns().len(), 9);
     assert_eq!(main.wide().len(), 4 * (32 << 10));
     assert_eq!(main.geometry().n_star, 32);
-    // Padded rows hold the digits of zero: Z_lo = V_lo = -2^15, U_lo = -31,540 (relation
-    // H-u: B_ulo = 1,228, H_u = 3), the rest 0.
+    // Padded rows hold the digits of zero (relation H-exact): V_lo = -2^15, U_lo = -31,540
+    // (B_ulo = 1,228, H_u = 3), (bz_lo, bz_hi, a_z) = (32,689, 1, 0), the rest 0.
     let padded = 25 << 10;
-    for column in [Column::Z_LO, Column::V_LO] {
-        assert_eq!(main.column(&manifest, column).value(padded), -i64::from(LOOKUP_SHIFT));
-    }
+    assert_eq!(main.column(&manifest, Column::V_LO).value(padded), -i64::from(LOOKUP_SHIFT));
     assert_eq!(main.column(&manifest, Column::U_LO).value(padded), -31_540);
-    for column in [Column::V_HI, Column::Z_HI, Column::U_HI, Column::W1Bit(0, 0)] {
+    assert_eq!(main.column(&manifest, Column::ZX_LO).value(padded), 32_689);
+    assert_eq!(main.column(&manifest, Column::ZX_HI).value(padded), 1);
+    for column in [Column::V_HI, Column::A_Z, Column::U_HI, Column::W1Bit(0, 0)] {
         assert_eq!(main.column(&manifest, column).value(padded), 0);
     }
     // The same tables from the derived values.
@@ -54,7 +54,7 @@ fn main_tables_encode_l16_and_reject_wrong_shapes_and_alphabets() {
         .collect();
     assert_eq!(MainTables::from_values(&manifest, &values).unwrap(), main);
     // Same N* but another live count.
-    let other = CommitmentManifest::for_batch(21).unwrap();
+    let other = CommitmentManifest::for_relation(21, Relation::HExact).unwrap();
     assert_eq!(
         MainTables::from_values(&other, &values).unwrap_err(),
         SourceTableError::Records {
@@ -64,12 +64,12 @@ fn main_tables_encode_l16_and_reject_wrong_shapes_and_alphabets() {
     );
     // A value outside its digit range is an honest abort.
     let mut wide = values.clone();
-    wide[3].z[1][7] = 1 << 17;
+    wide[3].z[1][7] = 130_994;
     assert!(matches!(
         MainTables::from_values(&manifest, &wide),
         Err(SourceTableError::Encode(_))
     ));
-    // Relation H-u: u = +-190,465 encodes, +-190,466 is an honest abort.
+    // Relation H-exact: u = +-190,465 encodes, +-190,466 is an honest abort.
     for (u, ok) in [(190_465, true), (-190_465, true), (190_466, false), (-190_466, false)] {
         let mut edge = values.clone();
         edge[2].u[3][9] = u;
@@ -85,12 +85,12 @@ fn main_tables_encode_l16_and_reject_wrong_shapes_and_alphabets() {
         MainTables::from_values(&manifest, &huge),
         Err(SourceTableError::Encode(_))
     ));
-    // A non-Boolean bit, a base-4 top digit outside [-2, 1], a base-6 digit outside [-3, 2],
-    // a 16-bit column outside [-2^15, 2^15): the self-check names the group, column and cell.
+    // A non-Boolean bit or bz_hi, a base-6 digit outside [-3, 2], a 16-bit column outside
+    // [-2^15, 2^15): the self-check names the group, column and cell.
     let b3 = manifest.locate(Column::W1Bit(3, 0)).1;
-    let z_hi = manifest.locate(Column::Z_HI).1;
+    let bz_hi = manifest.locate(Column::ZX_HI).1;
     let u_hi = manifest.locate(Column::U_HI).1;
-    for (column, cell, value) in [(b3, 77, 2_i8), (z_hi, 5, 2), (u_hi, 6, 3), (u_hi, 7, -4)] {
+    for (column, cell, value) in [(b3, 77, 2_i8), (bz_hi, 5, 2), (u_hi, 6, 3), (u_hi, 7, -4)] {
         let mut bad = main.clone();
         bad.columns_mut()[column][cell] = value;
         assert_eq!(
@@ -140,11 +140,11 @@ fn bridge_tables_count_the_multiplicities_and_abort_on_heavy_rows() {
         compose_multiplicity(&digits),
         m.iter().map(|&c| i64::from(c)).collect::<Vec<_>>()
     );
-    // The 16-bit carry groups and the parities.
+    // The 16-bit carry groups, the parities and H-FIPS's hint slack.
     assert_eq!(honest.group(&manifest, GroupRole::Level1).len(), 6);
-    assert_eq!(honest.group(&manifest, GroupRole::Level2).len(), 12);
+    assert_eq!(honest.group(&manifest, GroupRole::Level2).len(), 13);
     // G_3: the carry, then zero polynomials up to G_2's count; G_k: the projection digits.
-    assert_eq!(honest.group(&manifest, GroupRole::Level3).len(), 12);
+    assert_eq!(honest.group(&manifest, GroupRole::Level3).len(), 13);
     assert!(honest.group(&manifest, GroupRole::Level3)[1..].iter().all(|c| c.to_i64().iter().all(|&v| v == 0)));
     assert_eq!(honest.group(&manifest, GroupRole::Proj).len(), 4);
     honest.validate(&manifest).unwrap();
@@ -206,16 +206,16 @@ fn committer_rejects_malformed_tables_before_akita() {
 /// Relation H-exact: the encoder writes `bz_lo` into the slot
 /// of `Z_lo`, the bits `bz_hi`, `a_z` into `G_main4` (nine columns), the canonical digits
 /// of zero on padded rows, and refuses `|z| > 130,993`; the values decoded from the H-exact
-/// tables equal the derived ones and the H-u tables' values, and the slack bit is
+/// tables equal the derived ones and the H-FIPS tables' values, and the slack bit is
 /// `a_z = [z >= 79]`.
 #[test]
 fn h_exact_main_tables_encode_the_exact_z_form() {
-    use agg_piop::manifest::{DigitValue, Relation};
+    use agg_piop::manifest::DigitValue;
     let records = common::records(0x7e, 15, 5);
     let manifest = CommitmentManifest::for_relation(20, Relation::HExact).unwrap();
-    let hu_manifest = CommitmentManifest::for_batch(20).unwrap();
+    let fips_manifest = CommitmentManifest::for_batch(20).unwrap();
     let (instance, main) = instance_and_main(&records, &manifest);
-    let (_, hu_main) = instance_and_main(&records, &hu_manifest);
+    let (_, fips_main) = instance_and_main(&records, &fips_manifest);
     assert_eq!(main.columns().len(), 9);
     assert_eq!(main.wide().len(), 4 * (32 << 10));
     main.validate(&manifest).unwrap();
@@ -225,11 +225,12 @@ fn h_exact_main_tables_encode_the_exact_z_form() {
     assert_eq!((at(Column::ZX_LO), at(Column::ZX_HI), at(Column::A_Z)), (32_689, 1, 0));
     assert_eq!((at(Column::U_LO), at(Column::U_HI)), (-31_540, 0));
     assert_eq!((at(Column::V_LO), at(Column::V_HI)), (-i64::from(LOOKUP_SHIFT), 0));
-    // The H-exact and H-u tables share u, v and the bits cell for cell.
-    for column in [Column::U_LO, Column::U_HI, Column::V_LO, Column::V_HI, Column::W1Bit(4, 0)] {
+    // The H-exact and H-FIPS tables share z, v and the bits cell for cell.
+    let shared = [Column::ZX_LO, Column::ZX_HI, Column::A_Z, Column::V_LO, Column::V_HI, Column::W1Bit(4, 0)];
+    for column in shared {
         assert_eq!(
             main.column(&manifest, column).to_i64(),
-            hu_main.column(&hu_manifest, column).to_i64(),
+            fips_main.column(&fips_manifest, column).to_i64(),
             "{}",
             column.name()
         );
@@ -238,7 +239,7 @@ fn h_exact_main_tables_encode_the_exact_z_form() {
     for (i, (record, signed)) in instance.records.iter().zip(&records).enumerate() {
         let w = derive(&record.key, &record.mu, &signed.sig).unwrap();
         let decoded = main.record_values(&manifest, i);
-        assert_eq!(decoded, hu_main.record_values(&hu_manifest, i), "record {i}");
+        assert_eq!(decoded, fips_main.record_values(&fips_manifest, i), "record {i}");
         assert_eq!((decoded.0, decoded.1, decoded.2), (w.z, w.u, w.v), "record {i}");
         for row in w.z {
             for z in row {
@@ -255,14 +256,14 @@ fn h_exact_main_tables_encode_the_exact_z_form() {
         });
     }
     assert_eq!(MainTables::from_values(&manifest, &values).unwrap(), main);
-    // z = +-130,993 encodes (the range edges), +-130,994 and 131,000 are honest aborts; the
-    // same values are inside H-u's relaxed range.
+    // z = +-130,993 encodes (the range edges), +-130,994 and 131,000 are honest aborts, under
+    // H-FIPS too.
     for (z, ok) in [(130_993, true), (-130_993, true), (130_994, false), (-130_994, false), (131_000, false)] {
         let mut edge = values.clone();
         edge[4].z[2][11] = z;
         let built = MainTables::from_values(&manifest, &edge);
         assert_eq!(built.is_ok(), ok, "z = {z}");
-        assert!(MainTables::from_values(&hu_manifest, &edge).is_ok(), "H-u, z = {z}");
+        assert_eq!(MainTables::from_values(&fips_manifest, &edge).is_ok(), ok, "H-FIPS, z = {z}");
         if let Ok(tables) = built {
             assert_eq!(tables.record_values(&manifest, 4).0[2][11], z);
             let x = agg_witness::padding::main_index(11, 2, 4);

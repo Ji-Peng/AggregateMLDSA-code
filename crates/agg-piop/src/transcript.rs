@@ -60,8 +60,8 @@ pub fn stage_degrees(manifest: &CommitmentManifest) -> [usize; 3] {
     [crate::stage1::degree(manifest), crate::stage2::DEGREE, crate::stage3::DEGREE]
 }
 
-/// Batching coefficients per stage; for ML-DSA-44 `(26, 10, 49)` under H-u, `(26, 9, 50)`
-/// under H-exact and `(26, 9, 56)` under H-FIPS (the other sets: the stage `gamma_count`s).
+/// Batching coefficients per stage; for ML-DSA-44 `(26, 9, 50)` under H-exact and
+/// `(26, 9, 56)` under H-FIPS (the other sets: the stage `gamma_count`s).
 #[must_use]
 pub fn stage_gammas(manifest: &CommitmentManifest) -> [usize; 3] {
     [
@@ -71,8 +71,8 @@ pub fn stage_gammas(manifest: &CommitmentManifest) -> [usize; 3] {
     ]
 }
 
-/// Terminal claims per stage; for ML-DSA-44 `(18, 10, 35)` under H-u, `(18, 9, 36)` under
-/// H-exact and `(18, 10, 40)` under H-FIPS (the other sets: the claim vectors' `len`).
+/// Terminal claims per stage; for ML-DSA-44 `(18, 9, 36)` under H-exact and `(18, 10, 40)`
+/// under H-FIPS (the other sets: the claim vectors' `len`).
 #[must_use]
 pub fn stage_terminals(manifest: &CommitmentManifest) -> [usize; 3] {
     [
@@ -1180,12 +1180,13 @@ mod tests {
         assert_eq!(registry.work_bits(), 2270);
         assert_eq!(work_bytes(&manifest()), 284);
         // H-exact: gamma^(2) has 9 coefficients (g = 4), gamma^(3) 50
-        // (g = 6), the rounds keep their difficulties: the plan is H-u's.
+        // (g = 6), the rounds keep their difficulties: the plan is the default relation's.
         let exact = CommitmentManifest::for_relation(100, crate::manifest::Relation::HExact).unwrap();
         assert_eq!(stage_gammas(&exact), [26, 9, 50]);
         assert_eq!(stage_terminals(&exact), [18, 9, 36]);
-        assert_eq!(stage_gammas(&manifest()), [26, 10, 49]);
-        assert_eq!(stage_terminals(&manifest()), [18, 10, 35]);
+        assert_eq!(manifest().relation(), crate::manifest::Relation::HFips);
+        assert_eq!(stage_gammas(&manifest()), [26, 9, 56]);
+        assert_eq!(stage_terminals(&manifest()), [18, 10, 40]);
         let exact_registry = Registry::new(&exact);
         let gammas: Vec<u8> = exact_registry
             .work_sites()
@@ -1402,6 +1403,7 @@ mod tests {
     #[test]
     fn fork_and_join_follow_the_registry() {
         let manifest = manifest();
+        let g3 = stage_gammas(&manifest)[2];
         let record = manifest.binding_bytes();
         let forked = |swap: bool| -> (Vec<OpeningField>, Vec<u8>, [Vec<OpeningField>; 2]) {
             let mut trunk = Transcript::new(&manifest, &record).unwrap();
@@ -1423,7 +1425,7 @@ mod tests {
             assert!(s.challenge_extensions(&lookup_site(LookupSite::X), 2).is_err());
             // The trunk waits at the join: stage 3 cannot start, a join of unfinished
             // branches is refused.
-            assert!(trunk.challenge_extensions(&gamma_site(3), 49).is_err());
+            assert!(trunk.challenge_extensions(&gamma_site(3), g3).is_err());
             let first = [
                 l.challenge_extensions(&lookup_site(LookupSite::X), 2).unwrap(),
                 s.challenge_extensions(TAU_SITE, 17).unwrap(),
@@ -1441,7 +1443,7 @@ mod tests {
                 trunk.join(l, s).unwrap();
             }
             let work = trunk.work_stream();
-            let gamma = trunk.challenge_extensions(&gamma_site(3), 49).unwrap();
+            let gamma = trunk.challenge_extensions(&gamma_site(3), g3).unwrap();
             (gamma, work, first)
         };
         let (gamma, work, first) = forked(false);
@@ -1474,7 +1476,7 @@ mod tests {
         run_branch(&mut l, &manifest);
         run_branch(&mut s, &manifest);
         trunk.join(l, s).unwrap();
-        trunk.challenge_extensions(&gamma_site(3), 49).unwrap();
+        trunk.challenge_extensions(&gamma_site(3), g3).unwrap();
         let mut stream = trunk.work_stream();
         let bits = Registry::new(&manifest).work_bits();
         let stage3: usize = Registry::new(&manifest)
@@ -1492,6 +1494,6 @@ mod tests {
         run_branch(&mut l, &manifest);
         run_branch(&mut s, &manifest);
         replay.join(l, s).unwrap();
-        assert_eq!(replay.challenge_extensions(&gamma_site(3), 49).unwrap(), gamma);
+        assert_eq!(replay.challenge_extensions(&gamma_site(3), g3).unwrap(), gamma);
     }
 }

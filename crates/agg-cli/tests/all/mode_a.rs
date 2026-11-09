@@ -139,7 +139,7 @@ fn round_trip(
     profile_rejection: ProfileRejection,
 ) {
     round_trip_as(
-        Relation::Hu,
+        Relation::HFips,
         n_own,
         n_shared,
         seed,
@@ -304,8 +304,8 @@ fn round_trip_as(
         .verify(&statements, &aggregate.bytes, None)
         .accepted());
     let other_relation = match relation {
-        Relation::Hu => Relation::HExact,
-        Relation::HExact | Relation::HFips => Relation::Hu,
+        Relation::HFips => Relation::HExact,
+        Relation::HExact => Relation::HFips,
     };
     let crossed = pinned
         .relation(other_relation)
@@ -859,7 +859,7 @@ fn corrupted_aggregates_are_rejected() {
             &SeededMatrices,
             &OtherPlan(agg_cli::mode_a::FlockVerifier::new(&gate)),
             FLOCK_PROFILE,
-            Relation::Hu,
+            Relation::HFips,
             None,
         );
         assert!(matches!(
@@ -965,7 +965,7 @@ fn corrupted_aggregates_are_rejected() {
             &SeededMatrices,
             &flock,
             FlockProfile::None,
-            Relation::Hu,
+            Relation::HFips,
             None,
         );
         assert!(matches!(
@@ -980,7 +980,7 @@ fn corrupted_aggregates_are_rejected() {
             &SeededMatrices,
             &PublicBitsVerifier,
             FlockProfile::PublicBits,
-            Relation::Hu,
+            Relation::HFips,
             None,
         );
         assert!(matches!(
@@ -1011,7 +1011,7 @@ fn flock_proofs_are_checked_by_the_flock_verifier_and_cannot_move_between_aggreg
     on_large_stack(|| {
         let gate = sponge_gate();
         for (own, shared, part_log2, relation) in [
-            (48, 16, DEFAULT_PART_LOG2, Relation::Hu),
+            (48, 16, DEFAULT_PART_LOG2, Relation::HFips),
             (200, 56, 7, Relation::HExact),
         ] {
             let config = AggregatorConfig {
@@ -1157,12 +1157,13 @@ const fn stream_bit(t: usize, j: usize, rho: usize) -> usize {
 #[allow(clippy::too_many_lines)]
 fn tampered_witnesses_are_rejected_end_to_end() {
     on_large_stack(|| {
-        // 12 live records (N* = 16, one Flock part) keep the 17 prover runs short.
+        // 12 live records (N* = 16, one Flock part) keep the 17 prover runs short; relation
+        // H-exact, whose digit columns of z and u are moved below.
         let records = records(0x7a12, 9, 3);
         let signed = signed(&records);
         let public = statements(&records);
-        let aggregator = Aggregator::new(AggregatorConfig::default());
-        let verifier = AggregateVerifier::new();
+        let aggregator = Aggregator::new(AggregatorConfig { relation: Relation::HExact, ..AggregatorConfig::default() });
+        let verifier = AggregateVerifier::new().relation(Relation::HExact);
         let gate = sponge_gate();
         let run =
             |label: &str, hooks: &AggregateHooks<'_>, check: &dyn Fn(&VerifyError) -> bool| {
@@ -1189,9 +1190,9 @@ fn tampered_witnesses_are_rejected_end_to_end() {
         // A 16-bit z or v column changed inside T_16 (the round-2 multiplicities are
         // recounted): the ring identity (stage 3).
         run(
-            "z_lo",
+            "bz_lo",
             &main(&|m, t| {
-                let c = t.wide_cell_mut(m, Column::Z_LO, main_index(17, 2, 5));
+                let c = t.wide_cell_mut(m, Column::ZX_LO, main_index(17, 2, 5));
                 *c = if *c < (1 << 15) - 1 { *c + 1 } else { *c - 1 };
             }),
             &at_stage(3),
@@ -1274,7 +1275,7 @@ fn tampered_witnesses_are_rejected_end_to_end() {
             &SeededMatrices,
             &lenient,
             FLOCK_PROFILE,
-            Relation::Hu,
+            Relation::HExact,
             None,
         );
         let error = outcome.outcome.expect_err("the range identity");
@@ -1301,12 +1302,13 @@ fn tampered_witnesses_are_rejected_end_to_end() {
                     .contains("does not fit a signed 16-bit digit"),
             "{error}"
         );
-        // Base-4 and base-6 digits outside their alphabets: the leaves of stage 2 (U_hi = -4
-        // is outside relation H-u's base-6 alphabet).
+        // A non-Boolean bz_hi: the Booleanity zero-check (stage 3, where the ring identity
+        // fails too); a base-6 digit outside its alphabet: the leaf of stage 2 (U_hi = -4 is
+        // outside relation H-exact's base-6 alphabet).
         run(
-            "base-4 digit",
-            &main(&|m, t| *cell(m, t, Column::Z_HI, main_index(17, 2, 5)) = 3),
-            &at_stage(2),
+            "bz_hi = 2",
+            &main(&|m, t| *cell(m, t, Column::ZX_HI, main_index(17, 2, 5)) = 2),
+            &at_stage(3),
         );
         run(
             "base-6 digit",

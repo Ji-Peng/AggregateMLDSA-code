@@ -1,7 +1,7 @@
 use crate::common;
 use agg_mldsa_simd::{
     dispatch::{Backend, Engine},
-    finish::{FinishRow, HuCols},
+    finish::FinishRow,
     keccak::{Sink, Xof, XofJob},
     ntt::{Form, Scale},
     params::*,
@@ -467,111 +467,6 @@ fn ten_thousand_challenges() {
         assert_eq!(c.pos.as_slice(), expected.positions.as_slice());
         for (k, &p) in c.pos.iter().enumerate() {
             assert_eq!((c.neg >> k) & 1, (expected.coeffs[p as usize] < 0) as u64);
-        }
-    }
-}
-
-#[test]
-fn hu_digits_match_generic_at_edges() {
-    use agg_witness::digits::{DigitLayout, StepLayout};
-    const Z_RADIX16: DigitLayout = DigitLayout {
-        name: "z",
-        bases: &[65536, 4],
-        signed: true,
-    };
-    const V_RADIX16: DigitLayout = DigitLayout {
-        name: "v",
-        bases: &[65536, 65536],
-        signed: true,
-    };
-    const U_STEP16: StepLayout = StepLayout {
-        low: DigitLayout {
-            name: "u",
-            bases: &[65536],
-            signed: false,
-        },
-        step: 63079,
-        top_base: 6,
-        offset: 190465,
-    };
-    let e = engine();
-    let zs = [
-        -131072, -131071, -65537, -65536, -1, 0, 65535, 65536, 131071,
-    ];
-    let us = [
-        -B_U,
-        -B_U + 1,
-        63078 - B_U,
-        63079 - B_U,
-        126157 - B_U,
-        126158 - B_U,
-        189236 - B_U,
-        189237 - B_U,
-        252315 - B_U,
-        252316 - B_U,
-        315394 - B_U,
-        315395 - B_U,
-        B_U - 1,
-        B_U,
-    ];
-    let vs = [
-        -B_V,
-        -B_V + 1,
-        -65537,
-        -65536,
-        -1,
-        0,
-        65535,
-        65536,
-        B_V - 1,
-        B_V,
-    ];
-    let z = Poly32(std::array::from_fn(|i| zs[i % zs.len()]));
-    let out = FinishOut {
-        u: Poly32(std::array::from_fn(|i| us[i % us.len()])),
-        v: Poly32(std::array::from_fn(|i| vs[i % vs.len()])),
-        w1: std::array::from_fn(|i| (i % 44) as u8),
-    };
-    let mut wide = [[std::mem::MaybeUninit::uninit(); 256]; 4];
-    let mut narrow = [[std::mem::MaybeUninit::uninit(); 256]; 8];
-    e.hu_columns(
-        &z,
-        &out,
-        HuCols {
-            wide: wide.each_mut().map(|x| x.as_mut_slice()),
-            narrow: narrow.each_mut().map(|x| x.as_mut_slice()),
-        },
-    );
-    for i in 0..256 {
-        let zd = Z_RADIX16.decompose(z[i] as i64);
-        let ud = U_STEP16.decompose(out.u[i] as i64);
-        let vd = V_RADIX16.decompose(out.v[i] as i64);
-        // SAFETY: hu_columns initializes every element of each asserted-length destination.
-        unsafe {
-            assert_eq!(
-                [
-                    wide[0][i].assume_init() as i64,
-                    narrow[0][i].assume_init() as i64
-                ],
-                zd.as_slice()
-            );
-            assert_eq!(
-                [
-                    wide[1][i].assume_init() as i64,
-                    narrow[1][i].assume_init() as i64
-                ],
-                ud.as_slice()
-            );
-            assert_eq!(
-                [
-                    wide[2][i].assume_init() as i64,
-                    wide[3][i].assume_init() as i64
-                ],
-                vd.as_slice()
-            );
-            for t in 0..6 {
-                assert_eq!(narrow[t + 2][i].assume_init() as u8, (out.w1[i] >> t) & 1);
-            }
         }
     }
 }

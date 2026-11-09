@@ -471,7 +471,7 @@ mod tests {
         use agg_witness::params::Set;
         for set in [Set::S65, Set::S87] {
             for records in [5, 600] {
-                let manifest = CommitmentManifest::for_set(set, records, Relation::Hu).unwrap();
+                let manifest = CommitmentManifest::for_set(set, records, Relation::HExact).unwrap();
                 let (shape, domains) = bridge_view(&manifest);
                 let level = shape.level(1);
                 let m1 = SparseMatrix::random_for_tests(7, level.rows, level.cols, level.k);

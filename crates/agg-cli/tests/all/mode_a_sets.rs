@@ -70,7 +70,7 @@ where
 {
     let records = agg_witness::gen::records_for::<P>(seed, n);
     let instance = PublicInstance::<P>::from_records_for(&records).expect("instance");
-    let manifest = CommitmentManifest::for_set(P::SET, n, Relation::Hu).expect("manifest");
+    let manifest = CommitmentManifest::for_set(P::SET, n, Relation::HFips).expect("manifest");
     assert_eq!(manifest.segments(), 1);
     let signatures: Vec<&[u8]> = records.iter().map(|r| r.sig.as_slice()).collect();
     let main = MainTables::build_for::<P>(&manifest, &instance, &signatures).expect("round 1 tables");
@@ -250,8 +250,8 @@ fn full_driver<P: ParamSet>(seed: u64, n: usize, other: Set) {
     let last = flipped.len() - 100;
     flipped[last] ^= 1;
     assert!(!verifier.verify(&statements, &flipped, None).accepted());
-    // H-exact: H-u's layout and size, its own relation byte; each relation's verifier
-    // rejects the other's aggregate.
+    // H-exact: its own relation byte; each relation's verifier rejects the other's
+    // aggregate, and relation byte 0 is unknown.
     let exact = Aggregator::new(AggregatorConfig { relation: Relation::HExact, ..config })
         .aggregate(&signed)
         .expect("H-exact aggregate");
@@ -267,11 +267,12 @@ fn full_driver<P: ParamSet>(seed: u64, n: usize, other: Set) {
     let mut relabelled = exact.bytes.clone();
     relabelled[2] &= 0xF0;
     assert!(!verifier.verify(&statements, &relabelled, None).accepted());
-    // H-FIPS: its own layout (the hint columns), accepted under H-FIPS only.
+    // H-FIPS (the default): its own layout (the hint columns), accepted under H-FIPS only.
     let fips = Aggregator::new(AggregatorConfig { relation: Relation::HFips, ..config })
         .aggregate(&signed)
         .expect("H-FIPS aggregate");
     assert_eq!(fips.bytes[2] & 0x0F, Relation::HFips.id());
+    assert_eq!(fips.bytes, aggregate.bytes, "H-FIPS is the default relation");
     let fips_verifier = AggregateVerifier::for_set(P::SET).relation(Relation::HFips);
     let report = fips_verifier.verify(&statements, &fips.bytes, None);
     assert!(report.accepted(), "{report}");
@@ -281,10 +282,9 @@ fn full_driver<P: ParamSet>(seed: u64, n: usize, other: Set) {
     relabelled[2] = (relabelled[2] & 0xF0) | Relation::HExact.id();
     assert!(!exact_verifier.verify(&statements, &relabelled, None).accepted());
     eprintln!(
-        "{} H-FIPS at {n}: {} B (H-u {} B, H-exact {} B)",
+        "{} H-FIPS at {n}: {} B (H-exact {} B)",
         P::NAME,
         fips.bytes.len(),
-        aggregate.bytes.len(),
         exact.bytes.len()
     );
 

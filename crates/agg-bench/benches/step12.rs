@@ -1,4 +1,4 @@
-//! Benchmark of `PublicInstance::new`, `MainTables::build` for H-u
+//! Benchmark of `PublicInstance::new`, `MainTables::build` for H-FIPS
 //! and the streamed verifier (StreamedPublic::prepare + pass).
 
 use std::time::Duration;
@@ -52,7 +52,7 @@ fn main() {
         })
         .collect();
     let signatures: Vec<&[u8]> = records.iter().map(|r| r.sig.as_slice()).collect();
-    let manifest = CommitmentManifest::for_relation(n, Relation::Hu).unwrap();
+    let manifest = CommitmentManifest::for_relation(n, Relation::HFips).unwrap();
 
     let mut step1_times = Vec::with_capacity(reps);
     let mut step2_times = Vec::with_capacity(reps);
@@ -65,7 +65,7 @@ fn main() {
         // Step 1: PublicInstance::new
         let (instance, dur_step1) = timed(|| PublicInstance::new(&inputs).unwrap());
 
-        // Step 2: MainTables::build for H-u
+        // Step 2: MainTables::build for H-FIPS
         let (_tables, dur_step2) =
             timed(|| MainTables::build(&manifest, &instance, &signatures).unwrap());
 
@@ -100,7 +100,7 @@ fn main() {
     println!("--------------------------------------------------------------------------------");
     println!("Medians (Backend = {backend:?}):");
     println!("  Step 1 (PublicInstance::new):                         {:.2?}", med_step1);
-    println!("  Step 2 (MainTables::build for H-u):                    {:.2?}", med_step2);
+    println!("  Step 2 (MainTables::build for H-FIPS):                 {:.2?}", med_step2);
     println!("  StreamedPublic (prepare + pass, uncached):             {:.2?}", med_verifier);
     println!("================================================================================");
 }

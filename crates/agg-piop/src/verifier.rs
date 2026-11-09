@@ -23,7 +23,7 @@
 //! | `public_pass` | one pass over the records and keys: `T(r^(2))`, `w_A(r^(3))` ([`StreamedPublic::pass`]) |
 //! | `stage3_terminal` | the batched stage-3 terminal check |
 //! | `bits` | [`KeccakVerifier::check_bits`] (mode B: committed bits against the public bits); the public data is freed beside this step and the opening (`rayon::join`) |
-//! | `opening` | the batched Akita opening of every committed polynomial (53 claims for ML-DSA-44 under H-u) |
+//! | `opening` | the batched Akita opening of every committed polynomial (59 claims for ML-DSA-44 under H-FIPS) |
 //!
 //! Before parsing the verifier checks its own configuration ([`check_configuration`]) and
 //! refuses one under which an accepted proof would not establish the relation: a
@@ -1104,7 +1104,7 @@ mod tests {
         flock: FlockProfile,
     ) -> Option<ConfigurationError> {
         // Garbage proof bytes: a configuration that passes fails at the wire parse.
-        match verify(&[], &[0xff; 16], bridge, keccak, flock, Relation::Hu, None) {
+        match verify(&[], &[0xff; 16], bridge, keccak, flock, Relation::HFips, None) {
             Err(VerifyError::Configuration(e)) => Some(e),
             Err(VerifyError::Wire(_)) => None,
             other => panic!("unexpected outcome {other:?}"),
@@ -1139,7 +1139,7 @@ mod tests {
         assert_eq!(refused(&fixed, &public_bits, FlockProfile::PublicBits), None);
         assert_eq!(refused(&SeededMatrices, &public_bits, FlockProfile::PublicBits), None);
         let fast = AcceptAll(FlockProfile::Fast);
-        let report = verify_timed(&[], &[], &fixed, &fast, FlockProfile::Fast, Relation::Hu, None);
+        let report = verify_timed(&[], &[], &fixed, &fast, FlockProfile::Fast, Relation::HFips, None);
         assert!(matches!(report.outcome, Err(VerifyError::Configuration(_))));
         assert_eq!(report.timings.parse, Duration::ZERO, "refused before the parse");
     }

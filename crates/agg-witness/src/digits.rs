@@ -1,6 +1,5 @@
 //! Digit decompositions in balanced alphabets, the value forms the PIOP commits (the step form
-//! of `u` in relations H-u and H-exact, the bit-slack form of `z` in relations H-exact and
-//! H-FIPS, the slack form of H-FIPS's magnitude `L`), and the leaf predicates Q_2, Q_4, Q_6,
+//! of `u` in relation H-exact, the bit-slack form of `z` in relations H-exact and H-FIPS, the slack form of H-FIPS's magnitude `L`), and the leaf predicates Q_2, Q_4, Q_6,
 //! Q_8, Q_16.
 //!
 //! A digit of base b lies in the balanced alphabet [-b/2, b/2 - 1]. A value with digits
@@ -200,7 +199,7 @@ impl SlackLayout {
 }
 
 /// Step form X = step H + b - offset with one top digit H in [0, c) and b in [0, 2^j) given by
-/// unsigned digits (relation H-u). It covers [-offset, step (c - 1) +
+/// unsigned digits (`u` in relation H-exact). It covers [-offset, step (c - 1) +
 /// 2^j - 1 - offset] without gap when step <= 2^j. Committed digits: the low digits of b, then
 /// the top digit stored balanced, D = H - c/2 in the base-c alphabet [-c/2, c/2 - 1].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -684,26 +683,12 @@ pub const U_DIGIT_SLACK: DigitSlackLayout = DigitSlackLayout {
     offset: 523_777,
 };
 
-/// Relaxed digit-slack form of z for ML-DSA-65 and ML-DSA-87:
-/// z + 2^19 = z_lo + 2^16 z_mid + 2^19 a_z with z_lo in [0, 2^16), z_mid in [0, 8), a_z in {0, 1}.
-/// Stored Z_lo = z_lo - 2^15, Z_mid = z_mid - 4, a_z.
-pub const Z_DIGIT_SLACK: DigitSlackLayout = DigitSlackLayout {
-    low: DigitLayout {
-        name: "z",
-        bases: &[1 << 16],
-        signed: false,
-    },
-    mid_base: 8,
-    slack_weight: 1 << 19,
-    offset: 1 << 19,
-};
-
 /// Exact digit-slack form of z for ML-DSA-65 and ML-DSA-87 (relation H-exact) with bound
 /// `b_z = gamma1 - beta - 1`: z + b_z = z_lo + 2^16 z_mid + (2 b_z + 1 - 2^19) a_z with z_lo in
 /// [0, 2^16), z_mid in [0, 8), a_z in {0, 1}. The two blocks [0, 2^19) and
 /// [2 b_z + 1 - 2^19, 2 b_z] cover [0, 2 b_z] without a gap (the slack weight is below 2^19), so
-/// the range is exactly [-b_z, b_z]. Stored Z_lo = z_lo - 2^15, Z_mid = z_mid - 4, a_z: the
-/// columns, alphabets and leaves of the relaxed form [`Z_DIGIT_SLACK`].
+/// the range is exactly [-b_z, b_z]. Stored Z_lo = z_lo - 2^15 (looked up), Z_mid = z_mid - 4
+/// (base 8, leaf and link) and the Boolean a_z.
 pub const fn z_digit_slack_exact(b_z: i64) -> DigitSlackLayout {
     assert!(2 * b_z + 1 > 1 << 19 && 2 * b_z + 1 - (1 << 19) <= 1 << 19);
     DigitSlackLayout {
@@ -872,7 +857,7 @@ mod tests {
         bases: &[16, 16, 4],
         signed: true,
     };
-    /// Relation H-u's step form of u as the PIOP commits it: one 16-bit low digit.
+    /// The step form of u (relation H-exact) as the PIOP commits it: one 16-bit low digit.
     const U_STEP16: StepLayout = StepLayout {
         low: DigitLayout {
             name: "u",
@@ -893,7 +878,6 @@ mod tests {
         assert_eq!(UNSIGNED.range(), (0, 1023));
         assert_eq!(UNSIGNED2.range(), (0, 255));
         assert_eq!(SIGNED.range(), (-512, 511));
-        assert_eq!(U_STEP16.range(), (-BAR_B_U, BAR_B_U));
         assert_eq!(U_STEP16.range(), (-B_U, B_U));
     }
 
@@ -1130,62 +1114,6 @@ mod tests {
             assert!(form.in_alphabets(&d), "u = {u}");
             assert_eq!(form.compose(&d), u);
             u += 1007;
-        }
-    }
-
-    #[test]
-    fn z_digit_slack_form_is_exact_at_the_boundaries() {
-        let form = ValueForm::from(Z_DIGIT_SLACK);
-        assert_eq!(form.len(), 3);
-        assert_eq!(form.weights(), vec![1, 1 << 16, 1 << 19]);
-        assert_eq!(form.constant(), -229_376);
-        assert_eq!(form.range(), (-(1 << 19), (1 << 19) - 1));
-        assert_eq!(
-            (0..3).map(|k| form.alphabet(k)).collect::<Vec<_>>(),
-            [Alphabet::Balanced(1 << 16), Alphabet::Balanced(8), Alphabet::Bool]
-        );
-        assert_eq!((form.base(0), form.base(1), form.base(2)), (Some(1 << 16), Some(8), None));
-
-        // Canonical digits of zero: (Z_lo, Z_mid, a_z) = (-32,768, -4, 1)
-        assert_eq!(form.decompose(0), vec![-32_768, -4, 1]);
-        assert_eq!(form.compose(&[-32_768, -4, 1]), 0);
-
-        // Accepted boundaries: z = -2^19 and 2^19 - 1
-        let z_min = -(1i64 << 19);
-        let z_max = (1i64 << 19) - 1;
-        assert_eq!(form.decompose(z_min), vec![-32_768, -4, 0]);
-        assert!(form.in_alphabets(&form.decompose(z_min)));
-        assert_eq!(form.compose(&form.decompose(z_min)), z_min);
-
-        assert_eq!(form.decompose(z_max), vec![32_767, 3, 1]);
-        assert!(form.in_alphabets(&form.decompose(z_max)));
-        assert_eq!(form.compose(&form.decompose(z_max)), z_max);
-
-        // Rejected boundaries: -2^19 - 1 and 2^19
-        let d_low = form.decompose(z_min - 1);
-        assert_eq!(d_low, vec![32_767, -5, 0]);
-        assert!(!form.in_alphabets(&d_low));
-        assert_eq!(form.compose(&d_low), z_min - 1);
-
-        let d_high = form.decompose(z_max + 1);
-        assert_eq!(d_high, vec![-32_768, 4, 1]);
-        assert!(!form.in_alphabets(&d_high));
-        assert_eq!(form.compose(&d_high), z_max + 1);
-
-        // Further out of range
-        for z in [z_min - 100, z_max + 100, 1 << 21, -(1 << 21)] {
-            let d = form.decompose(z);
-            assert!(!form.in_alphabets(&d), "z = {z}");
-            assert_eq!(form.compose(&d), z);
-        }
-
-        // Stepped test across the whole valid range
-        let mut z = z_min;
-        while z <= z_max {
-            let d = form.decompose(z);
-            assert!(form.in_alphabets(&d), "z = {z}");
-            assert_eq!(form.compose(&d), z);
-            z += 1009;
         }
     }
 

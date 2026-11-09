@@ -1,8 +1,8 @@
-//! Packed sparse products, CRT finishing, and H-u digits.
+//! Packed sparse products and CRT finishing.
 //!
 //! Rounding follows the CC0 pq-crystals Dilithium AVX2 rounding implementation.
 //! The sparse signed-window technique also appears in Hybrid-SHA-3's pspm.c.
-use super::{FinishError, FinishOut, FinishRow, HuCols};
+use super::{FinishError, FinishOut, FinishRow};
 use crate::{
     params::*,
     poly::{Challenge, Poly32},
@@ -10,8 +10,6 @@ use crate::{
 use std::mem::MaybeUninit;
 use std::arch::x86_64::*;
 
-/// f32 value of (1/63079) * (1 + 2^-20).
-const HU_RECIP: f32 = 1.5853151e-5;
 type V = __m256i;
 #[inline]
 #[target_feature(enable = "avx2,popcnt")]
@@ -56,13 +54,6 @@ fn load(a: &[i32; 8]) -> V {
 #[target_feature(enable = "avx2,popcnt")]
 fn store(a: &mut [i32; 8], v: V) {
     // SAFETY: the fixed-size reference contains exactly one unaligned vector.
-    unsafe { _mm256_storeu_si256(a.as_mut_ptr().cast(), v) }
-}
-#[inline]
-#[target_feature(enable = "avx2,popcnt")]
-fn wide(a: &mut [MaybeUninit<i32>], v: V) {
-    let a: &mut [MaybeUninit<i32>; 8] = a.try_into().unwrap();
-    // SAFETY: all vector bytes lie in the destination chunk; no uninitialized value is read.
     unsafe { _mm256_storeu_si256(a.as_mut_ptr().cast(), v) }
 }
 #[inline]
@@ -560,70 +551,4 @@ pub unsafe fn step_u_e_v_bounds(
     else if exceeds(bad_u, B_U) { Err(FinishError::UBound) }
     else if exceeds(bad_v, B_V) { Err(FinishError::VBound) }
     else { Ok(()) }
-}
-/// Packs four vectors of small signed values into 32 consecutive bytes (saturating).
-#[inline]
-#[target_feature(enable = "avx2,popcnt")]
-fn pack32(a: V, b: V, c: V, d: V) -> V {
-    let ab = _mm256_packs_epi32(a,b);
-    let cd = _mm256_packs_epi32(c,d);
-    let bytes = _mm256_packs_epi16(ab,cd);
-    _mm256_permutevar8x32_epi32(bytes,_mm256_setr_epi32(0,4,1,5,2,6,3,7))
-}
-#[inline]
-#[target_feature(enable = "avx2,popcnt")]
-fn narrow32(a: &mut [MaybeUninit<i8>], v: V) {
-    let a: &mut [MaybeUninit<i8>; 32] = a.try_into().unwrap();
-    // SAFETY: the destination chunk contains exactly 32 writable bytes.
-    unsafe { _mm256_storeu_si256(a.as_mut_ptr().cast(), v) }
-}
-#[target_feature(enable = "avx2,popcnt")]
-pub(crate) unsafe fn hu_columns<P: ParamSet>(z: &Poly32, out: &FinishOut, cols: HuCols<'_>) {
-    if P::GAMMA2 == (Q - 1) / 88 {
-        // SAFETY: AVX2 and POPCNT target features are enabled on this function.
-        unsafe { hu_columns_44(z, out, cols) };
-    } else {
-        super::scalar::hu_columns::<P>(z, out, cols);
-    }
-}
-
-#[target_feature(enable = "avx2,popcnt")]
-unsafe fn hu_columns_44(z: &Poly32, out: &FinishOut, cols: HuCols<'_>) {
-    for col in &cols.wide { assert_eq!(col.len(),256); }
-    for col in &cols.narrow { assert_eq!(col.len(),256); }
-    for i in (0..256).step_by(32) {
-        let mut zhi = [splat(0);4];
-        let mut uhi = [splat(0);4];
-        for j in 0..4 {
-            let o = i + 8*j;
-            let z = load(z[o..o+8].try_into().unwrap());
-            let u = load(out.u[o..o+8].try_into().unwrap());
-            let v = load(out.v[o..o+8].try_into().unwrap());
-            // z + 2^17 shifts the high digit by exactly 2 and leaves the low 16 bits unchanged.
-            wide(&mut cols.wide[0][o..o+8],sub(and(z,splat(65535)),splat(32768)));
-            zhi[j] = sar::<16>(z);
-            // Valid u gives y in [0,380930]. The digit H counts the thresholds below y and
-            // saturates at 5. The float estimate y * (1/63079) * (1 + 2^-20) never rounds below
-            // the true quotient and stays under the next integer on this range.
-            let y = add(u,splat(B_U));
-            let hf = _mm256_cvttps_epi32(_mm256_mul_ps(_mm256_cvtepi32_ps(y),_mm256_set1_ps(HU_RECIP)));
-            let h = _mm256_min_epi32(hf,splat(5));
-            wide(&mut cols.wide[1][o..o+8],sub(sub(y,mul(h,splat(63079))),splat(32768)));
-            uhi[j] = sub(h,splat(3));
-            wide(&mut cols.wide[2][o..o+8],sub(and(v,splat(65535)),splat(32768)));
-            wide(&mut cols.wide[3][o..o+8],sar::<16>(v));
-        }
-        narrow32(&mut cols.narrow[0][i..i+32],pack32(zhi[0],zhi[1],zhi[2],zhi[3]));
-        narrow32(&mut cols.narrow[1][i..i+32],pack32(uhi[0],uhi[1],uhi[2],uhi[3]));
-        // Bits of the w1 bytes are split in the byte domain: shift 16-bit lanes, keep bit 0.
-        // SAFETY: w1 has 256 bytes, so the 32-byte load at i is in bounds.
-        let w = unsafe { _mm256_loadu_si256(out.w1.as_ptr().add(i).cast()) };
-        let one = _mm256_set1_epi8(1);
-        narrow32(&mut cols.narrow[2][i..i+32],and(w,one));
-        narrow32(&mut cols.narrow[3][i..i+32],and(_mm256_srli_epi16::<1>(w),one));
-        narrow32(&mut cols.narrow[4][i..i+32],and(_mm256_srli_epi16::<2>(w),one));
-        narrow32(&mut cols.narrow[5][i..i+32],and(_mm256_srli_epi16::<3>(w),one));
-        narrow32(&mut cols.narrow[6][i..i+32],and(_mm256_srli_epi16::<4>(w),one));
-        narrow32(&mut cols.narrow[7][i..i+32],and(_mm256_srli_epi16::<5>(w),one));
-    }
 }

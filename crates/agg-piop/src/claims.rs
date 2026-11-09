@@ -230,8 +230,7 @@ impl Stage1Claims {
 }
 
 /// The stage-2 terminal claims: `b_t^(rho)(r^(2))` ([`bit_columns`]) and `P_Z(r^(2))` for
-/// each leaf-checked digit (10 under H-u: 6 bits, 4 squares; 9 under H-exact: 6 bits, 3
-/// squares); under H-FIPS 10 claims (6 bits, 2 squares for `K_2, K_3`, plus `delta(r^(2))`
+/// each leaf-checked digit (9 under H-exact: 6 bits, 3 squares); under H-FIPS 10 claims (6 bits, 2 squares for `K_2, K_3`, plus `delta(r^(2))`
 /// and `e(r^(2))`, `stage2::FIPS_TERMINALS`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage2Claims {
@@ -285,8 +284,8 @@ impl Stage2Claims {
 }
 
 /// The stage-3 terminal claims: every polynomial of `G_main16, G_main4, G_1, G_2, G_3, G_k` at
-/// `r^(3)` restricted to its group, in manifest order (group by group): 35 under H-u, 36
-/// under H-exact (40 under H-FIPS). `G_m` is opened at the lookup's table point instead
+/// `r^(3)` restricted to its group, in manifest order (group by group): 36 under H-exact,
+/// 40 under H-FIPS. `G_m` is opened at the lookup's table point instead
 /// ([`MultiplicityClaims`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage3Claims(pub Vec<E>);
@@ -373,28 +372,31 @@ mod tests {
         let manifest = CommitmentManifest::for_batch(8).unwrap();
         let exact = CommitmentManifest::for_relation(8, crate::manifest::Relation::HExact).unwrap();
         assert_eq!((Stage2Claims::len(&manifest), Stage2Claims::len(&exact)), (10, 9));
-        assert_eq!((Stage3Claims::len(&manifest), Stage3Claims::len(&exact)), (35, 36));
+        assert_eq!((Stage3Claims::len(&manifest), Stage3Claims::len(&exact)), (40, 36));
         for m in [&manifest, &exact] {
             let s2 = Stage2Claims::from_slice(m, &point(&mut rng, Stage2Claims::len(m))).unwrap();
             assert_eq!(Stage2Claims::from_slice(m, &s2.to_vec()), Some(s2.clone()));
         }
         assert!(Stage2Claims::from_slice(&exact, &point(&mut rng, 8)).is_none());
-        let s3 = Stage3Claims::from_slice(&manifest, &point(&mut rng, 35)).unwrap();
-        assert_eq!(Stage3Claims::group_offset(&manifest, GroupRole::Level2), 18);
-        // G_3 has one claim (its zero polynomials have none), then G_k's four.
-        assert_eq!(s3.group(&manifest, GroupRole::Level3), &s3.0[30..31]);
-        assert_eq!(s3.group(&manifest, GroupRole::Proj), &s3.0[31..]);
-        assert_eq!(s3.column(&manifest, Column::K_2), s3.0[33]);
-        assert_eq!(s3.column(&manifest, Column::K_3), s3.0[34]);
-        assert_eq!(s3.column(&manifest, Column::Parity2(1)), s3.0[19]);
-        assert_eq!(s3.column(&manifest, Column::W1Bit(0, 0)), s3.0[6]);
-        assert!(Stage3Claims::from_slice(&manifest, &s3.0[..34]).is_none());
-        // H-exact: a_z is the last main-domain claim, every later group moves by one.
+        // H-exact: 4 + 9 main-domain claims (a_z last), 6 + 12 bridge claims, one claim of G_3
+        // (its zero polynomials have none), then G_k's four.
         let x3 = Stage3Claims::from_slice(&exact, &point(&mut rng, 36)).unwrap();
         assert_eq!(Stage3Claims::group_offset(&exact, GroupRole::Level2), 19);
         assert_eq!(x3.column(&exact, Column::A_Z), x3.0[12]);
         assert_eq!(x3.column(&exact, Column::W1Bit(0, 0)), x3.0[6]);
+        assert_eq!(x3.group(&exact, GroupRole::Level3), &x3.0[31..32]);
+        assert_eq!(x3.group(&exact, GroupRole::Proj), &x3.0[32..]);
+        assert_eq!(x3.column(&exact, Column::K_2), x3.0[34]);
+        assert_eq!(x3.column(&exact, Column::K_3), x3.0[35]);
+        assert_eq!(x3.column(&exact, Column::Parity2(1)), x3.0[20]);
         assert!(Stage3Claims::from_slice(&exact, &x3.0[..34]).is_none());
+        // H-FIPS: 4 + 12 main-domain claims, G_2 with the hint slack u_h last.
+        let s3 = Stage3Claims::from_slice(&manifest, &point(&mut rng, 40)).unwrap();
+        assert_eq!(Stage3Claims::group_offset(&manifest, GroupRole::Level2), 22);
+        assert_eq!(s3.column(&manifest, Column::HINT_SLACK), s3.0[34]);
+        assert_eq!(s3.group(&manifest, GroupRole::Level3), &s3.0[35..36]);
+        assert_eq!(s3.column(&manifest, Column::K_3), s3.0[39]);
+        assert!(Stage3Claims::from_slice(&manifest, &s3.0[..39]).is_none());
         let digits = MultiplicityClaims([3, -2, 0, 1, 0, 0, 7].map(E::from_i64));
         assert_eq!(digits.compose(), E::from_i64(3 - 32 + 4096 + 7 * (1 << 24)));
         assert_eq!(carry_value(E::from_i64(-(1 << 15))), E::from_i64(0));

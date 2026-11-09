@@ -1,10 +1,8 @@
-//! Finish operations: CRT combination, rounding, UseHint, quotient check, and column decomposition.
+//! Finish operations: CRT combination, rounding, UseHint, and quotient check.
 
 pub mod avx2;
 pub(crate) mod avx512;
 pub(crate) mod scalar;
-
-use std::mem::MaybeUninit;
 
 use crate::dispatch::{Backend, Engine};
 use crate::params::ParamSet;
@@ -48,14 +46,6 @@ pub struct FinishRowExact<'a> {
     pub t: &'a [i32; 256],
     /// Hint bits (0 or 1).
     pub h: &'a [u8; 256],
-}
-
-/// Destination slices for decomposed relation columns.
-pub struct HuCols<'a> {
-    /// 16-bit low digits / wide columns: Z_lo, U_lo, V_lo, V_hi (each len 256).
-    pub wide: [&'a mut [MaybeUninit<i32>]; 4],
-    /// Narrow columns: Z_hi, U_hi, b0..b5 (each len 256).
-    pub narrow: [&'a mut [MaybeUninit<i8>]; 8],
 }
 
 /// Errors occurring during row finishing.
@@ -155,21 +145,6 @@ impl<P: ParamSet> Engine<P> {
             Backend::Avx512 => {
                 // SAFETY: The engine guarantees AVX-512 features are available.
                 unsafe { avx512::finish_row_exact::<P>(row, out) }
-            }
-        }
-    }
-
-    /// Decomposes (z, u, v, w1) into the H-u relation columns.
-    pub fn hu_columns(&self, z: &Poly32, out: &FinishOut, cols: HuCols<'_>) {
-        match self.backend() {
-            Backend::Scalar => scalar::hu_columns::<P>(z, out, cols),
-            Backend::Avx2 => {
-                // SAFETY: The engine guarantees AVX2 and POPCNT features are available.
-                unsafe { avx2::hu_columns::<P>(z, out, cols) }
-            }
-            Backend::Avx512 => {
-                // SAFETY: The engine guarantees AVX-512 features are available.
-                unsafe { avx512::hu_columns::<P>(z, out, cols) }
             }
         }
     }

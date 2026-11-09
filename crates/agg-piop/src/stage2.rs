@@ -1,28 +1,28 @@
-//! Stage 2 (degree 5 in relations H-u and H-exact): the level-1 definition and the range
+//! Stage 2 (degree 5 in every relation): the level-1 definition and the range
 //! leaves of the small digits on the virtual tables `P_Z` (every other range is the lookup
 //! into `T_16` or, for the Boolean digits of H-exact, a zero-check in stage 3).
 //!
-//! `gamma^(2)` order: `def_y1[t]` (0..6), then one leaf per leaf-checked digit: H-u has
-//! `leaf4[Z_hi]` (6), `leaf6[U_hi]` (7) and `leaf8[K_2]`, `leaf8[K_3]` (8, 9), H-exact
+//! `gamma^(2)` order: `def_y1[t]` (0..6), then one leaf per leaf-checked digit: H-exact has
 //! `leaf6[U_hi]` (6) and `leaf8[K_2]`, `leaf8[K_3]` (7, 8). `K_2, K_3`
 //! are the top digits of the projection outputs of `v` (`projection`); their leaves are on the
 //! projection domain at the suffix of `r^(1)`. After
 //! the terminal claims the prover sends the shared claim `c` of the projection identity.
 //! The leaf of the eight-valued `K_2, K_3` (`Q_8`, degree 4 in `P_Z`) sets the stage degree
-//! `1 + 4 = 5` in both relations.
+//! `1 + 4 = 5` in every relation.
 //!
 //! With polynomial lanes (ML-DSA-65, ML-DSA-87) `def_y1[t]` (`0..4`) is one instance with
 //! `k` products `w_1^(rho) b_t^(rho)`, one per lane of the bit, and the leaves follow the
-//! lanes in manifest order: `leaf8[Z_mid^(s)]` (`l`), `leaf8[U_mid^(rho)]` (`k`), then
-//! `leaf8[K_2]`, `leaf8[K_3]`, `leaf4[K_4]` on the projection domain (18 and 22 instances).
+//! lanes in manifest order under H-exact: `leaf8[Z_mid^(s)]` (`l`), `leaf8[U_mid^(rho)]` (`k`),
+//! then `leaf8[K_2]`, `leaf8[K_3]`, `leaf4[K_4]` on the projection domain (18 and 22
+//! instances).
 //!
 //! Relation H-FIPS has `leaf8[K_2]`, `leaf8[K_3]` (gamma 6, 7) as its
 //! leaves and adds one instance after them (gamma 8): the degree-3 zero-check
 //! `F_e = e (e - 1)(e - delta)` at `r^(1)`
 //! (degree 4 with `eq`; stage 3 has degree 3). Its terminal claims add `delta(r^(2))` and
 //! `e(r^(2))`, reduced in stage 3. Every other H-FIPS check has degree at most 2 and sits in
-//! stage 3. With polynomial lanes (ML-DSA-65, ML-DSA-87) H-FIPS's leaves are those of H-u
-//! without `leaf8[U_mid^(rho)]` (the magnitude `L` has a looked-up low digit and two bits),
+//! stage 3. With polynomial lanes (ML-DSA-65, ML-DSA-87) H-FIPS's leaves are those of
+//! H-exact without `leaf8[U_mid^(rho)]` (the magnitude `L` has a looked-up low digit and two bits),
 //! and `F_e` is one instance per row lane `rho` after them, with the terminal claims
 //! `delta^(rho)(r^(2))` then `e^(rho)(r^(2))`.
 use agg_witness::bridge::BridgeMatrices;
@@ -62,8 +62,8 @@ pub fn fips_instances(manifest: &CommitmentManifest) -> usize {
     }
 }
 
-/// Batching coefficients: 10 under H-u, 9 under H-exact and H-FIPS (the leaves of `K_2`
-/// and `K_3` in each); 18 and 22 for ML-DSA-65 and ML-DSA-87.
+/// Batching coefficients: 9 under H-exact and H-FIPS (the leaves of `K_2` and `K_3` in
+/// each); 18 and 22 for ML-DSA-65 and ML-DSA-87 under H-exact.
 #[must_use]
 pub fn gamma_count(manifest: &CommitmentManifest) -> usize {
     bits(manifest) + manifest.leaf_digits().len() + fips_instances(manifest)
@@ -199,8 +199,8 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
             })
             .collect(),
     });
-    // The leaves, one group per domain (the main domain: Z_hi, U_hi; the projection domain:
-    // K_2, K_3), each at the domain's suffix of r^(1).
+    // The leaves, one group per domain (the main domain: U_hi under H-exact; the projection
+    // domain: K_2, K_3), each at the domain's suffix of r^(1).
     for domain in [GroupRole::Main, GroupRole::Proj] {
         let local: Vec<(usize, &Digit)> =
             all.iter().enumerate().filter(|(_, d)| d.column.domain() == domain).collect();
@@ -429,38 +429,24 @@ mod tests {
     }
 
     #[test]
-    fn stage_two_has_ten_instances_in_spec_order() {
-        let manifest = CommitmentManifest::for_batch(8).unwrap();
-        let spec = spec(&manifest);
-        spec.validate().unwrap();
-        assert_eq!(spec.groups.len(), 3);
-        let instances: usize = spec.groups.iter().map(|g| g.instances.len()).sum();
-        assert_eq!(instances, 10);
-        // leaf8[K_2], leaf8[K_3] on the projection domain at the suffix of r^(1), gamma 8, 9.
-        let k_leaf = &spec.groups[2];
-        assert_eq!((k_leaf.domain, k_leaf.eq), (GroupRole::Proj, EqPoint::R1));
-        assert_eq!(k_leaf.instances[0].gamma, gamma_leaf(2));
-        assert_eq!(k_leaf.instances[0].terms, vec![Term::Leaf(0, LeafPoly::Q8)]);
-        assert_eq!(k_leaf.instances[1].gamma, gamma_leaf(3));
-        assert_eq!(k_leaf.instances[1].terms, vec![Term::Leaf(1, LeafPoly::Q8)]);
-        let leaves = &spec.groups[1];
-        let z_hi = leaves.lane(LaneId::DigitSquare(Column::Z_HI));
-        let u_hi = leaves.lane(LaneId::DigitSquare(Column::U_HI));
-        assert_eq!(leaves.instances[0].gamma, gamma_leaf(0));
-        assert_eq!(leaves.instances[0].terms, vec![Term::Leaf(z_hi, LeafPoly::Q4)]);
-        assert_eq!(leaves.instances[1].terms, vec![Term::Leaf(u_hi, LeafPoly::Q6)]);
-        let mut max = 0;
-        for group in &spec.groups {
-            let inner = usize::from(group.eq != EqPoint::None);
-            for instance in &group.instances {
-                for term in &instance.terms {
-                    assert!(term.degree() + inner <= DEGREE);
-                    max = max.max(term.degree() + inner);
+    fn stage_two_degree_is_tight_under_every_relation() {
+        for relation in crate::manifest::Relation::ALL {
+            let manifest = CommitmentManifest::for_relation(8, relation).unwrap();
+            let spec = spec(&manifest);
+            spec.validate().unwrap();
+            let mut max = 0;
+            for group in &spec.groups {
+                let inner = usize::from(group.eq != EqPoint::None);
+                for instance in &group.instances {
+                    for term in &instance.terms {
+                        assert!(term.degree() + inner <= DEGREE);
+                        max = max.max(term.degree() + inner);
+                    }
                 }
             }
+            // The degree is tight: leaf8[K_2] reaches it.
+            assert_eq!(max, DEGREE);
+            assert_eq!(DEGREE, crate::transcript::STAGE_DEGREES[STAGE - 1]);
         }
-        // The degree is tight: leaf8[K_2] reaches it.
-        assert_eq!(max, DEGREE);
-        assert_eq!(DEGREE, crate::transcript::STAGE_DEGREES[STAGE - 1]);
     }
 }

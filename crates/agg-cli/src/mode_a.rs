@@ -1194,7 +1194,7 @@ pub struct AggregatorConfig {
     /// Prove a batch of more than one segment as one span over all segments when the parts
     /// are whole segments (module docs; default on).
     pub span: bool,
-    /// The relation to prove (default H-u). The Keccak side
+    /// The relation to prove (default H-FIPS). The Keccak side
     /// does not depend on it.
     pub relation: Relation,
     /// The parameter set of the records (default ML-DSA-44; bound in the instance record
@@ -1208,7 +1208,7 @@ impl Default for AggregatorConfig {
             part_log2: DEFAULT_PART_LOG2,
             profile: FLOCK_PROFILE,
             span: true,
-            relation: Relation::Hu,
+            relation: Relation::HFips,
             set: Set::S44,
         }
     }
@@ -2158,7 +2158,7 @@ impl AggregateVerifier {
         Self {
             gate: gate_of(set),
             require: None,
-            relation: Relation::Hu,
+            relation: Relation::HFips,
             set,
         }
     }
@@ -2169,7 +2169,7 @@ impl AggregateVerifier {
         self.set
     }
 
-    /// Verify under `relation` (default H-u). The relation is the verifier's choice: an
+    /// Verify under `relation` (default H-FIPS). The relation is the verifier's choice: an
     /// aggregate whose header names another relation is rejected.
     #[must_use]
     pub const fn relation(mut self, relation: Relation) -> Self {
@@ -2618,7 +2618,7 @@ mod tests {
             let gate = sponge_gate_for(set);
             let n = 1 << d_sig;
             let keccak = keccak_plan(&gate, &Geometry::new(n).unwrap(), DEFAULT_PART_LOG2, span, profile);
-            let manifest = CommitmentManifest::for_set(set, n, Relation::Hu).unwrap();
+            let manifest = CommitmentManifest::for_set(set, n, Relation::HExact).unwrap();
             let plan = PowPlan::new(&manifest, profile, &keccak);
             assert_eq!(hex(plan.digest()), want, "{set} 2^{d_sig} {profile:?} span {span}");
         }

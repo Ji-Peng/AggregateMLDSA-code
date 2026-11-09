@@ -18,9 +18,9 @@
 //! and the six zero-checks `sigma^2 - 1`, `delta (delta - sigma)`, `e (e - 1)(e - delta)`,
 //! `e (e + 1) w1'`, `e (e - 1)(w1' - 43)`, `L_hi (L_hi - 1)`; per signature the hint-weight
 //! identity `sum_p delta_p^2 + u_h = omega = 80` with `u_h in [0, 2^16)` (looked up); `z` by
-//! H-exact's bit-slack form (`digits::Z_BIT_SLACK`). This `u` takes the place of H-u's step
-//! form in the ring identity, so `v` and the six bits are those of relations H-u and
-//! H-exact (the value `u = ctr_q(w' - 2 gamma2 w1')` is the same integer).
+//! H-exact's bit-slack form (`digits::Z_BIT_SLACK`). This `u` takes the place of H-exact's step
+//! form in the ring identity, so `v` and the six bits are those of relation H-exact (the
+//! value `u = ctr_q(w' - 2 gamma2 w1')` is the same integer).
 //!
 //! The constraint `e (e - 1)(e - delta) = 0` (not `e (e - delta) = 0`) is what makes the honest
 //! pair `w' = q - gamma2, h = 0` representable with `delta = 0`: its only witness under
@@ -199,7 +199,7 @@ pub struct HFipsRecord {
     pub z_digits: Box<[[[i64; 3]; N]; L]>,
     /// The per-coefficient witness, `[rho][j]`.
     pub coeffs: Box<[[Coeff; N]; K]>,
-    /// The quotient `v` of the ring identity (as in relation H-u).
+    /// The quotient `v` of the ring identity (as in relation H-exact).
     pub v: VecK,
     /// The six w1Encode bits, `bits[t][rho][j]`.
     pub bits: Box<[[[i64; N]; K]; W1_BITS]>,
@@ -645,7 +645,7 @@ pub struct HFipsRecordOf<P: ParamSet> {
     pub z_digits: Vec<i64>,
     /// The per-coefficient witness, `coeffs[rho][j]` (k rows).
     pub coeffs: Vec<[CoeffOf; N]>,
-    /// The quotient `v` of the ring identity (as in relation H-u).
+    /// The quotient `v` of the ring identity (as in relation H-exact).
     pub v: P::VecK,
     /// The w1Encode bits, `bits[t][rho][j]` for `t < W1_BITS`.
     pub bits: Vec<Vec<[i64; N]>>,
@@ -1147,7 +1147,7 @@ mod tests {
 
     #[test]
     fn lane_honest_rule_is_complete_with_weight_h() {
-        // For every (w', h): the honest witness is admissible, has delta^2 = h and the H-u value
+        // For every (w', h): the honest witness is admissible, has delta^2 = h and the H-exact value
         // u = ctr_q(w' - 2 gamma2 w1'), and coefficient_of finds it from (u, w1') alone.
         let combos = lane_combos::<Set65>();
         for h in [false, true] {

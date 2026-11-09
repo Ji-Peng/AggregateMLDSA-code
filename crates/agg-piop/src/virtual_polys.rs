@@ -149,7 +149,7 @@ pub fn residual_table(
     out
 }
 
-/// `u` on the Boolean main domain, over the integers: the step form under H-u and H-exact, H-FIPS's
+/// `u` on the Boolean main domain, over the integers: the step form under H-exact, H-FIPS's
 /// `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e` (`source_tables::fips_u`) otherwise.
 #[must_use]
 pub fn u_table(manifest: &CommitmentManifest, main: &MainTables) -> Vec<i64> {
@@ -236,8 +236,8 @@ pub fn leaf(base: u32, p: E) -> E {
     }
 }
 
-/// `z, u, v, w_1'` at a main-domain point from the stage-3 evaluations of the twelve (H-u)
-/// or thirteen (H-exact) main-domain polynomials.
+/// `z, u, v, w_1'` at a main-domain point from the stage-3 evaluations of the thirteen
+/// (H-exact) or sixteen (H-FIPS) main-domain polynomials of ML-DSA-44.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MainValues {
     /// `z` from its digits.
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn digit_composition_matches_the_l16_layouts() {
         let mut rng = SplitMix64::new(4);
-        for value in [DigitValue::Z, DigitValue::U, DigitValue::V] {
+        for value in [DigitValue::U, DigitValue::V] {
             let layout = value.layout();
             let (lo, hi): (Vec<i32>, Vec<i8>) = (0..64)
                 .map(|_| {

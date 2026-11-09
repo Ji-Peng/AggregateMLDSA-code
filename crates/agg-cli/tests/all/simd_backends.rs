@@ -1,8 +1,8 @@
 //! End-to-end multi-backend equality and verification test across all supported SIMD tiers.
 //!
 //! Evaluates `keygen-batch`, `sign-batch`, `aggregate`, and `verify` across:
-//! - 1024 records over 64 keys (H-u)
-//! - 1024 records over 1024 keys (H-u)
+//! - 1024 records over 64 keys (H-FIPS)
+//! - 1024 records over 1024 keys (H-FIPS)
 //! - 256 records over 64 keys (H-exact)
 //! - 256 records over 64 keys (H-FIPS)
 //!
@@ -70,16 +70,16 @@ fn test_simd_backends_e2e_equality_and_verification() {
 
     let scenarios = [
         Scenario {
-            name: "1024_rec_64_keys_hu",
+            name: "1024_rec_64_keys_hfips",
             records: 1024,
             keys: 64,
-            relation: "h-u",
+            relation: "h-fips",
         },
         Scenario {
-            name: "1024_rec_1024_keys_hu",
+            name: "1024_rec_1024_keys_hfips",
             records: 1024,
             keys: 1024,
-            relation: "h-u",
+            relation: "h-fips",
         },
         Scenario {
             name: "256_rec_64_keys_hexact",

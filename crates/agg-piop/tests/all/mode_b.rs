@@ -49,7 +49,7 @@ struct Fixture {
 
 impl Fixture {
     fn new(seed: u64, own: usize, shared: usize) -> Self {
-        Self::with_relation(Relation::Hu, seed, own, shared)
+        Self::with_relation(Relation::HFips, seed, own, shared)
     }
 
     fn with_relation(relation: Relation, seed: u64, own: usize, shared: usize) -> Self {
@@ -115,7 +115,7 @@ fn round_trip(
     n_shared: usize,
     seed: u64,
 ) -> (Fixture, SeededMatrices, ProverOutput, Vec<u8>) {
-    round_trip_as(Relation::Hu, n_own, n_shared, seed)
+    round_trip_as(Relation::HFips, n_own, n_shared, seed)
 }
 
 /// [`round_trip`] under `relation`.
@@ -198,7 +198,7 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
         let (fixture, bridge, output, bytes) = round_trip(200, 56, 0xb256);
         let public = fixture.public();
         let verify = |proof: &agg_piop::wire::AggregateProof| {
-            verify_mode_b(&public, &proof.to_bytes(), &bridge, Relation::Hu, None)
+            verify_mode_b(&public, &proof.to_bytes(), &bridge, Relation::HFips, None)
         };
 
         // The public bits: a flipped bit breaks the hash, a value of 44 or more the range.
@@ -334,7 +334,7 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
         long.work.push(0);
         assert!(matches!(rejected(verify(&long)), VerifyError::Wire(_)));
         // The instance record binds the plan: a verifier whose plan has a tie site derives another sd.
-        let other_plan = verify_timed(&public, &bytes, &bridge, &WithTie, FlockProfile::PublicBits, Relation::Hu, None);
+        let other_plan = verify_timed(&public, &bytes, &bridge, &WithTie, FlockProfile::PublicBits, Relation::HFips, None);
         assert!(matches!(
             rejected(other_plan),
             VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT }) | VerifyError::Keccak(0)
@@ -343,9 +343,9 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
         // Records, profile and framing.
         let mut swapped = public.clone();
         swapped.swap(10, 11);
-        assert!(!verify_mode_b(&swapped, &bytes, &bridge, Relation::Hu, None).accepted());
+        assert!(!verify_mode_b(&swapped, &bytes, &bridge, Relation::HFips, None).accepted());
         assert!(matches!(
-            rejected(verify_mode_b(&public[1..], &bytes, &bridge, Relation::Hu, None)),
+            rejected(verify_mode_b(&public[1..], &bytes, &bridge, Relation::HFips, None)),
             VerifyError::RecordCount
         ));
         // The instance record binds the profile: under profile 0 the transcript, hence sd and the
@@ -357,7 +357,7 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
             &bridge,
             &AsProfile(FlockProfile::None),
             FlockProfile::None,
-            Relation::Hu,
+            Relation::HFips,
             None,
         );
         assert!(matches!(
@@ -371,7 +371,7 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
             &bridge,
             &PublicBitsVerifier,
             FlockProfile::None,
-            Relation::Hu,
+            Relation::HFips,
             None,
         );
         assert!(matches!(
@@ -381,23 +381,23 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
 
         // The matrices are those of the transcript's sd: the same matrices as a fixed
         // stand-in verify, the matrices of any other seed (or test matrices) do not.
-        let verified_seed = verify_mode_b(&public, &bytes, &bridge, Relation::Hu, None)
+        let verified_seed = verify_mode_b(&public, &bytes, &bridge, Relation::HFips, None)
             .outcome
             .expect("verify")
             .bridge_seed;
         assert_eq!(verified_seed, output.bridge_seed);
         let same = FixedMatrices(derive_matrices(&output.bridge_seed));
-        assert!(verify_mode_b(&public, &bytes, &same, Relation::Hu, None).accepted());
+        assert!(verify_mode_b(&public, &bytes, &same, Relation::HFips, None).accepted());
         let mut other_seed = output.bridge_seed;
         other_seed[0] ^= 1;
         let other_seed = FixedMatrices(derive_matrices(&other_seed));
         assert!(matches!(
-            rejected(verify_mode_b(&public, &bytes, &other_seed, Relation::Hu, None)),
+            rejected(verify_mode_b(&public, &bytes, &other_seed, Relation::HFips, None)),
             VerifyError::Keccak(0)
         ));
         let other = FixedMatrices(BridgeMatrices::random_for_tests(0x99));
         assert!(matches!(
-            rejected(verify_mode_b(&public, &bytes, &other, Relation::Hu, None)),
+            rejected(verify_mode_b(&public, &bytes, &other, Relation::HFips, None)),
             VerifyError::Keccak(0)
         ));
         assert!(matches!(
@@ -405,7 +405,7 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
                 &public,
                 &bytes[..bytes.len() - 1],
                 &bridge,
-                Relation::Hu,
+                Relation::HFips,
                 None
             )),
             VerifyError::Wire(_)
@@ -422,8 +422,9 @@ fn mode_b_round_trip_at_64_signatures() {
 
 /// Relation H-exact (protocol level): honest round trips at
 /// 1, 64 and 256 records; the verifier takes the relation from its caller, so an H-exact
-/// proof verified as H-u and an H-u proof verified as H-exact are rejected before the instance record,
-/// a rewritten relation byte fails, and an unknown relation byte is malformed.
+/// proof verified as H-FIPS and an H-FIPS proof verified as H-exact are rejected before the
+/// instance record, a rewritten relation byte fails, and an unknown relation byte (0, 3) is
+/// malformed.
 #[test]
 fn mode_b_h_exact_round_trips_and_the_relation_is_the_callers() {
     on_large_stack(|| {
@@ -436,47 +437,42 @@ fn mode_b_h_exact_round_trips_and_the_relation_is_the_callers() {
         // 256 records: d_main = 18 rounds of 4 + 5 + 3 elements, 13 + 18 + 6 + 9 + 1 + 36
         // claims (the projection claim c after stage 2).
         assert_eq!(output.proof.size().piop, 16 * (83 + 12 * 18));
-        let as_hu = verify_mode_b(&public, &bytes, &bridge, Relation::Hu, None);
+        let as_fips = verify_mode_b(&public, &bytes, &bridge, Relation::HFips, None);
         assert!(matches!(
-            rejected(as_hu),
+            rejected(as_fips),
             VerifyError::Relation {
-                expected: Relation::Hu,
+                expected: Relation::HFips,
                 found: Relation::HExact
             }
         ));
-        // The H-exact header rewritten to H-u: verified as H-u the transcript (the instance record,
-        // the catalog row, the plan) differs; verified as H-exact the flag mismatches.
-        let mut rewritten = bytes.clone();
-        rewritten[2] = Relation::Hu.id();
-        assert!(!verify_mode_b(&public, &rewritten, &bridge, Relation::Hu, None).accepted());
-        assert!(matches!(
-            rejected(verify_mode_b(&public, &rewritten, &bridge, Relation::HExact, None)),
-            VerifyError::Relation { .. }
-        ));
         // Relation byte 2 names H-FIPS: an H-exact proof rewritten to it is malformed or
-        // mismatched, never accepted; byte 3 is unknown.
+        // mismatched, never accepted; bytes 0 and 3 are unknown.
         let mut fips = bytes.clone();
         fips[2] = Relation::HFips.id();
         assert!(!verify_mode_b(&public, &fips, &bridge, Relation::HExact, None).accepted());
         assert!(!verify_mode_b(&public, &fips, &bridge, Relation::HFips, None).accepted());
-        let mut unknown = bytes.clone();
-        unknown[2] = 3;
+        for byte in [0_u8, 3] {
+            let mut unknown = bytes.clone();
+            unknown[2] = byte;
+            for expected in Relation::ALL {
+                assert!(matches!(
+                    rejected(verify_mode_b(&public, &unknown, &bridge, expected, None)),
+                    VerifyError::Wire(_)
+                ));
+            }
+        }
+        // An H-FIPS proof of the same records verified as H-exact, and rewritten to H-exact.
+        let fips_proof = Fixture::new(0xe256, 200, 56).prove(&bridge);
+        let fips_bytes = fips_proof.proof.to_bytes();
+        assert!(verify_mode_b(&public, &fips_bytes, &bridge, Relation::HFips, None).accepted());
         assert!(matches!(
-            rejected(verify_mode_b(&public, &unknown, &bridge, Relation::HExact, None)),
-            VerifyError::Wire(_)
-        ));
-        // An H-u proof of the same records verified as H-exact, and rewritten to H-exact.
-        let hu = Fixture::new(0xe256, 200, 56).prove(&bridge);
-        let hu_bytes = hu.proof.to_bytes();
-        assert!(verify_mode_b(&public, &hu_bytes, &bridge, Relation::Hu, None).accepted());
-        assert!(matches!(
-            rejected(verify_mode_b(&public, &hu_bytes, &bridge, Relation::HExact, None)),
+            rejected(verify_mode_b(&public, &fips_bytes, &bridge, Relation::HExact, None)),
             VerifyError::Relation {
                 expected: Relation::HExact,
-                found: Relation::Hu
+                found: Relation::HFips
             }
         ));
-        let mut promoted = hu_bytes.clone();
+        let mut promoted = fips_bytes.clone();
         promoted[2] = Relation::HExact.id();
         assert!(!verify_mode_b(&public, &promoted, &bridge, Relation::HExact, None).accepted());
         // A wrong nonce at the stage-2 gamma site (11 bits under H-exact: 8 coefficients,
@@ -502,7 +498,7 @@ fn mode_b_h_exact_round_trips_and_the_relation_is_the_callers() {
 /// Relation H-FIPS (protocol level): honest round trips at
 /// 1, 64 and 256 records (the 256-record batch includes the synthetic weight-80 records with
 /// the coefficient `w' = q - gamma2, h = 0`), the claim counts, and cross-relation
-/// verification: an H-FIPS proof verified as H-u or H-exact and an H-exact proof verified as
+/// verification: an H-FIPS proof verified as H-exact and an H-exact proof verified as
 /// H-FIPS are rejected before the instance record, a rewritten relation byte fails.
 #[test]
 fn mode_b_h_fips_round_trips_and_cross_relation_rejections() {
@@ -533,7 +529,7 @@ fn mode_b_h_fips_round_trips_and_cross_relation_rejections() {
         let report = verify_mode_b(&public, &bytes, &bridge, Relation::HFips, None);
         report_line("N = 256 H-FIPS: verifier uncached", &report);
         assert!(report.accepted());
-        for expected in [Relation::Hu, Relation::HExact] {
+        for expected in [Relation::HExact] {
             assert!(matches!(
                 rejected(verify_mode_b(&public, &bytes, &bridge, expected, None)),
                 VerifyError::Relation { found: Relation::HFips, .. }
@@ -641,8 +637,9 @@ fn cell<'a>(
 #[test]
 fn every_stage_tampering_is_rejected_end_to_end() {
     on_large_stack(|| {
-        // 50 live records (N* = 64, d_main = 16) keep the 12 prover runs short.
-        let fixture = Fixture::new(0x7a, 40, 10);
+        // 50 live records (N* = 64, d_main = 16) keep the 12 prover runs short; relation
+        // H-exact, whose digit columns of z and u are moved below.
+        let fixture = Fixture::with_relation(Relation::HExact, 0x7a, 40, 10);
         let bridge = FixedMatrices(BridgeMatrices::random_for_tests(0x7a));
         let inputs = fixture.inputs();
         let signatures = fixture.signatures();
@@ -650,11 +647,11 @@ fn every_stage_tampering_is_rejected_end_to_end() {
             instance: &fixture.instance,
             records: &inputs,
             signatures: &signatures,
-            relation: Relation::Hu,
+            relation: Relation::HExact,
         })
         .unwrap();
         let public = fixture.public();
-        let verify = |bytes: &[u8]| verify_mode_b(&public, bytes, &bridge, Relation::Hu, None);
+        let verify = |bytes: &[u8]| verify_mode_b(&public, bytes, &bridge, Relation::HExact, None);
         let honest_bytes = prove_tampered(&fixture, &bridge, &honest, None).unwrap();
         assert!(
             verify(&honest_bytes).accepted(),
@@ -677,7 +674,7 @@ fn every_stage_tampering_is_rejected_end_to_end() {
         let at_stage = |s: usize| move |e: &VerifyError| matches!(e, VerifyError::Stage(StageError::Terminal(t)) if *t == s);
 
         // A 16-bit column changed inside the table: the ring identity (stage 3).
-        for column in [Column::Z_LO, Column::V_LO] {
+        for column in [Column::ZX_LO, Column::V_LO] {
             expect(
                 &column.name(),
                 &tampered(&|m| {
@@ -729,12 +726,13 @@ fn every_stage_tampering_is_rejected_end_to_end() {
                 && error.contains("does not fit a signed 16-bit digit"),
             "{error}"
         );
-        // Base-4 and base-6 digits outside their alphabets: the leaves of stage 2 (U_hi = 3
-        // is in a base-8 alphabet, not in H-u's base-6 one).
+        // A non-Boolean bz_hi: the Booleanity zero-check (stage 3, where the ring identity
+        // fails too); a base-6 digit outside its alphabet: the leaf of stage 2 (U_hi = 3 is in
+        // a base-8 alphabet, not in H-exact's base-6 one).
         expect(
-            "base-4 digit",
-            &tampered(&|m| *cell(&manifest, m, Column::Z_HI, x) = 3),
-            &at_stage(2),
+            "bz_hi = 2",
+            &tampered(&|m| *cell(&manifest, m, Column::ZX_HI, x) = 2),
+            &at_stage(3),
         );
         expect(
             "base-6 digit",
@@ -851,14 +849,15 @@ fn committed_bits_other_than_the_public_ones_are_caught_by_the_bit_check() {
         // without changing any parity, and u absorbs the change of w1' in the ring identity:
         // every PIOP check passes, the projection of the public bits matches, and only the
         // direct check of b_t(r^(3)) against the public bits rejects.
-        let fixture = Fixture::new(0x5b, 20, 4);
+        // Relation H-exact: u is moved through its step-form digits.
+        let fixture = Fixture::with_relation(Relation::HExact, 0x5b, 20, 4);
         let inputs = fixture.inputs();
         let signatures = fixture.signatures();
         let (manifest, honest) = main_tables(&ProverInputs {
             instance: &fixture.instance,
             records: &inputs,
             signatures: &signatures,
-            relation: Relation::Hu,
+            relation: Relation::HExact,
         })
         .unwrap();
         let read = |m: &MainTables, column: Column, x: usize| m.column(&manifest, column).value(x);
@@ -896,7 +895,7 @@ fn committed_bits_other_than_the_public_ones_are_caught_by_the_bit_check() {
 
         let bytes = prove_tampered(&fixture, &bridge, &tampered, None).expect("prove");
         let public = fixture.public();
-        let report = verify_mode_b(&public, &bytes, &bridge, Relation::Hu, None);
+        let report = verify_mode_b(&public, &bytes, &bridge, Relation::HExact, None);
         assert!(
             matches!(report.outcome, Err(VerifyError::Bits)),
             "{:?}",
@@ -908,7 +907,7 @@ fn committed_bits_other_than_the_public_ones_are_caught_by_the_bit_check() {
             &bridge,
             &ProjectionOnly,
             FlockProfile::PublicBits,
-            Relation::Hu,
+            Relation::HExact,
             None,
         );
         assert!(

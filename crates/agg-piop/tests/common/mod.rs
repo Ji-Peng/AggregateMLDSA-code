@@ -67,7 +67,7 @@ pub struct Batch {
 
 impl Batch {
     pub fn build(records: Vec<Record>, seed: u64) -> Self {
-        Self::build_as(Relation::Hu, records, seed)
+        Self::build_as(Relation::HFips, records, seed)
     }
 
     /// [`Batch::build`] under `relation`.
@@ -270,7 +270,7 @@ pub fn bridge_matrices_for(manifest: &CommitmentManifest, seed: u64) -> BridgeMa
     }
 }
 
-/// A batch of a parameter set with polynomial lanes (ML-DSA-65, ML-DSA-87), relation H-u.
+/// A batch of a parameter set with polynomial lanes (ML-DSA-65, ML-DSA-87).
 pub struct LaneBatch {
     pub records: Vec<Record>,
     pub manifest: CommitmentManifest,
@@ -282,9 +282,9 @@ pub struct LaneBatch {
 
 impl LaneBatch {
     /// `n_own` records with their own keys and `n_shared` over three shared keys (relation
-    /// H-u).
+    /// H-exact, whose digit columns the lane tests tamper with).
     pub fn build<P: ParamSet>(seed: u64, n_own: usize, n_shared: usize) -> Self {
-        Self::build_as::<P>(Relation::Hu, seed, n_own, n_shared)
+        Self::build_as::<P>(Relation::HExact, seed, n_own, n_shared)
     }
 
     /// [`LaneBatch::build`] under `relation`.

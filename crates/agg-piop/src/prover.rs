@@ -589,7 +589,7 @@ pub struct ProverInputs<'a, P: ParamSet = Set44> {
     pub records: &'a [(&'a [u8], &'a [u8], P::CTilde)],
     /// The signatures, in order.
     pub signatures: &'a [&'a [u8]],
-    /// The relation to prove: H-u, H-exact or H-FIPS.
+    /// The relation to prove: H-FIPS (the default) or H-exact.
     pub relation: Relation,
 }
 

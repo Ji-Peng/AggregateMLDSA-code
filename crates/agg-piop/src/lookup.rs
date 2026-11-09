@@ -2170,8 +2170,8 @@ mod tests {
             .collect()
     }
 
-    /// The main-domain stack `[z_lo | u_lo]` with honest-looking values (the lookup
-    /// encoder: `z + 2^17`; relation H-u's `B_ulo = u + 190,465 - 63,079 H_u`).
+    /// The main-domain stack `[z_lo | u_lo]` with honest-looking 16-bit values (the low 16
+    /// bits of `z + 2^17`; relation H-exact's `B_ulo = u + 190,465 - 63,079 H_u`).
     fn main_stack(rng: &mut SplitMix64, vars: usize) -> LookupStack<'static> {
         let cells = 1 << vars;
         let mut columns: Vec<Vec<i32>> = (0..2).map(|_| Vec::with_capacity(cells)).collect();

@@ -493,12 +493,12 @@ mod tests {
         use crate::manifest::Relation;
         use crate::transcript::{stage_degrees, stage_gammas};
         use agg_witness::params::Set;
-        // Stage batching vectors, degrees and gamma difficulties per set: 65 has 37, 18 and
-        // 105 coefficients (g = 6, 5, 7), 87 has 45, 22 and 132 (g = 6, 5, 8); stage 1 has
+        // Stage batching vectors, degrees and gamma difficulties per set under H-exact: 65 has
+        // 37, 18 and 105 coefficients (g = 6, 5, 7), 87 has 45, 22 and 132 (g = 6, 5, 8); stage 1 has
         // degree 3 (no six-bit range identity).
         for (set, gammas, bits) in [(Set::S65, [37, 18, 105], [6, 5, 7]), (Set::S87, [45, 22, 132], [6, 5, 8])] {
             for d_sig in [3, 10, 15] {
-                let manifest = CommitmentManifest::for_set(set, 1 << d_sig, Relation::Hu).unwrap();
+                let manifest = CommitmentManifest::for_set(set, 1 << d_sig, Relation::HExact).unwrap();
                 assert_eq!(stage_gammas(&manifest), gammas, "{set:?}");
                 assert_eq!(stage_degrees(&manifest), [3, 5, 3], "{set:?}");
                 let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
@@ -514,7 +514,7 @@ mod tests {
             }
         }
         // Totals of the PIOP part (sites, nonces, bits, sum 2^g) and the mode-B plan digests of
-        // `python3 -I docs/scripts/pow_plan.py --set 65|87`.
+        // `python3 -I docs/scripts/pow_plan.py --set 65|87 --relation h-exact`.
         let cases: [(Set, usize, [usize; 3], u64, &str); 8] = [
             (Set::S65, 3, [190, 189, 1761], 1690, "ce924fd9a54603b63cf3e8a7ceaf3d3069e46f563905ed51e4b3a2f18dd646cb"),
             (Set::S65, 10, [311, 310, 2867], 2356, "31e84bb3059489c0b602c994cc160c5f1a65f0929fa95b75aebb4bdb5aa3f615"),
@@ -526,7 +526,7 @@ mod tests {
             (Set::S87, 15, [451, 450, 4149], 3346, "b4385bc4888c55d57ae7166cf75b1f51d27d3f9bc5b5767f036e2bbe866acb57"),
         ];
         for (set, d_sig, [sites, nonces, bits], work, want) in cases {
-            let manifest = CommitmentManifest::for_set(set, 1 << d_sig, Relation::Hu).unwrap();
+            let manifest = CommitmentManifest::for_set(set, 1 << d_sig, Relation::HExact).unwrap();
             let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
             assert_eq!(plan.sites().len(), sites, "{set:?} 2^{d_sig}");
             assert_eq!(plan.sites().iter().filter(|s| s.bits > 0).count(), nonces);
@@ -537,7 +537,7 @@ mod tests {
         }
         // The 1K plans: 359 (65) and 360 (87) nonce bytes.
         for (set, bytes) in [(Set::S65, 359), (Set::S87, 360)] {
-            let manifest = CommitmentManifest::for_set(set, 1 << 10, Relation::Hu).unwrap();
+            let manifest = CommitmentManifest::for_set(set, 1 << 10, Relation::HExact).unwrap();
             let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
             assert_eq!(plan.work_bits().div_ceil(8), bytes);
         }
@@ -547,8 +547,8 @@ mod tests {
     fn h_exact_plans_match_the_documented_plans() {
         use crate::manifest::Relation;
         // Totals: (d_sig, sites, nonces, bits, bytes, sum 2^g). With the projection of v the
-        // stage-2 gamma site has 9 coefficients under H-exact (leaf6[U_hi], leaf8[K_2], leaf8[K_3]) and 10
-        // under H-u, both g = 4 (nonce 11 bits), so the plans of H-u and H-exact are equal.
+        // stage-2 gamma site has 9 coefficients under H-exact (leaf6[U_hi], leaf8[K_2], leaf8[K_3]),
+        // g = 4 (nonce 11 bits).
         for (d_sig, sites, nonces, bits, bytes, work) in [
             (3, 196, 195, 1818, 228, 1350),
             (10, 317, 316, 2926, 366, 1964),
@@ -569,8 +569,8 @@ mod tests {
                 .unwrap();
             assert_eq!((gamma2.bits, gamma2.nonce_bits()), (4, 11));
         }
-        // The pinned anchors (mode B = PublicBits; Slim, span on); the
-        // H-u plan is the same.
+        // The pinned anchors (mode B = PublicBits; Slim, span on); the plan of the default
+        // relation H-FIPS is the same.
         for (d_sig, profile, want) in [
             (3, FlockProfile::PublicBits, "c2c88a319a289cce20146a0e8fb87d8203bb9f02a2b0743974290ef94c229ce5"),
             (3, FlockProfile::Slim, "9757c063ae3b3a704330367ea2552dcfd41c9f20841abccce47a9a720cf69437"),
@@ -586,8 +586,9 @@ mod tests {
             };
             let digest = hex(&PowPlan::new(&manifest, profile, &keccak).digest());
             assert_eq!(digest, want, "H-exact N* = 2^{d_sig} {profile:?}");
-            let hu = CommitmentManifest::for_batch(1 << d_sig).unwrap();
-            assert_eq!(hex(&PowPlan::new(&hu, profile, &keccak).digest()), want);
+            let fips = CommitmentManifest::for_batch(1 << d_sig).unwrap();
+            assert_eq!(fips.relation(), Relation::HFips);
+            assert_eq!(hex(&PowPlan::new(&fips, profile, &keccak).digest()), want);
         }
     }
 
@@ -633,8 +634,9 @@ mod tests {
         // H-FIPS of ML-DSA-65 and ML-DSA-87: stage 2 trades leaf8[U_mid^(rho)] for F_e^(rho)
         // (same length), stage 3 gains 5 k + 1 coefficients (bool[l_mid^(rho)], F_s, F_delta,
         // F_w1 per row, F_omega, the reductions of delta^(rho), e^(rho); minus link[U_mid^(rho)]):
-        // 136 (g = 8, one bit more than H-u's 105) and 173 (g = 8, as H-u's 132). Every other
-        // site is H-u's; the lookup keeps its sites (L grows by three padding slots of D_2).
+        // 136 (g = 8, one bit more than H-exact's 105) and 173 (g = 8, as H-exact's 132). Every
+        // other site is H-exact's; the lookup keeps its sites (L grows by three padding slots of
+        // D_2).
         for (set, gammas, bits) in [(Set::S65, [37, 18, 136], [6, 5, 8]), (Set::S87, [45, 22, 173], [6, 5, 8])] {
             for d_sig in [3, 10, 13, 15] {
                 let manifest = |relation| CommitmentManifest::for_set(set, 1 << d_sig, relation).unwrap();
@@ -642,23 +644,23 @@ mod tests {
                 assert_eq!(stage_gammas(&fips), gammas, "{set:?}");
                 assert_eq!(stage_degrees(&fips), [3, 5, 3], "{set:?}");
                 let plan = PowPlan::new(&fips, FlockProfile::PublicBits, &KeccakPlan::default());
-                let hu = PowPlan::new(&manifest(Relation::Hu), FlockProfile::PublicBits, &KeccakPlan::default());
+                let exact = PowPlan::new(&manifest(Relation::HExact), FlockProfile::PublicBits, &KeccakPlan::default());
                 let gamma = |p: &PowPlan| -> Vec<u8> {
                     p.sites().iter().filter(|s| s.class == SiteClass::StageGamma).map(|s| s.bits).collect()
                 };
                 assert_eq!(gamma(&plan), bits, "{set:?}");
-                assert_eq!(plan.sites().len(), hu.sites().len());
+                assert_eq!(plan.sites().len(), exact.sites().len());
                 // Only batching sites differ, by one bit each: gamma^(3) of ML-DSA-65 and the
                 // lookup's stack-batching site, whose vector grows with the padded level-2 stack.
-                let differ: Vec<_> = plan.sites().iter().zip(hu.sites()).filter(|(a, b)| a != b).collect();
+                let differ: Vec<_> = plan.sites().iter().zip(exact.sites()).filter(|(a, b)| a != b).collect();
                 for (a, b) in &differ {
                     assert!(matches!(a.class, SiteClass::StageGamma | SiteClass::LookupGamma), "{a:?}");
                     assert_eq!((a.class, a.i, a.j, a.bits), (b.class, b.i, b.j, b.bits + 1), "{set:?} 2^{d_sig}");
                 }
                 let stage = differ.iter().filter(|(a, _)| a.class == SiteClass::StageGamma).count();
                 assert_eq!(stage, usize::from(set == Set::S65), "{set:?} 2^{d_sig}");
-                assert_eq!(plan.work_bits(), hu.work_bits() + differ.len(), "{set:?} 2^{d_sig}");
-                assert_eq!(plan.digest() == hu.digest(), differ.is_empty(), "{set:?} 2^{d_sig}");
+                assert_eq!(plan.work_bits(), exact.work_bits() + differ.len(), "{set:?} 2^{d_sig}");
+                assert_eq!(plan.digest() == exact.digest(), differ.is_empty(), "{set:?} 2^{d_sig}");
                 eprintln!(
                     "{set:?} H-FIPS 2^{d_sig}: sites {}, bits {}, bytes {}, work {}",
                     plan.sites().len(),
@@ -667,34 +669,6 @@ mod tests {
                     plan.expected_work()
                 );
             }
-        }
-    }
-
-    #[test]
-    fn lane_h_exact_plans_equal_lane_h_u_plans() {
-        use crate::manifest::Relation;
-        use agg_pcs_config::catalogs::Set;
-        // ML-DSA-65 and ML-DSA-87: H-exact has H-u's instances, degrees and batching lengths
-        // (only the slack weight of the z form differs), so every site and the plan digest are
-        // H-u's; the relation is bound by event 0's manifest bytes.
-        for set in [Set::S65, Set::S87] {
-            for d_sig in [3, 10, 13, 15] {
-                for profile in [FlockProfile::PublicBits, FlockProfile::Slim] {
-                    let keccak = match profile {
-                        FlockProfile::Slim => mode_a(d_sig, 2, true),
-                        _ => KeccakPlan::default(),
-                    };
-                    let plan = |relation| {
-                        let manifest = CommitmentManifest::for_set(set, 1 << d_sig, relation).unwrap();
-                        PowPlan::new(&manifest, profile, &keccak)
-                    };
-                    let (exact, hu) = (plan(Relation::HExact), plan(Relation::Hu));
-                    assert_eq!(exact.sites(), hu.sites(), "{set:?} 2^{d_sig} {profile:?}");
-                    assert_eq!(exact.digest(), hu.digest(), "{set:?} 2^{d_sig} {profile:?}");
-                }
-            }
-            let manifest = |relation| CommitmentManifest::for_set(set, 1 << 15, relation).unwrap();
-            assert_ne!(manifest(Relation::HExact).binding_bytes(), manifest(Relation::Hu).binding_bytes());
         }
     }
 

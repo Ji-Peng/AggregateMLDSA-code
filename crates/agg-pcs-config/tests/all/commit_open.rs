@@ -72,17 +72,6 @@ fn on_large_stack(f: impl FnOnce() + Send + 'static) {
 }
 
 #[test]
-fn two_round_commit_and_batched_opening_at_256() {
-    on_large_stack(|| commit_and_open(1 << 8, Relation::Hu));
-}
-
-#[test]
-fn two_round_commit_and_batched_opening_at_1024_with_padding() {
-    // 1000 live records pad to N* = 1024; padded rows carry the digits of zero.
-    on_large_stack(|| commit_and_open(1000, Relation::Hu));
-}
-
-#[test]
 fn h_exact_commit_and_batched_opening_at_256_and_1024() {
     // G_main4 at 9 polynomials (H-exact), the p16x grouped rows.
     on_large_stack(|| {
@@ -93,7 +82,8 @@ fn h_exact_commit_and_batched_opening_at_256_and_1024() {
 
 #[test]
 fn h_fips_commit_and_batched_opening_at_256_and_1024() {
-    // G_main4 at 12 polynomials and G_2 at 13 (H-FIPS), the p16f grouped rows.
+    // G_main4 at 12 polynomials and G_2 at 13 (H-FIPS), the p16f grouped rows; 1000 live
+    // records pad to N* = 1024, and the padded rows carry the digits of zero.
     on_large_stack(|| {
         commit_and_open(1 << 8, Relation::HFips);
         commit_and_open(1000, Relation::HFips);
@@ -102,7 +92,7 @@ fn h_fips_commit_and_batched_opening_at_256_and_1024() {
 
 #[test]
 fn malformed_tables_are_rejected_before_akita() {
-    let plan = WorkPlan::for_records(1 << 8, Relation::Hu).expect("work plan");
+    let plan = WorkPlan::for_records(1 << 8, Relation::HFips).expect("work plan");
     let prover = PcsProver::new(plan.clone()).expect("prover setup");
     let cells = plan.logical_cells(Group::Level3);
     let count = plan.num_polynomials(Group::Level3);
@@ -119,10 +109,10 @@ fn malformed_tables_are_rejected_before_akita() {
     out_of_range[0][3] = (1 << 15) - 1;
     assert!(prover.commit_group(Group::Level3, &out_of_range).is_ok());
     let main_cells = plan.logical_cells(Group::Main);
-    let mut narrow = vec![vec![0_i8; main_cells]; 8];
+    let mut narrow = vec![vec![0_i8; main_cells]; 12];
     narrow[2][5] = 8;
     assert!(prover.commit_group(Group::Main, &narrow).is_err());
-    // An H-u plan refuses a 9-polynomial G_main4 (H-exact's count).
+    // An H-FIPS plan refuses a 9-polynomial G_main4 (H-exact's count).
     assert!(prover
         .commit_group(Group::Main, &vec![vec![0_i8; main_cells]; 9])
         .is_err());

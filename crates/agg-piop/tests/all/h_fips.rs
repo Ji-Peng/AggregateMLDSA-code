@@ -367,7 +367,7 @@ fn h_fips_records_decode_and_encode_through_the_main_tables() {
     assert_eq!(main.hint_slack()[5..], [OMEGA as i64; 3]);
 }
 
-/// Stage timings of H-u and H-FIPS on the same records (diagnostic, run with
+/// Stage timings of H-exact and H-FIPS on the same records (diagnostic, run with
 /// `AGG_STAGE_TRACE=1 ... -- --ignored --nocapture h_fips_stage_trace`; `AGG_TRACE_N` sets
 /// the batch size, default 8,192).
 #[test]
@@ -376,7 +376,7 @@ fn h_fips_stage_trace() {
     on_large_stack(|| {
         let n: usize = std::env::var("AGG_TRACE_N").ok().and_then(|v| v.parse().ok()).unwrap_or(8192);
         let records = common::records(0xF1F8, n - n / 32, n / 32);
-        for relation in [Relation::Hu, Relation::HFips] {
+        for relation in [Relation::HExact, Relation::HFips] {
             let batch = Batch::build_as(relation, records.clone(), 0xF1F8);
             let start = std::time::Instant::now();
             let (proof, _) = prove_tables(&batch, batch.tables(), false).expect("prover");

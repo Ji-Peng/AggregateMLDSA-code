@@ -22,7 +22,7 @@ fn run(records: usize, reps: usize) {
         v[v.len() / 2].as_secs_f64() * 1e3
     }
 
-    let plan = WorkPlan::for_records(records, agg_pcs_config::catalogs::Relation::Hu)
+    let plan = WorkPlan::for_records(records, agg_pcs_config::catalogs::Relation::HFips)
         .expect("work plan");
     let mut rng = Rng(records as u64);
     let tables = Group::ALL.map(|group| dummy_tables(&plan, group, &mut rng));

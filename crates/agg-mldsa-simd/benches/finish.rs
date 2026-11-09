@@ -1,7 +1,7 @@
 //! Warm, alternating TSC trials for finishing kernels and their required baselines.
 mod common;
 use agg_mldsa_simd::{params::*, *};
-use std::{hint::black_box, mem::MaybeUninit};
+use std::hint::black_box;
 
 unsafe extern "C" {
     fn hyb2_poly_emulate_ct(r: *mut i32, c: *const i32, t: *const i32) -> i32;
@@ -15,10 +15,6 @@ unsafe extern "C" {
 fn sparse(e: &Engine,c: &Challenge39,t: &[[u16;256];4],out: &mut [[i32;256];4]) { e.sparse_ct(black_box(c),black_box(t),13,black_box(out)); }
 #[inline(never)]
 fn finish(e: &Engine,row: FinishRow<'_>,out: &mut FinishOut) { black_box(e.finish_row(black_box(row),black_box(out))).unwrap(); }
-#[inline(never)]
-fn columns(e: &Engine,z: &Poly32,out: &FinishOut,w: &mut [[MaybeUninit<i32>;256];4],n: &mut [[MaybeUninit<i8>;256];8]) {
-    e.hu_columns(black_box(z),black_box(out),HuCols{wide:w.each_mut().map(|v|v.as_mut_slice()),narrow:n.each_mut().map(|v|v.as_mut_slice())}); black_box(w); black_box(n);
-}
 #[inline(never)]
 fn c_sparse(b: Backend,c: &Poly32,t: &[Poly32;4],out: &mut [Poly32;4]) {
     for i in 0..4 {
@@ -73,8 +69,8 @@ fn main() {
     let tt=[0;256];let h=std::array::from_fn(|i|(i%3==0) as u8);
     let hp=Poly32(h.map(i32::from));
     let row=FinishRow{xq:&xq,xp:&xp,t:&tt,h:&h};
-    let z=Poly32(std::array::from_fn(|i|i as i32*997%GAMMA1));
-    let mut values=FinishOut::zero();scalar.finish_row(row,&mut values).unwrap();
+    // The benchmark row is valid: the scalar finish accepts it.
+    scalar.finish_row(row,&mut FinishOut::zero()).unwrap();
     let mut passed=true;
     for backend in [Backend::Avx2,Backend::Avx512] {
         let Some(e)=Engine::new(backend) else {continue};
@@ -165,14 +161,10 @@ fn main() {
             let _ = f_c_pass;
             passed &= f_sc_pass;
         }
-        let mut w=[[MaybeUninit::uninit();256];4];let mut n=[[MaybeUninit::uninit();256];8];
-        let mut sw=w;let mut sn=n;
-        passed &= gate("columns / scalar",backend,||columns(&e,&z,&values,&mut w,&mut n),||columns(&scalar,&z,&values,&mut sw,&mut sn),0.2,true);
         if backend==Backend::Avx512 { if let Some(avx2)=Engine::new(Backend::Avx2) {
             let mut s2=s;
             passed &= gate("sparse / AVX2",backend,||sparse(&e,&c,&t,&mut s),||sparse(&avx2,&c,&t,&mut s2),1.0,true);
             passed &= gate("finish / AVX2",backend,||finish(&e,row,&mut a),||finish(&avx2,row,&mut b),1.0,true);
-            passed &= gate("columns / AVX2",backend,||columns(&e,&z,&values,&mut w,&mut n),||columns(&avx2,&z,&values,&mut sw,&mut sn),1.0,true);
         } }
     }
     if std::env::args().any(|v|v=="--gate") && !passed { std::process::exit(1); }

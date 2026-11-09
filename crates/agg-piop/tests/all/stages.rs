@@ -177,11 +177,12 @@ fn piop_round_trip_on_256_signatures_matches_the_tables() {
 }
 
 fn small_batch() -> Batch {
-    // 50 live records pad to N* = 64.
-    Batch::build(common::records(0x51, 40, 10), 0x51)
+    // 50 live records pad to N* = 64; relation H-exact, whose digit columns of z and u the
+    // tamper tests below move.
+    Batch::build_as(Relation::HExact, common::records(0x51, 40, 10), 0x51)
 }
 
-/// A main-domain position of a live record whose `Z_hi` is `hi`, and its cell index.
+/// A main-domain position of a live record whose `column` value passes `accept`.
 fn cell_with(batch: &Batch, column: Column, accept: impl Fn(i64) -> bool) -> usize {
     let cells = batch.main.column(&batch.manifest, column);
     (0..1024 * 50)
@@ -195,15 +196,16 @@ fn lookup_rejects_main_cells_outside_the_table() {
     on_large_stack(|| {
         let batch = small_batch();
         let manifest = &batch.manifest;
-        // z unchanged: Z_lo + 2^16 with Z_hi - 1 (looked-up value in [2^16, 2^17)), and
-        // Z_lo - 2^16 with Z_hi + 1 (a negative looked-up value). Only the lookup can tell.
-        for (delta, accept) in [(1_i32, -1_i64..=1), (-1, -2..=0)] {
-            let x = cell_with(&batch, Column::Z_HI, |v| accept.contains(&v));
+        // z unchanged: bz_lo + 2^16 with bz_hi = 1 - 1 (looked-up value in [2^16, 2^17)), and
+        // bz_lo - 2^16 with bz_hi = 0 + 1 (a negative looked-up value). Only the lookup can
+        // tell.
+        for (delta, accept) in [(1_i32, 1_i64), (-1, 0)] {
+            let x = cell_with(&batch, Column::ZX_HI, |v| v == accept);
             let mut main = batch.main.clone();
-            *main.wide_cell_mut(manifest, Column::Z_LO, x) += delta << 16;
-            let (_, z_hi) = manifest.locate(Column::Z_HI);
-            main.columns_mut()[z_hi][x] -= delta as i8;
-            let f = main.column(manifest, Column::Z_LO).value(x) + i64::from(LOOKUP_SHIFT);
+            *main.wide_cell_mut(manifest, Column::ZX_LO, x) += delta << 16;
+            let (_, bz_hi) = manifest.locate(Column::ZX_HI);
+            main.columns_mut()[bz_hi][x] -= delta as i8;
+            let f = main.column(manifest, Column::ZX_LO).value(x) + i64::from(LOOKUP_SHIFT);
             assert!(!(0..1 << 16).contains(&f), "looked-up value {f}");
             let bridge = lenient(&batch, &main, batch.bridge.clone());
             assert_eq!(rejecting_place(&batch, &main, &bridge), Some(0), "delta {delta}");
@@ -327,7 +329,7 @@ fn swapped_column_claims_are_rejected() {
         };
         // Two lookup columns of the main stack, two carries of one stack, a carry and a parity.
         for (a, b) in [
-            (Column::Z_LO, Column::U_LO),
+            (Column::ZX_LO, Column::U_LO),
             (Column::V_LO, Column::V_HI),
             (Column::carry(1, 0), Column::carry(1, 1)),
             (Column::Parity2(0), Column::carry(2, 0)),
@@ -350,13 +352,7 @@ fn values_valid_only_for_another_range_are_rejected() {
     on_large_stack(|| {
         let batch = small_batch();
         let manifest = &batch.manifest;
-        // Z_hi = 2 is in U_hi's base-6 alphabet but not in Z_hi's base-4 one: the leaf.
-        let mut main = batch.main.clone();
-        let (_, z_hi) = manifest.locate(Column::Z_HI);
-        main.columns_mut()[z_hi][main_index(3, 1, 4)] = 2;
-        let bridge = rebuilt(&batch, &main);
-        assert_eq!(rejecting_place(&batch, &main, &bridge), Some(2));
-        // U_hi = 3 and U_hi = -4 are in a base-8 alphabet but outside H-u's
+        // U_hi = 3 and U_hi = -4 are in a base-8 alphabet but outside H-exact's
         // base-6 one [-3, 2]: leaf6 (stage 2).
         for value in [3_i8, -4] {
             let mut main = batch.main.clone();
@@ -373,7 +369,7 @@ fn values_valid_only_for_another_range_are_rejected() {
         bridge.recount(manifest, &batch.main).expect("in the table");
         assert_eq!(rejecting_place(&batch, &batch.main, &bridge), Some(1));
         // A low part valid only for a wider range: U_lo + 63,079 with U_hi - 1 keeps u
-        // (relation H-u's step form), U_hi in its base-6 alphabet, so the leaves and the
+        // (relation H-exact's step form), U_hi in its base-6 alphabet, so the leaves and the
         // ring identity hold; when the looked-up value lands in [2^16, 2^17) only the lookup
         // sees it. (A value booked under another table is the lookup.rs unit test
         // `two_tables_verify_and_a_cross_table_value_is_rejected`; there is one table here.)
@@ -407,17 +403,16 @@ fn tampered_witnesses_fail_at_the_stated_stage() {
             assert_eq!(rejecting_place(&batch, &main, &bridge), expected, "{label}");
         };
         // A 16-bit column changed inside the table: the ring identity (stage 3).
-        for column in [Column::Z_LO, Column::U_LO, Column::V_LO, Column::V_HI] {
+        for column in [Column::ZX_LO, Column::U_LO, Column::V_LO, Column::V_HI] {
             let mut main = batch.main.clone();
             let cell = main.wide_cell_mut(manifest, column, x);
             *cell = if *cell < LOOKUP_SHIFT - 1 { *cell + 1 } else { *cell - 1 };
             case(&column.name(), main, Some(3));
         }
-        // Z_hi changed inside its alphabet: the ring identity.
+        // bz_hi flipped inside its Boolean alphabet: the ring identity.
         let mut main = batch.main.clone();
-        let cell = &mut main.columns_mut()[narrow(Column::Z_HI)][x];
-        *cell = if *cell < 1 { *cell + 1 } else { *cell - 1 };
-        case("z_hi", main, Some(3));
+        main.columns_mut()[narrow(Column::ZX_HI)][x] ^= 1;
+        case("bz_hi", main, Some(3));
         // A flipped bit (round-2 tables rebuilt): w_1' changes, the ring identity fails.
         let mut main = batch.main.clone();
         main.columns_mut()[narrow(Column::W1Bit(0, 0))][x] ^= 1;
@@ -596,16 +591,6 @@ fn lane_round_trip<P: agg_witness::params::ParamSet>(relation: Relation, seed: u
 }
 
 #[test]
-fn ml_dsa_65_piop_round_trip_on_256_signatures() {
-    on_large_stack(|| lane_round_trip::<agg_witness::params::Set65>(Relation::Hu, 0x65));
-}
-
-#[test]
-fn ml_dsa_87_piop_round_trip_on_256_signatures() {
-    on_large_stack(|| lane_round_trip::<agg_witness::params::Set87>(Relation::Hu, 0x87));
-}
-
-#[test]
 fn ml_dsa_65_h_exact_piop_round_trip_on_256_signatures() {
     on_large_stack(|| lane_round_trip::<agg_witness::params::Set65>(Relation::HExact, 0x65e));
 }
@@ -654,11 +639,11 @@ fn lane_fips_round_trip<P: agg_witness::params::ParamSet>(seed: u64) {
             assert!(form.in_alphabets(&digits));
         }
     }
-    let derived = LaneBatch::build_as::<P>(Relation::Hu, seed, 200, 56);
+    let derived = LaneBatch::build_as::<P>(Relation::HExact, seed, 200, 56);
     for i in [0, 7, 255] {
         let (_, u_fips, _) = batch.main.record_values_for::<P>(manifest, i);
-        let (_, u_hu, _) = derived.main.record_values_for::<P>(&derived.manifest, i);
-        assert_eq!(u_fips, u_hu, "record {i}");
+        let (_, u_exact, _) = derived.main.record_values_for::<P>(&derived.manifest, i);
+        assert_eq!(u_fips, u_exact, "record {i}");
     }
     assert!(batch.main.hint_slack().iter().all(|&h| (0..=P::OMEGA as i64).contains(&h)));
 
@@ -834,8 +819,7 @@ fn lane_round_trip_on_the_instance_record<P: agg_witness::params::ParamSet>(
 #[test]
 fn ml_dsa_65_piop_round_trip_on_the_instance_record_at_256_and_1k() {
     on_large_stack(|| {
-        lane_round_trip_on_the_instance_record::<agg_witness::params::Set65>(Relation::Hu, 0x650, 200, 56);
-        lane_round_trip_on_the_instance_record::<agg_witness::params::Set65>(Relation::Hu, 0x651, 900, 124);
+        lane_round_trip_on_the_instance_record::<agg_witness::params::Set65>(Relation::HFips, 0x651, 900, 124);
         lane_round_trip_on_the_instance_record::<agg_witness::params::Set65>(Relation::HExact, 0x652, 200, 56);
         lane_round_trip_on_the_instance_record::<agg_witness::params::Set65>(Relation::HFips, 0x653, 200, 56);
     });
@@ -844,8 +828,7 @@ fn ml_dsa_65_piop_round_trip_on_the_instance_record_at_256_and_1k() {
 #[test]
 fn ml_dsa_87_piop_round_trip_on_the_instance_record_at_256_and_1k() {
     on_large_stack(|| {
-        lane_round_trip_on_the_instance_record::<agg_witness::params::Set87>(Relation::Hu, 0x870, 200, 56);
-        lane_round_trip_on_the_instance_record::<agg_witness::params::Set87>(Relation::Hu, 0x871, 900, 124);
+        lane_round_trip_on_the_instance_record::<agg_witness::params::Set87>(Relation::HFips, 0x871, 900, 124);
         lane_round_trip_on_the_instance_record::<agg_witness::params::Set87>(Relation::HExact, 0x872, 200, 56);
         lane_round_trip_on_the_instance_record::<agg_witness::params::Set87>(Relation::HFips, 0x873, 200, 56);
     });

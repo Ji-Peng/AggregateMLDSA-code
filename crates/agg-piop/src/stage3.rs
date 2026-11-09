@@ -4,8 +4,7 @@
 //! the two sides of the projection identity of `v` (`projection`).
 //!
 //! `gamma^(3)` order ([`Gammas`], with `o = 1 + links + bools`): `ring` (0), one `link` per
-//! leaf-checked digit (H-u: `link[Z_hi]` 1, `link[U_hi]` 2, `link[K_2]` 3, `link[K_3]` 4;
-//! H-exact: `link[U_hi]` 1, `link[K_2]` 2, `link[K_3]` 3), one `bool` per Boolean value digit (H-exact: `bool[bz_hi]`
+//! leaf-checked digit (H-exact: `link[U_hi]` 1, `link[K_2]` 2, `link[K_3]` 3), one `bool` per Boolean value digit (H-exact: `bool[bz_hi]`
 //! 4, `bool[a_z]` 5; claim 0), then the reductions: `b_t` from `r^(1)`
 //! (`o..o+6`), `b_t` from `r^(2)`, `y^(2)_t` from `tau_2`, `y^(2)_t` from `r^(1)_2`, `K^(2)_t`
 //! from `tau_2`, `K^(3)` from `tau_3`, `K^(1)_t` from `r^(1)_1`, the lookup stacks
@@ -15,14 +14,13 @@
 //! on the main domain (the weight lane `W`, no equality factor) and `sum_y eq(r', y) (K_0 +
 //! 2^16 K_1 + 2^32 K_2 + 2^35 K_3 + 2^34 + 2^31 + 2^15)(y)` on `D_k` at the `D_k` suffix
 //! `r'` of `r^(2)`, both
-//! with the claim `c` sent after stage 2, so that `k` is bound to `v`. For ML-DSA-44, H-u has
-//! 49 coefficients and H-exact 50.
+//! with the claim `c` sent after stage 2, so that `k` is bound to `v`. For ML-DSA-44, H-exact
+//! has 50 coefficients.
 //!
 //! The ring instance is one instance with two summands on two groups: `w_A z` (weight
 //! lane, no equality factor) and `-eq(r^(2), x)(2 gamma_2 w_1' + u + q v)` (equality
-//! group of `r^(2)`), both affine in the committed columns: `z = Z_lo + 2^16 Z_hi + 2^15`
-//! (H-u) or `z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225` (H-exact), `u = U_lo + 63,079
-//! U_hi + 31,540`, `v = V_lo + 2^16 V_hi + 2^15`.
+//! group of `r^(2)`), both affine in the committed columns: `z = S_zlo + 2^16 B_zhi + 130,915
+//! a_z - 98,225`, `u = U_lo + 63,079 U_hi + 31,540` (H-exact), `v = V_lo + 2^16 V_hi + 2^15`.
 //!
 //! Relation H-FIPS: `link[K_2]`, `link[K_3]`, `bool` for `bz_hi`, `l_hi`, `a_z`, then
 //! four H-FIPS checks after the bools ([`Gammas::fips_check`]): `F_s = s (s - 1)`,
@@ -36,8 +34,7 @@
 //! reads the affine `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e` with
 //! `L = l_lo + 29,696 l_hi + 2^15`. H-FIPS has 56 coefficients (ML-DSA-44).
 //!
-//! Polynomial lanes (ML-DSA-65, ML-DSA-87; relations H-u and H-exact, which differ only in
-//! the constants of the affine `z`): the main domain has no row
+//! Polynomial lanes (ML-DSA-65, ML-DSA-87; relation H-exact): the main domain has no row
 //! coordinate, so the ring identity is `k` instances `ring[rho]` (`0..k`), each with the
 //! claimed sum `T~_rho(r^(2))` and the summand `-eq(r^(2), x)(2 gamma_2 w_1' + u + q v)^(rho)`;
 //! their `A z` parts are one unbatched part per lane `s` of `z`, `w_A^(s) z^(s)`, whose weight
@@ -94,9 +91,9 @@ pub const FIPS_CHECKS: usize = 4;
 pub const FIPS_REDUCTIONS: usize = 2;
 
 /// The `gamma^(3)` layout of one parameter set and relation: `rings` ring instances (one,
-/// or one per row `rho` with polynomial lanes), `links` leaf-checked digits (4 under H-u, 3
-/// under H-exact, 2 under H-FIPS; `l + k + 3` with lanes), `bools` Boolean value digits (0
-/// under H-u, 2 under H-exact, 3 under H-FIPS; `l + k` with lanes: `a_z^(s)`, `a_u^(rho)`),
+/// or one per row `rho` with polynomial lanes), `links` leaf-checked digits (3 under
+/// H-exact, 2 under H-FIPS; `l + k + 3` with lanes), `bools` Boolean value digits (2 under
+/// H-exact, 3 under H-FIPS; `l + k` with lanes: `a_z^(s)`, `a_u^(rho)`),
 /// the H-FIPS checks and reductions, `bits` bits of `w_1'` in `bit_lanes` polynomials, and
 /// `stacks` lookup stacks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,7 +159,7 @@ impl Gammas {
         self.first_reduction() + 2 * self.bit_lanes
     }
 
-    /// Batching coefficients: for ML-DSA-44 49 under H-u, 50 under H-exact, 56 under H-FIPS;
+    /// Batching coefficients: for ML-DSA-44 50 under H-exact, 56 under H-FIPS;
     /// 105 for ML-DSA-65 and 132 for ML-DSA-87 (136 and 173 under H-FIPS).
     #[must_use]
     pub const fn count(self) -> usize {
@@ -293,8 +290,8 @@ pub fn gamma_count(manifest: &CommitmentManifest) -> usize {
 pub struct Stage3Proof {
     /// Compressed degree-3 messages (3 elements each).
     pub rounds: Vec<Vec<E>>,
-    /// The opening claims at `r^(3)` and its suffixes (for ML-DSA-44: 35 under H-u, 36 under
-    /// H-exact, 40 under H-FIPS; `Stage3Claims::len` in general).
+    /// The opening claims at `r^(3)` and its suffixes (for ML-DSA-44: 36 under H-exact, 40
+    /// under H-FIPS; `Stage3Claims::len` in general).
     pub claims: Stage3Claims,
 }
 
@@ -360,7 +357,7 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
 
     // Main domain, eq(r^(2)): the ring's committed part (u, v, w_1') per row, the links,
     // the Booleanity zero-checks and the bit reductions from r^(2). The higher digits of z
-    // (Z_hi under H-u; bz_hi, a_z under H-exact; Z_mid, a_z per lane) ride along for the
+    // (bz_hi, a_z for ML-DSA-44; Z_mid, a_z per lane) ride along for the
     // links or the zero-checks; H-FIPS reads l_lo, l_hi in the slots of U_lo, U_hi and adds
     // s, delta, e. Lane order: (U_lo, V_lo, V_hi) per row lane, the second digits of z
     // and u, their further digits, the bits.
@@ -529,8 +526,8 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
         });
     }
 
-    // Main domain, no equality factor: w_A times z (z = Z_lo + 2^16 Z_hi + 2^15 under H-u,
-    // z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225 under H-exact), one group per lane of z.
+    // Main domain, no equality factor: w_A times z (z = S_zlo + 2^16 B_zhi + 130,915 a_z -
+    // 98,225 for ML-DSA-44), one group per lane of z.
     // With polynomial lanes the weight w_A^(s) already carries the row coefficients
     // gamma_rho of the instances ring[rho], so the part is unbatched.
     for s in 0..lanes_l {
@@ -1008,11 +1005,12 @@ mod tests {
     }
 
     #[test]
-    fn stage_three_has_forty_nine_instances_in_spec_order() {
-        let spec = check_spec(&CommitmentManifest::for_batch(8).unwrap(), 49);
-        let gammas = Gammas::new(&CommitmentManifest::for_batch(8).unwrap());
-        assert_eq!((gammas.kappa1_r1(5), gammas.kappa3_tau(), gammas.stack(4)), (41, 35, 46));
-        assert_eq!((gammas.link(2), gammas.link(3), gammas.proj_v(), gammas.proj_k()), (3, 4, 47, 48));
+    fn stage_three_projection_identity_in_spec_order() {
+        let manifest = CommitmentManifest::for_relation(8, crate::manifest::Relation::HExact).unwrap();
+        let spec = check_spec(&manifest, 50);
+        let gammas = Gammas::new(&manifest);
+        assert_eq!((gammas.kappa1_r1(5), gammas.kappa3_tau(), gammas.stack(4)), (42, 36, 47));
+        assert_eq!((gammas.link(1), gammas.link(2), gammas.proj_v(), gammas.proj_k()), (2, 3, 48, 49));
         // The projection identity: W (V_lo + 2^16 V_hi + 2^15) on the main domain without an
         // equality factor; K_0 + 2^16 K_1 + 2^32 K_2 + 2^35 K_3 + 2^34 + 2^31 + 2^15 and the
         // links of K_2, K_3 on the projection domain at r^(2).
@@ -1026,10 +1024,10 @@ mod tests {
         assert_eq!(
             k_side.instances.iter().map(|i| (i.gamma, i.terms.clone())).collect::<Vec<_>>(),
             vec![
-                (3, vec![Term::Link(2)]),
-                (4, vec![Term::Link(3)]),
+                (2, vec![Term::Link(2)]),
+                (3, vec![Term::Link(3)]),
                 (
-                    48,
+                    49,
                     vec![Term::Affine {
                         weight: None,
                         lanes: vec![(0, 1), (1, 1 << 16), (2, 1 << 32), (3, 1 << 35)],
@@ -1239,7 +1237,7 @@ mod tests {
     fn lane_sets_have_one_ring_instance_per_row() {
         use agg_witness::params::Set;
         for (set, k, l, stacks, count) in [(Set::S65, 6, 5, 7, 105), (Set::S87, 8, 7, 8, 132)] {
-            let manifest = CommitmentManifest::for_set(set, 256, crate::manifest::Relation::Hu).unwrap();
+            let manifest = CommitmentManifest::for_set(set, 256, crate::manifest::Relation::HExact).unwrap();
             let gammas = Gammas::new(&manifest);
             assert_eq!(
                 (gammas.rings, gammas.links, gammas.bools, gammas.bits, gammas.bit_lanes, gammas.stacks),

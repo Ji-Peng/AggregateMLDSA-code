@@ -14,9 +14,9 @@ use crate::pcs::{group_points, PcsError};
 use crate::{BaseField, OpeningField as E};
 use jolt_field::Zero;
 
-/// The opening claims of the committed polynomials (53 for ML-DSA-44 under H-u): the stage-3
-/// claims (35 there) at the group points induced by `r3`, zero for the 11 zero polynomials of
-/// `G_3`, the multiplicity digits at the table point `pi_m`.
+/// The opening claims of the committed polynomials (59 for ML-DSA-44 under H-FIPS): the
+/// stage-3 claims (40 there) at the group points induced by `r3`, zero for the 12 zero
+/// polynomials of `G_3`, the multiplicity digits at the table point `pi_m`.
 pub fn opening_claims(
     manifest: &CommitmentManifest,
     r3: &[E],

@@ -68,12 +68,12 @@ fn honest_l16_tables_satisfy_the_integer_relation() {
     // The ring residual vanishes on the whole domain.
     let residual = residual_table(manifest, &batch.instance, &batch.main);
     assert!(nonzero(&residual).is_empty());
-    // The tables of z and the stored digits: z = Z_lo + 2^16 Z_hi + 2^15.
+    // The tables of z and the stored digits: z = bz_lo + 2^16 bz_hi + 130,915 a_z - 98,225.
     let tables = batch.tables();
-    let z = compose_table(&DigitValue::Z.layout(), &tables.digits(DigitValue::Z));
-    let (z_lo, z_hi) = (tables.column(Column::Z_LO), tables.column(Column::Z_HI));
+    let z = compose_table(&DigitValue::Zx.layout(), &tables.digits(DigitValue::Zx));
+    let (lo, hi, a) = (tables.column(Column::ZX_LO), tables.column(Column::ZX_HI), tables.column(Column::A_Z));
     for x in [0, 1, 1023, 4096 + 17] {
-        assert_eq!(z[x], z_lo.value(x) + (z_hi.value(x) << 16) + i64::from(LOOKUP_SHIFT));
+        assert_eq!(z[x], lo.value(x) + (hi.value(x) << 16) + 130_915 * a.value(x) - 98_225);
     }
     // The bridge identities over the integers, with kappa = K + 2^15.
     let witness = parity_witness(&batch, &batch.main, &batch.bridge);
@@ -90,7 +90,12 @@ fn honest_l16_tables_satisfy_the_integer_relation() {
             .all(|&k| (0..1024).contains(&k)));
         let cells = manifest.group(agg_piop::manifest::STACK_DOMAINS[level]).logical_cells();
         let stacked = batch.bridge.carries(level);
-        let real = if level == 3 { 1 } else { 6 };
+        // Level 2 under H-FIPS also holds the hint slack u_h in slot 6.
+        let real = match level {
+            3 => 1,
+            2 if manifest.is_fips() => 7,
+            _ => 6,
+        };
         assert!(stacked[real * cells..].iter().all(|&k| k == -LOOKUP_SHIFT));
     }
     // w_1' from the bits is in [0, 44).
@@ -107,10 +112,10 @@ fn single_cell_mutations_move_the_expected_entries() {
     *main.wide_cell_mut(manifest, Column::V_LO, x) += 1;
     let residual = residual_table(manifest, &batch.instance, &main);
     assert_eq!(nonzero(&residual), vec![x]);
-    // Z_lo + 1 moves (A z) on the record's whole row block (a negacyclic product).
+    // bz_lo + 1 moves (A z) on the record's whole row block (a negacyclic product).
     let mut main = batch.main.clone();
     let x = main_index(9, 2, 4);
-    *main.wide_cell_mut(manifest, Column::Z_LO, x) += 1;
+    *main.wide_cell_mut(manifest, Column::ZX_LO, x) += 1;
     let moved = nonzero(&residual_table(manifest, &batch.instance, &main));
     assert!(!moved.is_empty());
     assert!(moved.iter().all(|&y| y >> 10 == 4), "only record 4 changes");

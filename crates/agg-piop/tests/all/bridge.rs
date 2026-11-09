@@ -89,7 +89,7 @@ impl Fixture {
             bridge,
             &NoKeccakVerifier,
             FlockProfile::None,
-            Relation::Hu,
+            Relation::HFips,
             None,
         )
         .map(|_| ())
@@ -108,7 +108,7 @@ impl Fixture {
             instance: &self.instance,
             records: &inputs,
             signatures: &signatures,
-            relation: Relation::Hu,
+            relation: Relation::HFips,
         };
         let manifest = CommitmentManifest::for_batch(self.records.len()).unwrap();
         let hooks = ProveHooks {
@@ -141,7 +141,7 @@ fn bridge_identities_in_the_256_signature_run_with_seed_derived_matrices() {
             instance: &fixture.instance,
             records: &inputs,
             signatures: &signatures,
-            relation: Relation::Hu,
+            relation: Relation::HFips,
         };
         let output = prove(
             &prover_inputs,
@@ -231,7 +231,7 @@ fn bridge_tampering_is_rejected_at_stage_one() {
             instance: &fixture.instance,
             records: &inputs,
             signatures: &signatures,
-            relation: Relation::Hu,
+            relation: Relation::HFips,
         };
         let (manifest, main) = main_tables(&prover_inputs).unwrap();
         // Matrices fixed in advance (test stand-in), so that a hook can rebuild stale tables.

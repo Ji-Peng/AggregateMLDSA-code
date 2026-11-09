@@ -248,7 +248,6 @@ fn h_exact_value_boundaries_with_synthetic_statements() {
     on_large_stack(|| {
         // Value boundaries: the tamper keeps the ring identity.
         let exact = small_batch(Relation::HExact);
-        let hu = small_batch(Relation::Hu);
         let zx = DigitValue::Zx.layout();
         let z_case = |batch: &Batch, z: i64, digits: &[i64]| {
             let (i, row, j) = z_near(batch, z);
@@ -270,15 +269,10 @@ fn h_exact_value_boundaries_with_synthetic_statements() {
         // lookup.
         assert_eq!(z_case(&exact, -B_Z - 1, &[-32_769, 0, 0]), Some(0));
         assert_eq!(z_case(&exact, 131_000, &zx.decompose(131_000)), Some(0));
-        // H-u proves only |z| < 2^17: the same z = 130,994 and 131,000 are accepted there.
-        let z16 = DigitValue::Z.layout();
-        for z in [B_Z + 1, 131_000] {
-            assert_eq!(z_case(&hu, z, &z16.decompose(z)), None, "H-u z = {z}");
-        }
-        // u (the same step form in both relations): +-190,465 accepted; 190,466 as
-        // (D_u, S_ulo) = (2, 32,768) the lookup, as (3, -30,311) leaf6; -190,466 the lookup.
+        // u (the step form): +-190,465 accepted; 190,466 as (D_u, S_ulo) = (2, 32,768) the
+        // lookup, as (3, -30,311) leaf6; -190,466 the lookup.
         let (i, row, j) = (7, 1, 33);
-        for batch in [&exact, &hu] {
+        for batch in [&exact] {
             let u_case = |u: i64, digits: &[i64]| {
                 let (synthetic, main) = synthetic(batch, Target::U, i, row, j, u, digits);
                 assert_eq!(U16_DIGITS.compose(digits), u);
@@ -374,10 +368,9 @@ fn lane_z_near<P: ParamSet>(batch: &LaneBatch, target: i64) -> (usize, usize, us
 
 /// ML-DSA-65 and ML-DSA-87 under H-exact: `z = +-B_z` is accepted and `z = +-(B_z + 1)` is
 /// rejected by the lookup, the base-8 leaf or the Booleanity zero-check, whichever digit
-/// leaves its alphabet; H-u (`z in [-2^19, 2^19)`) accepts `z = +-(B_z + 1)`.
+/// leaves its alphabet.
 fn lane_z_boundaries<P: ParamSet>(seed: u64) {
     let exact = LaneBatch::build_as::<P>(Relation::HExact, seed, 200, 56);
-    let hu = LaneBatch::build_as::<P>(Relation::Hu, seed, 200, 56);
     assert_eq!(exact.manifest.z_value(), DigitValue::Zdx(P::SET));
     let b_z = P::B_Z;
     let form = exact.manifest.z_value().layout();
@@ -405,11 +398,6 @@ fn lane_z_boundaries<P: ParamSet>(seed: u64) {
     assert_eq!(form.decompose(-b_z - 1), vec![32_767, -5, 0]);
     assert_eq!(case(&exact, -b_z, -b_z - 1, &[32_767, -5, 0]), Some(2));
     assert_eq!(case(&exact, -b_z, -b_z - 1, &[-32_769, -4, 0]), Some(0));
-    // H-u proves only z in [-2^19, 2^19): the same z = +-(B_z + 1) are accepted there.
-    let relaxed = hu.manifest.z_value().layout();
-    for (target, z) in [(b_z, b_z + 1), (-b_z, -b_z - 1)] {
-        assert_eq!(case(&hu, target, z, &relaxed.decompose(z)), None, "H-u z = {z}");
-    }
 }
 
 #[test]

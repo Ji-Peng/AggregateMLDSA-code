@@ -313,7 +313,7 @@ impl<'a> Lane<'a> {
 pub enum LeafPoly {
     /// `Q_4(P) = P (P - 2)`.
     Q4,
-    /// `Q_6(P) = P (P - 2)(P - 6)`: the six-valued digit `[-3, 2]` (relation H-u's `U_hi`).
+    /// `Q_6(P) = P (P - 2)(P - 6)`: the six-valued digit `[-3, 2]` (relation H-exact's `U_hi`).
     Q6,
     /// `Q_8(P) = Q_16^lo(P) = P (P - 2)(P - 6)(P - 12)`.
     Q8,

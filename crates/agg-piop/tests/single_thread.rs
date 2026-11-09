@@ -55,7 +55,7 @@ fn prove_and_verify_ten(seed: u64) {
             instance: &instance,
             records: &inputs,
             signatures: &signatures,
-            relation: Relation::Hu,
+            relation: Relation::HFips,
         },
         &bridge,
         &NoKeccak,
@@ -72,7 +72,7 @@ fn prove_and_verify_ten(seed: u64) {
         &bridge,
         &NoKeccakVerifier,
         FlockProfile::None,
-        Relation::Hu,
+        Relation::HFips,
         None,
     )
     .expect("verify");

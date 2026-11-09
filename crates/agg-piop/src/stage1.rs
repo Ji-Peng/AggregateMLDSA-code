@@ -440,7 +440,7 @@ mod tests {
     fn lane_sets_check_every_bit_lane_and_drop_the_range_identity() {
         use agg_witness::params::Set;
         for (set, k, count) in [(Set::S65, 6, 37), (Set::S87, 8, 45)] {
-            let manifest = CommitmentManifest::for_set(set, 256, crate::manifest::Relation::Hu).unwrap();
+            let manifest = CommitmentManifest::for_set(set, 256, crate::manifest::Relation::HExact).unwrap();
             let spec = spec(&manifest);
             spec.validate().unwrap();
             assert_eq!((spec.gamma_count, spec.degree, degree(&manifest)), (count, 3, 3));
