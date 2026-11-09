@@ -74,11 +74,16 @@ if 'VERIFY: ACCEPT' not in log or 'VERIFY: REJECT' in log:
     raise SystemExit('Geode verification did not accept')
 n = int(sys.argv[5])
 size = pathlib.Path(sys.argv[3]).stat().st_size
+disk_m = re.search(r'storage traffic over all prover phases: read ([\d.]+) GiB, written ([\d.]+) GiB; SSD-backed peak ([\d.]+) GiB', log)
+disk_rd_gib = float(disk_m.group(1)) if disk_m else 0.0
+disk_wr_gib = float(disk_m.group(2)) if disk_m else 0.0
+disk_spill_gib = float(disk_m.group(3)) if disk_m else 0.0
 print(json.dumps(dict(system='Alloul26', family=sys.argv[4], N=n, threads=int(sys.argv[6]),
     isa=sys.argv[7], soundness='default', run=int(sys.argv[8]),
     prove_s=float(match(r'^\s*([\d.]+)\s+TOTAL prover', log))/1000,
     verify_s=float(match(r'^\s*([\d.]+)\s+TOTAL verifier', log))/1000,
     bytes=size, bytes_per_sig=size/n,
-    peak_rss_kib=int(match(r'Maximum resident set size \(kbytes\):\s*(\d+)', timing)))))
+    peak_rss_kib=int(match(r'Maximum resident set size \(kbytes\):\s*(\d+)', timing)),
+    disk_read_gib=disk_rd_gib, disk_write_gib=disk_wr_gib, disk_spill_peak_gib=disk_spill_gib)))
 PY
 done
