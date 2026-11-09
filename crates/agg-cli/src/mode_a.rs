@@ -57,19 +57,19 @@ use agg_keccak::sponge::{sponge_gate, sponge_gate_for, SpongeRecord};
 use agg_keccak::tied::{TiedCommitment, TiedCommitted, TiedPart};
 use agg_keccak::witness::SlotBuffers;
 use agg_piop::binding::FlockProfile;
-use agg_piop::manifest::{CommitmentManifest, Relation};
+use agg_piop::manifest::{CommitmentManifest, HashField, Relation};
 use agg_piop::pow::KeccakPlan;
 use agg_piop::lane_public::{LaneKeyCache, LanePublicData};
 use agg_piop::prover::{
     main_tables, main_tables_for, prove_lanes_with_tables_using, prove_with_tables_using,
-    BridgeDerivation, BridgeTamper, KeccakSide, ProveError, ProveHooks, ProveTimings,
-    ProverInputs, SeededMatrices,
+    BridgeDerivation, BridgeTamper, FpKeccakSide, KeccakSide, ProveError, ProveHooks,
+    ProveTimings, ProverInputs, SeededMatrices,
 };
 use agg_piop::public_data::{KeyCache, PublicData};
 use agg_piop::source_tables::{BridgeGroupTables, MainTables, SourceTableError};
 use agg_piop::verifier::{
-    verify_lanes_timed, verify_timed, KeccakVerifier, SegmentContext, VerifyError, VerifyReport,
-    VerifyTimings,
+    verify_lanes_timed, verify_timed, ConfigurationError, FpKeccakVerifier, KeccakVerifier,
+    SegmentContext, VerifyError, VerifyReport, VerifyTimings,
 };
 use agg_piop::wire::{pack_final_vector, unpack_final_vector, AggregateProof, ProofSize};
 use agg_witness::bridge::BridgeMatrices;
@@ -1200,6 +1200,10 @@ pub struct AggregatorConfig {
     /// The parameter set of the records (default ML-DSA-44; bound in the instance record
     /// and the proof header).
     pub set: Set,
+    /// The field the commitment hash `c~ = H(mu || w1Encode(w1'))` is proven in (default
+    /// `Gf2`: Flock tied to the PIOP by the parity bridge). `Fp` proves the Keccak chain
+    /// inside the PIOP (ML-DSA-44, H-u); the Flock fields above are then unused.
+    pub hash_field: HashField,
 }
 
 impl Default for AggregatorConfig {
@@ -1210,6 +1214,7 @@ impl Default for AggregatorConfig {
             span: true,
             relation: Relation::Hu,
             set: Set::S44,
+            hash_field: HashField::Gf2,
         }
     }
 }
@@ -1249,6 +1254,10 @@ pub enum AggregateError {
     Profile(FlockProfile),
     /// The relation is not defined for the parameter set.
     Relation(Set, Relation),
+    /// The all-prime-field aggregate (`HashField::Fp`) for a parameter set other than ML-DSA-44.
+    HashFieldSet(Set),
+    /// The all-prime-field aggregate (`HashField::Fp`) under a relation other than H-u.
+    HashFieldRelation(Relation),
 }
 
 impl std::fmt::Display for AggregateError {
@@ -1268,6 +1277,14 @@ impl std::fmt::Display for AggregateError {
                 "relation {relation} is not available for ML-DSA-{}",
                 set.name()
             ),
+            Self::HashFieldSet(set) => write!(
+                f,
+                "the F_p hash field is available for ML-DSA-44 only, not ML-DSA-{}",
+                set.name()
+            ),
+            Self::HashFieldRelation(relation) => {
+                write!(f, "the F_p hash field is available under H-u only, not {relation}")
+            }
         }
     }
 }
@@ -1290,8 +1307,10 @@ impl From<ProveError> for AggregateError {
 pub struct ProveReport {
     /// Live records `N`.
     pub records: usize,
-    /// The Flock profile (bound in the instance record).
+    /// The Flock profile (bound in the instance record; `FpKeccak` under `HashField::Fp`).
     pub profile: FlockProfile,
+    /// The field the commitment hash is proven in (bound in the proof header).
+    pub hash_field: HashField,
     /// The relation proven (bound in the instance record and the proof header).
     pub relation: Relation,
     /// The public instance: key expansion (`ExpandA`, inverse NTTs), `tr`, `mu`, `c`, `T`.
@@ -1590,6 +1609,21 @@ pub fn sponge_records_for<P: agg_witness::params::ParamSet>(
         .collect()
 }
 
+/// The Akita prover setup and the public data, built beside the instance and the tables.
+type EarlySetup =
+    std::thread::JoinHandle<(Option<agg_piop::pcs::TableCommitter>, Option<PublicData>)>;
+
+/// An ML-DSA-44 batch's public instance, the prover inputs of its records and the thread
+/// building the prover setup.
+struct Instance44<'r> {
+    instance: Arc<PublicInstance>,
+    inputs: Vec<(&'r [u8], &'r [u8], [u8; C_TILDE_BYTES])>,
+    signatures: Vec<&'r [u8]>,
+    /// From the start of the aggregation to the instance.
+    time: Duration,
+    setup: Option<EarlySetup>,
+}
+
 /// The mode-A aggregator (holds the sponge gate, built once).
 pub struct Aggregator {
     gate: ChainGate,
@@ -1635,6 +1669,9 @@ impl Aggregator {
         records: &[SignedRecord<'_>],
         hooks: &AggregateHooks<'_>,
     ) -> Result<Aggregate, AggregateError> {
+        if self.config.hash_field == HashField::Fp {
+            return self.aggregate_44_fp(records, hooks);
+        }
         match self.config.set {
             Set::S44 => self.aggregate_44(records, hooks),
             Set::S65 => self.aggregate_lanes::<Set65>(records, hooks),
@@ -1658,10 +1695,15 @@ impl Aggregator {
         let bytes = output.proof.to_bytes();
         let size = output.proof.size();
         debug_assert_eq!(size.total(), bytes.len());
+        let hash_field = self.config.hash_field;
         let report = ProveReport {
             relation: self.config.relation,
             records: n,
-            profile: self.config.profile,
+            profile: match hash_field {
+                HashField::Gf2 => self.config.profile,
+                HashField::Fp => FlockProfile::FpKeccak,
+            },
+            hash_field,
             instance: instance_time,
             timings: output.timings,
             flock_records: flock_time,
@@ -1820,34 +1862,27 @@ impl Aggregator {
         Ok(self.finish(start, n, instance_time, tables_time, flock_time, output, side.log()))
     }
 
-    /// [`Self::aggregate_with`] for ML-DSA-44.
-    fn aggregate_44(
+    /// The steps of an ML-DSA-44 aggregation before the tables: the record lengths, the
+    /// instance and the prover inputs. The Akita prover setup and the public data depend only
+    /// on the record count, the relation, the hash field and the instance: the setup is built
+    /// on its own thread while the instance is computed, then the same thread builds the
+    /// public data while the tables are computed. Any failure there leaves both to the prover.
+    fn instance_44<'r>(
         &self,
-        records: &[SignedRecord<'_>],
-        hooks: &AggregateHooks<'_>,
-    ) -> Result<Aggregate, AggregateError> {
-        let start = Instant::now();
-        agg_piop::prover::phase_stamp("start");
+        records: &[SignedRecord<'r>],
+        start: Instant,
+    ) -> Result<Instance44<'r>, AggregateError> {
         let n = records.len();
-        if n == 0 || n > 1 << 15 {
-            return Err(AggregateError::Count(n));
-        }
-        let profile = self.config.profile;
-        if keccak_profile(profile).is_none() {
-            return Err(AggregateError::Profile(profile));
-        }
-        // The Akita prover setup and the public data depend only on the record count, the
-        // relation and the instance: the setup is built on its own thread while the instance
-        // is computed, then the same thread builds the public data while the tables are
-        // computed. Any failure here leaves both to `prove_with_tables_using`.
         let relation = self.config.relation;
+        let hash_field = self.config.hash_field;
         let (public_tx, public_rx) = std::sync::mpsc::channel::<Arc<PublicInstance>>();
-        let early_setup = std::thread::Builder::new()
+        let setup = std::thread::Builder::new()
             .name("agg-setup".into())
             .spawn(move || {
-                let committer = CommitmentManifest::for_relation(n, relation)
-                    .ok()
-                    .and_then(|m| agg_piop::pcs::TableCommitter::new(m).ok());
+                let committer =
+                    CommitmentManifest::for_hash_field(Set::S44, n, relation, hash_field)
+                        .ok()
+                        .and_then(|m| agg_piop::pcs::TableCommitter::new(m).ok());
                 if let Some(committer) = &committer {
                     let _ = committer.warm();
                 }
@@ -1876,8 +1911,106 @@ impl Aggregator {
             InstanceError::Geometry(_) => AggregateError::Count(n),
         })?);
         let _ = public_tx.send(Arc::clone(&instance));
-        let instance_time = start.elapsed();
+        let time = start.elapsed();
         agg_piop::prover::phase_stamp("instance");
+        Ok(Instance44 {
+            instance,
+            inputs,
+            signatures,
+            time,
+            setup,
+        })
+    }
+
+    /// [`Self::aggregate_with`] under `HashField::Fp` (ML-DSA-44, H-u): the instance and the
+    /// main tables as for the default, then the PIOP commits and zero-checks the Keccak chain
+    /// itself, so there are no sponge records, Flock parts or Flock thread pool.
+    fn aggregate_44_fp(
+        &self,
+        records: &[SignedRecord<'_>],
+        hooks: &AggregateHooks<'_>,
+    ) -> Result<Aggregate, AggregateError> {
+        assert!(
+            hooks.tamper_main.is_none()
+                && hooks.tamper_bridge.is_none()
+                && hooks.tamper_flock_records.is_none()
+                && hooks.flock_witness.is_none()
+                && !hooks.stale_bridge
+                && hooks.part_floor.is_none(),
+            "the aggregation hooks are not available under the F_p hash field"
+        );
+        let start = Instant::now();
+        agg_piop::prover::phase_stamp("start");
+        let n = records.len();
+        let relation = self.config.relation;
+        if self.config.set != Set::S44 {
+            return Err(AggregateError::HashFieldSet(self.config.set));
+        }
+        if relation != Relation::Hu {
+            return Err(AggregateError::HashFieldRelation(relation));
+        }
+        if n == 0 || n > 1 << 15 {
+            return Err(AggregateError::Count(n));
+        }
+        let manifest = CommitmentManifest::for_set_fp(Set::S44, n, relation)
+            .map_err(|e| AggregateError::Prove(agg_piop::pcs::PcsError::Plan(e).into()))?;
+        let Instance44 {
+            instance,
+            inputs,
+            signatures,
+            time: instance_time,
+            setup,
+        } = self.instance_44(records, start)?;
+        let prover_inputs = ProverInputs {
+            instance: &instance,
+            records: &inputs,
+            signatures: &signatures,
+            relation,
+        };
+        let clock = Instant::now();
+        let (_, main) = main_tables(&prover_inputs)?;
+        let tables_time = clock.elapsed();
+        agg_piop::prover::phase_stamp("tables");
+        let (committer, public) = setup
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or((None, None));
+        let output = prove_with_tables_using(
+            committer,
+            public,
+            &prover_inputs,
+            &manifest,
+            &main,
+            &SeededMatrices,
+            &FpKeccakSide,
+            FlockProfile::FpKeccak,
+            &ProveHooks::default(),
+        )?;
+        Ok(self.finish(start, n, instance_time, tables_time, Duration::ZERO, output, Vec::new()))
+    }
+
+    /// [`Self::aggregate_with`] for ML-DSA-44.
+    fn aggregate_44(
+        &self,
+        records: &[SignedRecord<'_>],
+        hooks: &AggregateHooks<'_>,
+    ) -> Result<Aggregate, AggregateError> {
+        let start = Instant::now();
+        agg_piop::prover::phase_stamp("start");
+        let n = records.len();
+        if n == 0 || n > 1 << 15 {
+            return Err(AggregateError::Count(n));
+        }
+        let profile = self.config.profile;
+        if keccak_profile(profile).is_none() {
+            return Err(AggregateError::Profile(profile));
+        }
+        let Instance44 {
+            instance,
+            inputs,
+            signatures,
+            time: instance_time,
+            setup: early_setup,
+        } = self.instance_44(records, start)?;
         let prover_inputs = ProverInputs {
             instance: &instance,
             records: &inputs,
@@ -2092,6 +2225,7 @@ pub struct AggregateVerifier {
     require: Option<FlockProfile>,
     relation: Relation,
     set: Set,
+    hash_field: HashField,
 }
 
 /// The verifier's key cache of the verified parameter set.
@@ -2163,7 +2297,23 @@ impl AggregateVerifier {
             require: None,
             relation: Relation::Hu,
             set,
+            hash_field: HashField::Gf2,
         }
+    }
+
+    /// Verify under `hash_field` (default `Gf2`). The hash field is the verifier's choice: an
+    /// aggregate whose header names the other one is rejected. `Fp` is defined for ML-DSA-44
+    /// only; a verifier of another set rejects every aggregate under it.
+    #[must_use]
+    pub const fn hash_field(mut self, hash_field: HashField) -> Self {
+        self.hash_field = hash_field;
+        self
+    }
+
+    /// The hash field verified.
+    #[must_use]
+    pub const fn hash_field_of(&self) -> HashField {
+        self.hash_field
     }
 
     /// The parameter set verified.
@@ -2199,6 +2349,12 @@ impl AggregateVerifier {
         if let Some(p) = self.require {
             return p;
         }
+        // An aggregate whose header names the F_p hash field has no Flock items to probe; the
+        // PIOP verifier rejects it at the header.
+        let flags = aggregate.get(2).copied();
+        if flags.is_some_and(|f| agg_piop::wire::hash_field_of_flags(f) == HashField::Fp) {
+            return FLOCK_PROFILE;
+        }
         probe_profile_id(aggregate)
             .and_then(FlockProfile::from_id)
             .filter(|profile| profile.is_mode_a())
@@ -2230,6 +2386,9 @@ impl AggregateVerifier {
         aggregate: &[u8],
         cache: KeyCacheMut<'_>,
     ) -> VerifyCostReport {
+        if self.hash_field == HashField::Fp {
+            return self.verify_fp(statements, aggregate, cache);
+        }
         let probe = Instant::now();
         let profile = self.profile_of(aggregate);
         let profile_probe = if self.require.is_some() {
@@ -2296,6 +2455,51 @@ impl AggregateVerifier {
             profile_probe,
             parts: keccak.log(),
             rejection: keccak.rejection(),
+            records: statements.len(),
+            aggregate_bytes: aggregate.len(),
+            cached,
+        }
+    }
+
+    /// [`Self::verify_with`] under `HashField::Fp`: the PIOP verifier checks the Keccak chain
+    /// itself, so there is no profile to probe and no Flock part.
+    fn verify_fp(
+        &self,
+        statements: &[(&[u8], &[u8])],
+        aggregate: &[u8],
+        cache: KeyCacheMut<'_>,
+    ) -> VerifyCostReport {
+        let profile = FlockProfile::FpKeccak;
+        let cached = !matches!(cache, KeyCacheMut::None);
+        let run = |cache| {
+            verify_timed(
+                statements,
+                aggregate,
+                &SeededMatrices,
+                &FpKeccakVerifier,
+                profile,
+                self.relation,
+                cache,
+            )
+        };
+        let report = match (self.set, cache) {
+            (Set::S44, KeyCacheMut::None) => run(None),
+            (Set::S44, KeyCacheMut::Rows(cache)) => run(Some(cache)),
+            (Set::S44, KeyCacheMut::Lanes(_)) => {
+                panic!("a key cache of another parameter set than ML-DSA-44")
+            }
+            (set, _) => VerifyReport {
+                outcome: Err(VerifyError::Configuration(ConfigurationError::FpKeccakSet(set))),
+                timings: VerifyTimings::default(),
+            },
+        };
+        VerifyCostReport {
+            report,
+            profile,
+            relation: self.relation,
+            profile_probe: Duration::ZERO,
+            parts: Vec::new(),
+            rejection: None,
             records: statements.len(),
             aggregate_bytes: aggregate.len(),
             cached,

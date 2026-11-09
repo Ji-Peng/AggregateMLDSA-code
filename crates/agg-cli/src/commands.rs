@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use agg_piop::binding::FlockProfile;
-use agg_piop::manifest::Relation;
+use agg_piop::manifest::{HashField, Relation};
 use agg_witness::gen;
 use agg_witness::params::{dispatch_set, ParamSet, Set};
 use rayon::prelude::*;
@@ -443,6 +443,7 @@ fn aggregate(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
         span,
         relation,
         set,
+        hash_field: HashField::Gf2,
     });
     let aggregate = run_large(move || aggregator.aggregate(&signed(&records)))?;
     std::fs::write(&out, &aggregate.bytes)?;
@@ -897,6 +898,7 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
                 span,
                 relation,
                 set,
+                hash_field: HashField::Gf2,
             },
             warmup,
             reps,
