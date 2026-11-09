@@ -1503,7 +1503,7 @@ pub fn sponge_records(
             // A record's cells are contiguous: cell `256 rho + j` of the record is at
             // `main_index(j, rho, i)`, and its bits sit at `6 (256 rho + j) + t`, so four
             // cells fill three bytes. The bits are gathered without branches into a 24-bit
-            // little-endian word per four cells (the low bit of a cell is either bit).
+            // little-endian word per four cells. Each cell holds 0 or 1, so only its bit 0 is read.
             let base = main_index(0, 0, i);
             debug_assert_eq!(main_index(N - 1, K - 1, i), base + K * N - 1);
             const _: () = assert!(agg_witness::params::W1_BITS == 6 && W1_ENCODE_BYTES * 8 == 6 * K * N);
