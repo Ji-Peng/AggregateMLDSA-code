@@ -1,17 +1,21 @@
 //! The all-prime-field aggregate (`HashField::Fp`, ML-DSA-44, H-u) through the agg-cli
-//! library: round trips at 17 and 100 signatures, the header's hash-field flag, rejection of
-//! each hash field's aggregate by a verifier of the other, and the configurations the
-//! aggregator and the verifier refuse under `Fp`.
+//! library: round trips at 17, 100 and 1,024 signatures, the header's hash-field flag,
+//! rejection of each hash field's aggregate by a verifier of the other, the configurations
+//! the aggregator and the verifier refuse under `Fp`, the wire round trip, rejection of a
+//! flipped byte in each region of the wire format, and byte identity of the `agg` binary's
+//! output across thread counts and ISA tiers.
 //!
 //! Run with `--release`.
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use agg_cli::mode_a::{AggregateError, AggregateVerifier, Aggregator, AggregatorConfig};
 use agg_piop::binding::FlockProfile;
 use agg_piop::manifest::{HashField, Relation};
 use agg_piop::verifier::{ConfigurationError, VerifyError};
-use agg_piop::wire::{WireError, HASH_FIELD_FP_FLAG};
+use agg_piop::wire::{AggregateProof, WireError, HASH_FIELD_FP_FLAG};
 use agg_witness::gen::{self, Record};
 use agg_witness::params::Set;
 
@@ -95,6 +99,105 @@ fn fp_round_trip_44_hu() {
     on_large_stack(|| {
         round_trip(42, 13, 4);
         round_trip(43, 80, 20);
+    });
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "1,024 records: run with --release")]
+fn fp_round_trip_44_hu_1024() {
+    on_large_stack(|| round_trip(42, 768, 256));
+}
+
+/// The 17-record `Fp` aggregate shared by the wire and flipped-byte tests: the records and
+/// the aggregate bytes.
+fn fp_17() -> &'static (Vec<Record>, Vec<u8>) {
+    static AGGREGATE: OnceLock<(Vec<Record>, Vec<u8>)> = OnceLock::new();
+    AGGREGATE.get_or_init(|| {
+        let records = records(0xfb, 13, 4);
+        let aggregate = Aggregator::new(fp_config())
+            .aggregate(&signed(&records))
+            .expect("Fp aggregate");
+        (records, aggregate.bytes)
+    })
+}
+
+#[test]
+fn fp_wire_round_trip() {
+    on_large_stack(|| {
+        let (_, bytes) = fp_17();
+        let proof = AggregateProof::from_bytes_for(bytes, HashField::Fp).expect("parse Fp");
+        assert_eq!(proof.hash_field, HashField::Fp);
+        assert_eq!(&proof.to_bytes(), bytes);
+        assert_eq!(proof.size().total(), bytes.len());
+        assert_eq!(
+            AggregateProof::from_bytes(bytes),
+            Err(WireError::Flags(bytes[2]))
+        );
+    });
+}
+
+#[test]
+fn fp_flipped_byte_rejected() {
+    on_large_stack(|| {
+        let (records, bytes) = fp_17();
+        let statements = statements(records);
+        let proof = AggregateProof::from_bytes_for(bytes, HashField::Fp).expect("parse Fp");
+        let size = proof.size();
+        let verifier = AggregateVerifier::new().hash_field(HashField::Fp);
+        assert!(verifier.verify(&statements, bytes, None).accepted());
+        let check = |label: &str, variant: &[u8]| match catch_unwind(AssertUnwindSafe(|| {
+            verifier.verify(&statements, variant, None)
+        })) {
+            Ok(report) => {
+                assert!(!report.accepted(), "{label}: accepted");
+                eprintln!("{label}: {:?}", report.report.outcome.as_ref().err());
+            }
+            Err(_) => panic!("{label}: the verifier panicked"),
+        };
+        // One offset inside each region, in wire order. The Akita commitments open with the
+        // two framed lattice commitments, then the seven framed Keccak commitments; the
+        // stage-1 rounds follow the lookup (an `Fp` proof has no pre-stage claims).
+        let c_tilde = size.header;
+        let keccak = c_tilde
+            + size.c_tilde
+            + 8
+            + proof.main16_commitment.len()
+            + proof.main_commitment.len()
+            + 4;
+        let stage1 = c_tilde + size.c_tilde + size.akita_commitments + size.lookup;
+        let work = bytes.len() - size.opening - size.work;
+        let first = &proof.keccak_commitments[0];
+        assert_eq!(&bytes[keccak..keccak + first.len()], first.as_slice());
+        assert_eq!(
+            stage1 + size.piop,
+            work,
+            "the stages end where the nonces start"
+        );
+        assert_eq!(&bytes[work..work + size.work], proof.work.as_slice());
+        let regions = [
+            ("c~ byte", c_tilde + 5),
+            (
+                "round-1 Keccak commitment",
+                keccak + proof.keccak_commitments[0].len() / 2,
+            ),
+            ("stage-1 round element", stage1),
+            ("work nonce", work),
+            ("last opening byte", bytes.len() - 1),
+        ];
+        for (label, at) in regions {
+            for mask in [0x01, 0x80] {
+                let mut variant = bytes.clone();
+                variant[at] ^= mask;
+                check(
+                    &format!("{label} (offset {at}, mask {mask:#04x})"),
+                    &variant,
+                );
+            }
+        }
+        for eighth in 0..8 {
+            let len = bytes.len() * eighth / 8;
+            check(&format!("truncated to {len} B"), &bytes[..len]);
+        }
     });
 }
 
@@ -293,4 +396,93 @@ fn cli_hash_field_fp_round_trip() {
     assert!(std::fs::read_to_string(json)
         .unwrap()
         .contains("\"hash_field\": \"fp\""));
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Flock and Akita proofs: run with --release"
+)]
+fn fp_single_thread_byte_identical() {
+    let dir =
+        std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("agg-cli-hash-field-threads");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = |name: &str| dir.join(name).to_str().unwrap().to_owned();
+    let (keys, records) = (path("keys.bin"), path("records.bin"));
+    let run = |args: &[&str], env: &[(&str, &str)]| {
+        let (code, out) = agg_env(args, env);
+        assert_eq!(code, 0, "{out}");
+    };
+    run(
+        &[
+            "keygen-batch",
+            "--params",
+            "44",
+            "--count",
+            "25",
+            "--seed",
+            "42",
+            "--out",
+            &keys,
+        ],
+        &[],
+    );
+    run(
+        &[
+            "sign-batch",
+            "--params",
+            "44",
+            "--keys",
+            &keys,
+            "--count",
+            "100",
+            "--seed",
+            "43",
+            "--out",
+            &records,
+        ],
+        &[],
+    );
+    let aggregate = |name: &str, env: &[(&str, &str)]| {
+        let out = path(name);
+        let start = Instant::now();
+        run(
+            &[
+                "aggregate",
+                "--records",
+                &records,
+                "--out",
+                &out,
+                "--hash-field",
+                "fp",
+            ],
+            env,
+        );
+        eprintln!(
+            "Fp N = 100, {env:?}: aggregate {:.2} s",
+            start.elapsed().as_secs_f64()
+        );
+        std::fs::read(out).unwrap()
+    };
+    let pooled = aggregate("pooled.bin", &[]);
+    assert_eq!(
+        aggregate("single.bin", &[("RAYON_NUM_THREADS", "1")]),
+        pooled
+    );
+    // A capped run picks other kernels on a CPU with AVX-512; the bytes must not change.
+    if std::arch::is_x86_feature_detected!("avx2") {
+        assert_eq!(aggregate("avx2.bin", &[("AGG_ISA", "avx2")]), pooled);
+    }
+    run(
+        &[
+            "verify",
+            "--records",
+            &records,
+            "--aggregate",
+            &path("pooled.bin"),
+            "--hash-field",
+            "fp",
+        ],
+        &[],
+    );
 }
