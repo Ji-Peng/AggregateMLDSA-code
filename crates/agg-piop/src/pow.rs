@@ -389,61 +389,61 @@ mod tests {
                 3,
                 FlockProfile::PublicBits,
                 None,
-                "c2c88a319a289cce20146a0e8fb87d8203bb9f02a2b0743974290ef94c229ce5",
+                "c3dc3ec0258146974daae961a943ec7f8704748cc8683e257bcb02326859cf26",
             ),
             (
                 3,
                 FlockProfile::Slim,
                 Some(true),
-                "9757c063ae3b3a704330367ea2552dcfd41c9f20841abccce47a9a720cf69437",
+                "979d6e78ca49e082607c9912fbd1c0f49ed0a33ca03e0052cf4155848fe0ae31",
             ),
             (
                 10,
                 FlockProfile::PublicBits,
                 None,
-                "aa465458415c67707b10cc7e91ddb1eac2f8a4182edf90db1d14f3e74107ecbd",
+                "3f6d2aac995ed02826a9da18724a301660de37952febdbd67ad991ac2535700f",
             ),
             (
                 10,
                 FlockProfile::Slim,
                 Some(true),
-                "0aa41fd0c4c2a9bd0df0b63d86e57787cb31c6d7cedec0ac9edd626cd2fb3eea",
+                "0a0afe3dd4fa65a6265d2d234b57ca868f793a62ec8d3d3c9949f9af81b2ceac",
             ),
             (
                 13,
                 FlockProfile::Slim,
                 Some(true),
-                "aa72651e90b32c908db52ec832790d72e685c4493c7fd3e80bebe60cd506b5c9",
+                "ecbce3b30764d9c0d5f19e5504568c799d0ac8086d02ed10904d12e9a84879b8",
             ),
             (
                 15,
                 FlockProfile::PublicBits,
                 None,
-                "1634c0b863ed46dd376f873caf5dafaa838fb4a3cda274e4be7c3eca1f8665e2",
+                "329f278362ccd503ccbbe8ce1f8940b5b1babb2a5a6b0870f44965107cff8a79",
             ),
             (
                 15,
                 FlockProfile::Fast,
                 Some(true),
-                "deb090a48d8057c6aed064b95bf6fb8a1499207935005fc0d98b40ab5de3864c",
+                "1469c9f7b92f4a22dda5942757531c7a61682f0355a81d5d5159702462b822e5",
             ),
             (
                 15,
                 FlockProfile::Slim,
                 Some(true),
-                "ef9710959f30286f422e170d9112bca67e7526e17382660675061256ef3e3303",
+                "bcb8ae3e6614861ec518c680603dca5e391faaf27d4fa6699eefb117f8ecb65e",
             ),
             (
                 15,
                 FlockProfile::Slim,
                 Some(false),
-                "fe42263b92bff80e6c367e2b44d7673d274f454841e1784332f5971a03e136c8",
+                "60381b6cf0b713e6d8f3c230c019a5a544436f76dee101cf67fdf0e257ea5014",
             ),
             (
                 15,
                 FlockProfile::Slim8,
                 Some(true),
-                "0ba687fbd3b201e24c3776d9ee689dfcfb81ea841de12aa7cbbb3157199ccad8",
+                "4b9a149549f2998fec83bea28478bfc7c4bed26d17f4b8788b44c87c1e52c5be",
             ),
         ];
         for (d_sig, profile, span, want) in cases {
@@ -468,10 +468,10 @@ mod tests {
     fn plan_totals_match_the_soundness_doc() {
         // Sites, nonces, bits, bytes and sum 2^g of the PIOP part.
         for (d_sig, sites, nonces, bits, work) in [
-            (3, 196, 195, 1818, 1350),
-            (10, 317, 316, 2926, 1964),
-            (13, 398, 397, 3664, 2342),
-            (15, 457, 456, 4203, 2646),
+            (3, 196, 195, 1805, 1298),
+            (10, 317, 316, 2906, 1884),
+            (13, 398, 397, 3641, 2250),
+            (15, 457, 456, 4178, 2546),
         ] {
             let manifest = CommitmentManifest::for_batch(1 << d_sig).unwrap();
             let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
@@ -485,7 +485,7 @@ mod tests {
         }
         let manifest = CommitmentManifest::for_batch(1 << 15).unwrap();
         let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
-        assert_eq!(plan.work_bits().div_ceil(8), 526);
+        assert_eq!(plan.work_bits().div_ceil(8), 523);
     }
 
     #[test]
@@ -494,9 +494,9 @@ mod tests {
         use crate::transcript::{stage_degrees, stage_gammas};
         use agg_witness::params::Set;
         // Stage batching vectors, degrees and gamma difficulties per set under H-exact: 65 has
-        // 37, 18 and 105 coefficients (g = 6, 5, 7), 87 has 45, 22 and 132 (g = 6, 5, 8); stage 1 has
-        // degree 3 (no six-bit range identity).
-        for (set, gammas, bits) in [(Set::S65, [37, 18, 105], [6, 5, 7]), (Set::S87, [45, 22, 132], [6, 5, 8])] {
+        // 13, 18 and 105 coefficients (g = 4, 5, 7), 87 has 13, 22 and 132 (g = 4, 5, 8); stage 1
+        // has degree 3 (bridge instances only).
+        for (set, gammas, bits) in [(Set::S65, [13, 18, 105], [4, 5, 7]), (Set::S87, [13, 22, 132], [4, 5, 8])] {
             for d_sig in [3, 10, 15] {
                 let manifest = CommitmentManifest::for_set(set, 1 << d_sig, Relation::HExact).unwrap();
                 assert_eq!(stage_gammas(&manifest), gammas, "{set:?}");
@@ -516,14 +516,14 @@ mod tests {
         // Totals of the PIOP part (sites, nonces, bits, sum 2^g) and the mode-B plan digests of
         // `python3 -I docs/scripts/pow_plan.py --set 65|87 --relation h-exact`.
         let cases: [(Set, usize, [usize; 3], u64, &str); 8] = [
-            (Set::S65, 3, [190, 189, 1761], 1690, "ce924fd9a54603b63cf3e8a7ceaf3d3069e46f563905ed51e4b3a2f18dd646cb"),
-            (Set::S65, 10, [311, 310, 2867], 2356, "31e84bb3059489c0b602c994cc160c5f1a65f0929fa95b75aebb4bdb5aa3f615"),
-            (Set::S65, 13, [392, 391, 3605], 2770, "97bd51e15625058d3394d7f4f1b8c1fd9c6e71b502aa61cf46133f161b4ea17d"),
-            (Set::S65, 15, [451, 450, 4144], 3130, "6ff0953b57dc7ae20278bbd237748359282b934c8fe3afd0435e8bebcd264b99"),
-            (Set::S87, 3, [190, 189, 1763], 1850, "7882abb9737aefba3a1d46b4086c64ef11bab5d4d4b946655867be9cc0ecb294"),
-            (Set::S87, 10, [311, 310, 2873], 2604, "c536004aeb714eeb94640005f78e35d2f0923598f4cb5b4ca8c412dea5a0d4de"),
-            (Set::S87, 13, [392, 391, 3611], 3018, "f7778510c5fb270548319628fa87f0f84d40f329b3fc9927d02cd75a98ee53d1"),
-            (Set::S87, 15, [451, 450, 4149], 3346, "b4385bc4888c55d57ae7166cf75b1f51d27d3f9bc5b5767f036e2bbe866acb57"),
+            (Set::S65, 3, [190, 189, 1759], 1642, "d99a5de6eb56d98d1f9bff7055dd3caae19fe702e4c287542578698eb2db9ad2"),
+            (Set::S65, 10, [311, 310, 2865], 2308, "27a88ced5405c551456dec5fbcc88b93a90a1a82abc0d47e59d34a0091f808c7"),
+            (Set::S65, 13, [392, 391, 3603], 2722, "5a2418074a296891fccb781382d203e0a75d094c36013a73355b10555c0560aa"),
+            (Set::S65, 15, [451, 450, 4142], 3082, "9f7de8c2876001420754c40e60503a1ddfe6f6e7a441c2cc01915384bdffbc3e"),
+            (Set::S87, 3, [190, 189, 1761], 1802, "c4b764d4114adc861df05379ff360fe5f1c20f015a982c4d836e23bc8da41d8b"),
+            (Set::S87, 10, [311, 310, 2871], 2556, "4004cf282c9614ac54babee0e5c4452defe20766cc46ea5350afe708276e9847"),
+            (Set::S87, 13, [392, 391, 3609], 2970, "73e89f097aff209c49e1dbac41963a41be95ebd31de7cf7fd9fd312d03a7fe2b"),
+            (Set::S87, 15, [451, 450, 4147], 3298, "40684a44bd7e84a188c72078fb00af361dfdedeec8a4e18f863e723a20fc0158"),
         ];
         for (set, d_sig, [sites, nonces, bits], work, want) in cases {
             let manifest = CommitmentManifest::for_set(set, 1 << d_sig, Relation::HExact).unwrap();
@@ -535,8 +535,8 @@ mod tests {
             assert_eq!(hex(&plan.digest()), want, "{set:?} 2^{d_sig}");
             assert!(plan.sites().iter().all(|s| s.bits <= 8));
         }
-        // The 1K plans: 359 (65) and 360 (87) nonce bytes.
-        for (set, bytes) in [(Set::S65, 359), (Set::S87, 360)] {
+        // The 1K plans: 359 nonce bytes for both sets.
+        for (set, bytes) in [(Set::S65, 359), (Set::S87, 359)] {
             let manifest = CommitmentManifest::for_set(set, 1 << 10, Relation::HExact).unwrap();
             let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
             assert_eq!(plan.work_bits().div_ceil(8), bytes);
@@ -547,13 +547,13 @@ mod tests {
     fn h_exact_plans_match_the_documented_plans() {
         use crate::manifest::Relation;
         // Totals: (d_sig, sites, nonces, bits, bytes, sum 2^g). With the projection of v the
-        // stage-2 gamma site has 9 coefficients under H-exact (leaf6[U_hi], leaf8[K_2], leaf8[K_3]),
-        // g = 4 (nonce 11 bits).
+        // stage-2 gamma site has 10 coefficients under H-exact (def_y1, leaf6[U_hi], leaf8[K_2],
+        // leaf8[K_3], range_w1), g = 4 (nonce 11 bits).
         for (d_sig, sites, nonces, bits, bytes, work) in [
-            (3, 196, 195, 1818, 228, 1350),
-            (10, 317, 316, 2926, 366, 1964),
-            (13, 398, 397, 3664, 458, 2342),
-            (15, 457, 456, 4203, 526, 2646),
+            (3, 196, 195, 1805, 226, 1298),
+            (10, 317, 316, 2906, 364, 1884),
+            (13, 398, 397, 3641, 456, 2250),
+            (15, 457, 456, 4178, 523, 2546),
         ] {
             let manifest = CommitmentManifest::for_relation(1 << d_sig, Relation::HExact).unwrap();
             let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
@@ -572,12 +572,12 @@ mod tests {
         // The pinned anchors (mode B = PublicBits; Slim, span on); the plan of the default
         // relation H-FIPS is the same.
         for (d_sig, profile, want) in [
-            (3, FlockProfile::PublicBits, "c2c88a319a289cce20146a0e8fb87d8203bb9f02a2b0743974290ef94c229ce5"),
-            (3, FlockProfile::Slim, "9757c063ae3b3a704330367ea2552dcfd41c9f20841abccce47a9a720cf69437"),
-            (10, FlockProfile::PublicBits, "aa465458415c67707b10cc7e91ddb1eac2f8a4182edf90db1d14f3e74107ecbd"),
-            (10, FlockProfile::Slim, "0aa41fd0c4c2a9bd0df0b63d86e57787cb31c6d7cedec0ac9edd626cd2fb3eea"),
-            (15, FlockProfile::PublicBits, "1634c0b863ed46dd376f873caf5dafaa838fb4a3cda274e4be7c3eca1f8665e2"),
-            (15, FlockProfile::Slim, "ef9710959f30286f422e170d9112bca67e7526e17382660675061256ef3e3303"),
+            (3, FlockProfile::PublicBits, "c3dc3ec0258146974daae961a943ec7f8704748cc8683e257bcb02326859cf26"),
+            (3, FlockProfile::Slim, "979d6e78ca49e082607c9912fbd1c0f49ed0a33ca03e0052cf4155848fe0ae31"),
+            (10, FlockProfile::PublicBits, "3f6d2aac995ed02826a9da18724a301660de37952febdbd67ad991ac2535700f"),
+            (10, FlockProfile::Slim, "0a0afe3dd4fa65a6265d2d234b57ca868f793a62ec8d3d3c9949f9af81b2ceac"),
+            (15, FlockProfile::PublicBits, "329f278362ccd503ccbbe8ce1f8940b5b1babb2a5a6b0870f44965107cff8a79"),
+            (15, FlockProfile::Slim, "bcb8ae3e6614861ec518c680603dca5e391faaf27d4fa6699eefb117f8ecb65e"),
         ] {
             let manifest = CommitmentManifest::for_relation(1 << d_sig, Relation::HExact).unwrap();
             let keccak = match profile {
@@ -595,8 +595,8 @@ mod tests {
     #[test]
     fn h_fips_plans_equal_h_exact_plans() {
         use crate::manifest::Relation;
-        // H-FIPS's stage batching vectors (26, 9, 56) give the same
-        // difficulties as H-exact's (26, 9, 50): bit_length(56) = bit_length(50) = 6. The plan,
+        // H-FIPS's stage batching vectors (19, 10, 56) give the same
+        // difficulties as H-exact's (19, 10, 50): bit_length(56) = bit_length(50) = 6. The plan,
         // its stream and its digest are H-exact's; the relation is bound by the instance record's
         // manifest bytes (relation byte, G_main4 and G_2 descriptors, catalog row).
         for d_sig in [3, 10, 13, 15] {
@@ -637,7 +637,7 @@ mod tests {
         // 136 (g = 8, one bit more than H-exact's 105) and 173 (g = 8, as H-exact's 132). Every
         // other site is H-exact's; the lookup keeps its sites (L grows by three padding slots of
         // D_2).
-        for (set, gammas, bits) in [(Set::S65, [37, 18, 136], [6, 5, 8]), (Set::S87, [45, 22, 173], [6, 5, 8])] {
+        for (set, gammas, bits) in [(Set::S65, [13, 18, 136], [4, 5, 8]), (Set::S87, [13, 22, 173], [4, 5, 8])] {
             for d_sig in [3, 10, 13, 15] {
                 let manifest = |relation| CommitmentManifest::for_set(set, 1 << d_sig, relation).unwrap();
                 let fips = manifest(Relation::HFips);

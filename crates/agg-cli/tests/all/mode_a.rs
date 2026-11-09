@@ -704,10 +704,14 @@ fn corrupted_aggregates_are_rejected() {
             )
         };
 
-        // The c~ list: bound by the record digest and the Flock statement.
+        // The c~ list: bound by the record digest and the Flock statement. The record digest
+        // enters the instance record, so every challenge changes and a work nonce may fail
+        // its predicate before the Flock statement is checked; either rejection is the binding.
         let mut p = honest.clone();
         p.c_tilde[3][0] ^= 1;
-        expect_rejected("c~ of record 3", &verify(&p), keccak);
+        expect_rejected("c~ of record 3", &verify(&p), |e: &VerifyError| {
+            keccak(e) || matches!(e, VerifyError::Transcript(TranscriptError::Work { .. }))
+        });
 
         // The final vector and the shares.
         let mut p = honest.clone();
@@ -1231,7 +1235,7 @@ fn tampered_witnesses_are_rejected_end_to_end() {
             report.parts.iter().all(|p| p.accepted),
             "the Flock part accepts"
         );
-        // A non-Boolean bit (0 -> 2 keeps every parity): Booleanity in stage 1.
+        // A non-Boolean bit (0 -> 2 keeps every parity): Booleanity in stage 3.
         run(
             "bit = 2",
             &main(&|m, t| {
@@ -1241,7 +1245,7 @@ fn tampered_witnesses_are_rejected_end_to_end() {
                     .expect("a zero bit");
                 *cell(m, t, Column::W1Bit(1, 0), y) = 2;
             }),
-            &at_stage(1),
+            &at_stage(3),
         );
         // w1' = 44 in the committed bits only: the bridge (Flock part) objects.
         let w44 = |m: &CommitmentManifest, t: &mut MainTables| {
@@ -1258,7 +1262,7 @@ fn tampered_witnesses_are_rejected_end_to_end() {
             &keccak,
         );
         // w1' = 44 in both copies: the sponge hashes to another c~ (Flock part); with the
-        // Flock verdict ignored the F_p side's range identity fails in stage 1.
+        // Flock verdict ignored the F_p side's range identity fails in stage 2.
         let bytes = run(
             "w1' = 44, both copies",
             &AggregateHooks {
@@ -1280,7 +1284,7 @@ fn tampered_witnesses_are_rejected_end_to_end() {
         );
         let error = outcome.outcome.expect_err("the range identity");
         eprintln!("w1' = 44, both copies, Flock verdict ignored: rejected with {error}");
-        assert!(at_stage(1)(&error), "{error:?}");
+        assert!(at_stage(2)(&error), "{error:?}");
         // A 16-bit value outside T_16 (stored 2^15): Akita refuses to commit it (the
         // width-16 coefficient bound is the balanced 16-bit interval), so no aggregate
         // exists to verify; the verifier's rejection of a looked-up value outside T_16 is

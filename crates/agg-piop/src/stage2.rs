@@ -62,10 +62,22 @@ pub fn fips_instances(manifest: &CommitmentManifest) -> usize {
     }
 }
 
-/// Batching coefficients: 9 under H-exact and H-FIPS (the leaves of `K_2` and `K_3` in
-/// each); 18 and 22 for ML-DSA-65 and ML-DSA-87 under H-exact.
+/// Batching coefficients: 10 for ML-DSA-44 under H-exact and H-FIPS (the leaves of `K_2`
+/// and `K_3` in each, and the range identity); 18 and 22 for ML-DSA-65 and ML-DSA-87.
 #[must_use]
 pub fn gamma_count(manifest: &CommitmentManifest) -> usize {
+    gamma_range_w1(manifest) + usize::from(has_range_w1(manifest))
+}
+
+/// True when the set checks `w_1' < m_w` by the cubic range identity (six bits).
+#[must_use]
+pub fn has_range_w1(manifest: &CommitmentManifest) -> bool {
+    manifest.shape().w1_bits == W1_BITS
+}
+
+/// Gamma index of `range_w1` (ML-DSA-44; the last coefficient).
+#[must_use]
+pub fn gamma_range_w1(manifest: &CommitmentManifest) -> usize {
     bits(manifest) + manifest.leaf_digits().len() + fips_instances(manifest)
 }
 
@@ -232,6 +244,22 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
                 .collect(),
         });
     }
+    if has_range_w1(manifest) {
+        // range_w1 = b_5 (b_4 + b_3 b_2) at r^(1), in the last main-domain group at r^(1) (or
+        // its own group when there is none).
+        let at = groups.iter().rposition(|g| g.domain == GroupRole::Main && g.eq == EqPoint::R1);
+        let at = at.unwrap_or_else(|| {
+            groups.push(GroupSpec { domain: GroupRole::Main, eq: EqPoint::R1, lanes: Vec::new(), instances: Vec::new() });
+            groups.len() - 1
+        });
+        let group = &mut groups[at];
+        let first = group.lanes.len();
+        group.lanes.extend([5, 4, 3, 2].map(|t| LaneId::Column(Column::W1Bit(t, 0))));
+        group.instances.push(InstanceSpec::new(
+            gamma_range_w1(manifest),
+            vec![Term::RangeW1([first, first + 1, first + 2, first + 3])],
+        ));
+    }
     StageSpec {
         stage: STAGE,
         degree: DEGREE,
@@ -240,8 +268,8 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
     }
 }
 
-/// The claimed sums in gamma order: the level-1 sum for `def_y1`, zero for the leaves and
-/// H-FIPS's `F_e`.
+/// The claimed sums in gamma order: the level-1 sum for `def_y1`, zero for the leaves,
+/// H-FIPS's `F_e` and the range identity.
 #[must_use]
 pub fn claimed_sums(manifest: &CommitmentManifest, stage1: &Stage1Claims, kappa1: &Kappa1Claims) -> Vec<E> {
     let mut claims = vec![E::zero(); gamma_count(manifest)];
@@ -379,18 +407,22 @@ mod tests {
     use jolt_field::Ring;
 
     #[test]
-    fn h_exact_stage_two_has_nine_instances_leaf6_and_the_k_leaves() {
+    fn h_exact_stage_two_has_ten_instances_leaf6_the_k_leaves_and_the_range() {
         let manifest = CommitmentManifest::for_relation(8, crate::manifest::Relation::HExact).unwrap();
         let spec = spec(&manifest);
         spec.validate().unwrap();
-        assert_eq!(gamma_count(&manifest), 9);
+        assert_eq!(gamma_count(&manifest), 10);
         let instances: usize = spec.groups.iter().map(|g| g.instances.len()).sum();
-        assert_eq!(instances, 9);
+        assert_eq!(instances, 10);
+        // leaf6[U_hi] and range_w1 share the main-domain group at r^(1).
         let leaves = &spec.groups[1];
         let u_hi = leaves.lane(LaneId::DigitSquare(Column::U_HI));
-        assert_eq!(leaves.instances.len(), 1);
+        assert_eq!(leaves.instances.len(), 2);
         assert_eq!(leaves.instances[0].gamma, 6);
         assert_eq!(leaves.instances[0].terms, vec![Term::Leaf(u_hi, LeafPoly::Q6)]);
+        assert_eq!(leaves.instances[1].gamma, 9);
+        assert_eq!(leaves.instances[1].terms, vec![Term::RangeW1([1, 2, 3, 4])]);
+        assert_eq!(leaves.lanes[1..], [5, 4, 3, 2].map(|t| LaneId::Column(Column::W1Bit(t, 0))));
         let k_leaf = &spec.groups[2];
         assert_eq!((k_leaf.domain, k_leaf.eq), (GroupRole::Proj, EqPoint::R1));
         assert_eq!(k_leaf.lanes, vec![LaneId::DigitSquare(Column::K_2), LaneId::DigitSquare(Column::K_3)]);
@@ -402,21 +434,25 @@ mod tests {
     }
 
     #[test]
-    fn h_fips_stage_two_has_def_y1_and_f3() {
+    fn h_fips_stage_two_has_def_y1_f3_and_the_range() {
         let manifest = CommitmentManifest::for_relation(8, crate::manifest::Relation::HFips).unwrap();
         let spec = spec(&manifest);
         spec.validate().unwrap();
-        assert_eq!(gamma_count(&manifest), 9);
+        assert_eq!(gamma_count(&manifest), 10);
         // def_y1, the leaves of K_2, K_3 on the projection domain (H-FIPS has no
-        // main-domain leaf digit) and F_e at r^(1).
+        // main-domain leaf digit), F_e and range_w1 at r^(1).
         assert_eq!(spec.groups.len(), 3);
         assert_eq!(spec.groups[1].lanes, vec![LaneId::DigitSquare(Column::K_2), LaneId::DigitSquare(Column::K_3)]);
         assert_eq!(spec.groups[1].instances[0].gamma, 6);
         let f3 = &spec.groups[2];
         assert_eq!(f3.eq, EqPoint::R1);
-        assert_eq!(f3.lanes, vec![LaneId::Column(Column::DELTA), LaneId::Column(Column::WRAP)]);
+        let mut lanes = vec![LaneId::Column(Column::DELTA), LaneId::Column(Column::WRAP)];
+        lanes.extend([5, 4, 3, 2].map(|t| LaneId::Column(Column::W1Bit(t, 0))));
+        assert_eq!(f3.lanes, lanes);
         assert_eq!(f3.instances[0].gamma, 8);
         assert_eq!(f3.instances[0].terms, vec![fips_edge_term()]);
+        assert_eq!((f3.instances[1].gamma, gamma_range_w1(&manifest)), (9, 9));
+        assert_eq!(f3.instances[1].terms, vec![Term::RangeW1([2, 3, 4, 5])]);
         assert!(fips_edge_term().degree() + 1 <= DEGREE);
         // F_e vanishes exactly on e in {0, 1, delta} for delta in {-1, 0, 1}.
         for delta in -1_i64..=1 {

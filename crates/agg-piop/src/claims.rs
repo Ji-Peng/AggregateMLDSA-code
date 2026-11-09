@@ -172,59 +172,55 @@ impl Kappa1Claims {
     }
 }
 
-/// The stage-1 terminal claims (18 for ML-DSA-44; `2 w + w k` with polynomial lanes):
-/// `y^(1)_t(r^(1)_1)`, `y^(2)_t(r^(1)_2)`, `b_t^(rho)(r^(1))` (bit-major, [`bit_columns`]).
+/// The stage-1 terminal claims (12 for ML-DSA-44; `2 w` with `w` bits of `w_1'`):
+/// `y^(1)_t(r^(1)_1)`, `y^(2)_t(r^(1)_2)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage1Claims {
     /// `y^(1)_t(r^(1)_1)`.
     pub y1: Vec<E>,
     /// `y^(2)_t(r^(1)_2)`.
     pub y2: Vec<E>,
-    /// `b_t^(rho)(r^(1))` in the order of [`bit_columns`].
-    pub b: Vec<E>,
 }
 
 impl Stage1Claims {
     /// Wire length of ML-DSA-44.
-    pub const LEN: usize = 3 * W1_BITS;
+    pub const LEN: usize = 2 * W1_BITS;
 
     /// Wire length of the manifest's parameter set.
     #[must_use]
     pub fn len(manifest: &CommitmentManifest) -> usize {
-        2 * w1_bits(manifest) + bit_columns(manifest).len()
+        2 * w1_bits(manifest)
     }
 
     /// Wire order.
     #[must_use]
     pub fn to_vec(&self) -> Vec<E> {
-        let mut out = Vec::with_capacity(self.y1.len() + self.y2.len() + self.b.len());
+        let mut out = Vec::with_capacity(self.y1.len() + self.y2.len());
         out.extend_from_slice(&self.y1);
         out.extend_from_slice(&self.y2);
-        out.extend_from_slice(&self.b);
         out
     }
 
     /// Parse the wire order of ML-DSA-44.
     #[must_use]
     pub fn from_slice(values: &[E]) -> Option<Self> {
-        Self::from_slice_shape(values, W1_BITS, W1_BITS)
+        Self::from_slice_shape(values, W1_BITS)
     }
 
     /// Parse the wire order of the manifest's parameter set.
     #[must_use]
     pub fn from_slice_for(manifest: &CommitmentManifest, values: &[E]) -> Option<Self> {
-        Self::from_slice_shape(values, w1_bits(manifest), bit_columns(manifest).len())
+        Self::from_slice_shape(values, w1_bits(manifest))
     }
 
-    fn from_slice_shape(values: &[E], bits: usize, bit_lanes: usize) -> Option<Self> {
-        if values.len() != 2 * bits + bit_lanes {
+    fn from_slice_shape(values: &[E], bits: usize) -> Option<Self> {
+        if values.len() != 2 * bits {
             return None;
         }
         let mut offset = 0;
         Some(Self {
             y1: take(values, &mut offset, bits),
             y2: take(values, &mut offset, bits),
-            b: take(values, &mut offset, bit_lanes),
         })
     }
 }

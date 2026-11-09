@@ -288,7 +288,7 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
         let manifest = CommitmentManifest::for_batch(256).unwrap();
         let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
         assert_eq!(output.proof.work.len(), plan.work_bits().div_ceil(8));
-        assert_eq!(output.proof.size().work, 310, "2,479 bits at N* = 2^8");
+        assert_eq!(output.proof.size().work, 308, "2,461 bits at N* = 2^8");
         let mut offset = 0;
         let mut seen = std::collections::HashSet::new();
         for site in plan.sites() {
@@ -312,9 +312,11 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
                 }
                 assert_eq!(read(&tampered.work), wrong);
                 let err = rejected(verify(&tampered));
-                // The predicate fails at the site itself, whether the honest nonce was zero
-                // (then `wrong = 1`) or above it (then `wrong = honest - 1`).
-                assert!(format!("{err}").contains("work nonce rejected"), "{site:?}: {err}");
+                // Above zero the prover's nonce is the smallest passing one, so `honest - 1`
+                // fails the predicate at the site itself. From zero, `wrong = 1` passes the
+                // predicate with probability `2^-g`; the challenge then changes and a later
+                // check rejects, so only the rejection itself is required.
+                assert!(honest == 0 || format!("{err}").contains("work nonce rejected"), "{site:?}: {err}");
             }
             offset += width;
         }
@@ -434,9 +436,9 @@ fn mode_b_h_exact_round_trips_and_the_relation_is_the_callers() {
         let public = fixture.public();
         assert_eq!(output.proof.stage2.claims.squares.len(), 3);
         assert_eq!(output.proof.stage3.claims.0.len(), 36);
-        // 256 records: d_main = 18 rounds of 4 + 5 + 3 elements, 13 + 18 + 6 + 9 + 1 + 36
+        // 256 records: d_main = 18 rounds of 3 + 5 + 3 elements, 13 + 12 + 6 + 9 + 1 + 36
         // claims (the projection claim c after stage 2).
-        assert_eq!(output.proof.size().piop, 16 * (83 + 12 * 18));
+        assert_eq!(output.proof.size().piop, 16 * (77 + 11 * 18));
         let as_fips = verify_mode_b(&public, &bytes, &bridge, Relation::HFips, None);
         assert!(matches!(
             rejected(as_fips),
@@ -523,8 +525,8 @@ fn mode_b_h_fips_round_trips_and_cross_relation_rejections() {
         assert_eq!(output.proof.stage2.claims.squares.len(), 2);
         assert_eq!(output.proof.stage2.claims.fips.len(), 2);
         assert_eq!(output.proof.stage3.claims.0.len(), 40);
-        // 256 records: d_main = 18 rounds of 4 + 5 + 3 elements, 13 + 18 + 6 + 10 + 1 + 40 claims.
-        assert_eq!(output.proof.size().piop, 16 * (88 + 12 * 18));
+        // 256 records: d_main = 18 rounds of 3 + 5 + 3 elements, 13 + 12 + 6 + 10 + 1 + 40 claims.
+        assert_eq!(output.proof.size().piop, 16 * (82 + 11 * 18));
         eprintln!("N = 256, H-FIPS (with two weight-80 corner records): aggregate {} bytes, prover {}", bytes.len(), output.timings);
         let report = verify_mode_b(&public, &bytes, &bridge, Relation::HFips, None);
         report_line("N = 256 H-FIPS: verifier uncached", &report);
@@ -691,7 +693,7 @@ fn every_stage_tampering_is_rejected_end_to_end() {
             &tampered(&|m| *cell(&manifest, m, Column::W1Bit(0, 0), x) ^= 1),
             &|e| matches!(e, VerifyError::Keccak(0)),
         );
-        // A non-Boolean bit (0 -> 2 keeps every parity): Booleanity in stage 1.
+        // A non-Boolean bit (0 -> 2 keeps every parity): Booleanity in stage 3.
         let even = (0..1024)
             .map(|p| main_index(p % 256, p / 256, 7))
             .find(|&y| *cell(&manifest, &mut honest.clone(), Column::W1Bit(1, 0), y) == 0)
@@ -699,7 +701,7 @@ fn every_stage_tampering_is_rejected_end_to_end() {
         expect(
             "bit = 2",
             &tampered(&|m| *cell(&manifest, m, Column::W1Bit(1, 0), even) = 2),
-            &at_stage(1),
+            &at_stage(3),
         );
         // w1' = 44 in the committed bits only: the projection.
         let w44 = tampered(&|m| {

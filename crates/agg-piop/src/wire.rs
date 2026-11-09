@@ -554,9 +554,9 @@ mod tests {
             let segments = proof.flock_proofs.len();
             let join = &bytes[bytes.len() - tail - 9 * segments..bytes.len() - tail];
             assert_eq!(join, [5, 0, 0, 0, 3, 3, 3, 3, 3].repeat(segments));
-            // Relation H-FIPS: 12 elements per round; the shared projection claim after the
+            // Relation H-FIPS: 11 elements per round; the shared projection claim after the
             // stage-2 terminal.
-            assert_eq!(proof.piop_bytes(), 16 * (13 + 18 + 6 + 10 + 1 + 40 + 12 * proof.stage1.rounds.len()));
+            assert_eq!(proof.piop_bytes(), 16 * (13 + 12 + 6 + 10 + 1 + 40 + 11 * proof.stage1.rounds.len()));
             let shape = CommitmentManifest::for_batch(records).unwrap().lookup_shape();
             assert_eq!(size.lookup, 16 * (shape.proof_elements() + 7));
             assert_eq!(AggregateProof::from_bytes(&bytes[..bytes.len() - 1]), Err(WireError::Truncated));
@@ -573,7 +573,7 @@ mod tests {
             }
             // The nonce stream has the plan's exact length.
             assert_eq!(size.work, work_bytes(&CommitmentManifest::for_batch(records).unwrap()));
-            assert!(size.work >= 227);
+            assert!(size.work >= 226);
             // Relation byte: 1 (H-exact), 2 (H-FIPS); 0 and 3 and above are unknown. The parser
             // reads the relation from the header (a rewritten flag may still parse; the
             // verifier compares it with the relation it expects).
@@ -624,15 +624,15 @@ mod tests {
             assert_eq!(parsed.relation, Relation::HExact);
             assert_eq!(parsed.stage2.claims.squares.len(), 3);
             assert_eq!(parsed.stage3.claims.0.len(), 36);
-            // H-exact: 13 + 18 + 6 + 9 + 1 + 36 claims and 12 elements per round.
+            // H-exact: 13 + 12 + 6 + 9 + 1 + 36 claims and 11 elements per round.
             let rounds = proof.stage1.rounds.len();
-            assert_eq!(proof.piop_bytes(), 16 * (13 + 18 + 6 + 9 + 1 + 36 + 12 * rounds));
+            assert_eq!(proof.piop_bytes(), 16 * (13 + 12 + 6 + 9 + 1 + 36 + 11 * rounds));
             assert_eq!(proof.size().total(), bytes.len());
             // A truncated proof is rejected.
             assert_eq!(AggregateProof::from_bytes(&bytes[..bytes.len() - 200]), Err(WireError::Truncated));
         }
-        // At 2^15 the stage messages and claims take 6,128 bytes (25 rounds).
-        assert_eq!(16 * (13 + 18 + 6 + 9 + 1 + 36 + 12 * 25), 6_128);
+        // At 2^15 the stage messages and claims take 5,632 bytes (25 rounds).
+        assert_eq!(16 * (13 + 12 + 6 + 9 + 1 + 36 + 11 * 25), 5_632);
     }
 
     #[test]
@@ -648,14 +648,14 @@ mod tests {
             assert_eq!(parsed.stage2.claims.squares.len(), 2);
             assert_eq!(parsed.stage2.claims.fips.len(), 2);
             assert_eq!(parsed.stage3.claims.0.len(), 40);
-            // H-FIPS: 13 + 18 + 6 + 10 + 1 + 40 claims and 12 elements per round.
+            // H-FIPS: 13 + 12 + 6 + 10 + 1 + 40 claims and 11 elements per round.
             let rounds = proof.stage1.rounds.len();
-            assert_eq!(proof.piop_bytes(), 16 * (13 + 18 + 6 + 10 + 1 + 40 + 12 * rounds));
+            assert_eq!(proof.piop_bytes(), 16 * (13 + 12 + 6 + 10 + 1 + 40 + 11 * rounds));
             assert_eq!(proof.size().total(), bytes.len());
             assert_eq!(AggregateProof::from_bytes(&bytes[..bytes.len() - 200]), Err(WireError::Truncated));
         }
-        // At 2^15 the stage messages and claims take 6,208 bytes (25 rounds).
-        assert_eq!(16 * (13 + 18 + 6 + 10 + 1 + 40 + 12 * 25), 6_208);
+        // At 2^15 the stage messages and claims take 5,712 bytes (25 rounds).
+        assert_eq!(16 * (13 + 12 + 6 + 10 + 1 + 40 + 11 * 25), 5_712);
     }
 
     #[test]

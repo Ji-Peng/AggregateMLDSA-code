@@ -5,8 +5,9 @@
 //!
 //! `gamma^(3)` order ([`Gammas`], with `o = 1 + links + bools`): `ring` (0), one `link` per
 //! leaf-checked digit (H-exact: `link[U_hi]` 1, `link[K_2]` 2, `link[K_3]` 3), one `bool` per Boolean value digit (H-exact: `bool[bz_hi]`
-//! 4, `bool[a_z]` 5; claim 0), then the reductions: `b_t` from `r^(1)`
-//! (`o..o+6`), `b_t` from `r^(2)`, `y^(2)_t` from `tau_2`, `y^(2)_t` from `r^(1)_2`, `K^(2)_t`
+//! 4, `bool[a_z]` 5; claim 0), the Booleanity zero-checks `bool_b[t]` of the w1Encode bits
+//! at `r^(2)` (`o..o+6`, claim 0; in the `eq(r^(2))` group, whose lanes hold the bits for the
+//! ring identity and their reductions anyway), then the reductions: `b_t` from `r^(2)`, `y^(2)_t` from `tau_2`, `y^(2)_t` from `r^(1)_2`, `K^(2)_t`
 //! from `tau_2`, `K^(3)` from `tau_3`, `K^(1)_t` from `r^(1)_1`, the lookup stacks
 //! `j = 0..5`: `sum_x eq(pi_j, x) sum_c w_{j,c} f_c(x) = g_j(pi_j, pi_top) + 2^15 sum_{c >= cols}
 //! w_{j,c}` with `w_{j,c} = eq(pi_top, c)` (`StackShape::column_claim`), one part per column
@@ -40,8 +41,8 @@
 //! their `A z` parts are one unbatched part per lane `s` of `z`, `w_A^(s) z^(s)`, whose weight
 //! combines the rows by the coefficients `gamma_rho` of the instances (`lane_public`).
 //! Then `l + k + 3` links (`Z_mid^(s)`, `U_mid^(rho)`, `K_2`, `K_3`, `K_4`), `l + k` Booleanity
-//! checks (`a_z^(s)`, `a_u^(rho)`), the reductions of the `4 k` bit polynomials from `r^(1)`
-//! and from `r^(2)`, the level reductions over four bits, the stacks of the set (7 or 8), and
+//! checks (`a_z^(s)`, `a_u^(rho)`), the Booleanity of the `4 k` bit polynomials and their
+//! reductions from `r^(2)`, the level reductions over four bits, the stacks of the set (7 or 8), and
 //! the projection identity, whose `v` side has one weight `W^(rho)` per lane of `v`
 //! (`projection::lane_weight_tables`): 105 coefficients for ML-DSA-65, 132 for ML-DSA-87.
 //! Relation H-FIPS with lanes: the links lose `U_mid^(rho)` (the magnitude `L` of row `rho`
@@ -149,7 +150,8 @@ impl Gammas {
         }
     }
 
-    /// First reduction index `o = rings + links + bools (+ 4 H-FIPS checks)`.
+    /// Index `o = rings + links + bools (+ 4 H-FIPS checks)` of the bit Booleanity checks, which
+    /// the reductions follow.
     const fn first_reduction(self) -> usize {
         self.rings + self.links + self.bools + self.fips_checks()
     }
@@ -229,10 +231,10 @@ impl Gammas {
         self.rings + self.links + k
     }
 
-    /// Gamma index of the reduction of bit polynomial `i` (`claims::bit_columns` order)
-    /// from `r^(1)`.
+    /// Gamma index of the Booleanity zero-check of bit polynomial `i` (`claims::bit_columns`
+    /// order) at `r^(2)`.
     #[must_use]
-    pub const fn b_r1(self, i: usize) -> usize {
+    pub const fn bool_b(self, i: usize) -> usize {
         self.first_reduction() + i
     }
 
@@ -485,6 +487,11 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
     instances.extend(
         bits.iter()
             .enumerate()
+            .map(|(i, &column)| InstanceSpec::new(gammas.bool_b(i), vec![Term::Bool(position(column))])),
+    );
+    instances.extend(
+        bits.iter()
+            .enumerate()
             .map(|(i, &column)| InstanceSpec::new(gammas.b_r2(i), vec![Term::Product(vec![position(column)])])),
     );
     groups.push(GroupSpec {
@@ -549,15 +556,6 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
             }],
         });
     }
-
-    // Main domain, eq(r^(1)): bit reductions from r^(1).
-    let bit_ids = column_lanes(&bits);
-    groups.push(GroupSpec {
-        domain: GroupRole::Main,
-        eq: EqPoint::R1,
-        instances: reductions(&bit_ids, |i| gammas.b_r1(i)),
-        lanes: bit_ids,
-    });
 
     // D_1, eq(r^(1)_1): K^(1)_t reductions.
     let kappa1 = column_lanes(&manifest.stack_columns(manifest.carry_stack(1)));
@@ -681,7 +679,8 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
     }
 }
 
-/// The claimed sums in gamma order (the Booleanity zero-checks claim zero); `t_at_r2[rho]`
+/// The claimed sums in gamma order (the Booleanity zero-checks claim zero, the bits' among
+/// them); `t_at_r2[rho]`
 /// is `T~_rho(r^(2))` (one value, `T(r^(2))`, for ML-DSA-44) and `stacks[j]` stack `j`'s
 /// column claim ([`stack_reductions`]).
 #[must_use]
@@ -712,7 +711,6 @@ pub fn claimed_sums(
         }
     }
     for i in 0..gammas.bit_lanes {
-        claims[gammas.b_r1(i)] = stage1.b[i];
         claims[gammas.b_r2(i)] = stage2.b[i];
     }
     for t in 0..gammas.bits {
@@ -1064,7 +1062,7 @@ mod tests {
         let spec = check_spec(&manifest, 50);
         let gammas = Gammas::new(&manifest);
         assert_eq!((gammas.links, gammas.bools), (3, 2));
-        assert_eq!((gammas.bool(0), gammas.bool(1), gammas.b_r1(0)), (4, 5, 6));
+        assert_eq!((gammas.bool(0), gammas.bool(1), gammas.bool_b(0)), (4, 5, 6));
         assert_eq!((gammas.kappa3_tau(), gammas.stack(4)), (36, 47));
         // H-exact: link[u_hi] at 1 (link[k_2], link[k_3] at 2, 3 are on the projection
         // domain), bool[bz_hi] at 4, bool[a_z] at 5, all in the eq(r^(2)) group; the w_A group reads
@@ -1109,7 +1107,7 @@ mod tests {
         // ring 0, link[k_2, k_3] 1, 2, bool[bz_hi, l_hi, a_z] 3..5, F_s, F_delta, F_w1, F_omega 6..9,
         // reductions from 10, the delta and e reductions 47, 48, the stacks 49..53, the
         // projection 54, 55.
-        assert_eq!((gammas.fips_check(0), gammas.fips_check(3), gammas.b_r1(0)), (6, 9, 10));
+        assert_eq!((gammas.fips_check(0), gammas.fips_check(3), gammas.bool_b(0)), (6, 9, 10));
         assert_eq!((gammas.fips_reduction(0), gammas.fips_reduction(1)), (47, 48));
         assert_eq!((gammas.stack(0), gammas.stack(4)), (49, 53));
         assert_eq!((gammas.proj_v(), gammas.proj_k()), (54, 55));
@@ -1231,7 +1229,7 @@ mod tests {
 
     /// ML-DSA-65 and ML-DSA-87: `k` ring instances whose `A z` parts are the `l` unbatched
     /// weight groups, `l + k + 3` links, `l + k` Booleanity checks, `4 k` bit polynomials
-    /// reduced from `r^(1)` and `r^(2)`, one `W^(rho)` group per lane of `v`, and every
+    /// checked Boolean and reduced at `r^(2)`, one `W^(rho)` group per lane of `v`, and every
     /// committed polynomial read at `r^(3)`.
     #[test]
     fn lane_sets_have_one_ring_instance_per_row() {
@@ -1313,7 +1311,7 @@ mod tests {
         let gammas = Gammas::new(manifest);
         assert_eq!(gammas.count(), count);
         assert_eq!(spec.gamma_count, count);
-        assert_eq!(spec.groups.len(), 9 + STACKS);
+        assert_eq!(spec.groups.len(), 8 + STACKS);
         // The ring instance spans two groups and each stack reduction one part per column;
         // every other gamma index appears once.
         let mut counts = vec![0; count];

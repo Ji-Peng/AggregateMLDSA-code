@@ -118,7 +118,7 @@ fn check_honest(batch: &impl PiopBatch, proof: &PiopProof) {
         let columns = manifest.stack_columns(j);
         assert!(columns.iter().all(|c| tables.column(*c).len() == 1 << low.len()));
     }
-    // Stage 1 terminal: y^(1) (virtual), y^(2), b at r^(1); stage 2: b and P_Z at r^(2).
+    // Stage 1 terminal: y^(1) (virtual), y^(2) at r^(1); stage 2: b and P_Z at r^(2).
     let y1 = parity1_tables_for(tables, &batch.matrices().m1);
     let r1_1 = suffix(&points.r1, manifest.domain_vars(GroupRole::Level1));
     let r1_2 = suffix(&points.r1, manifest.domain_vars(GroupRole::Level2));
@@ -132,10 +132,9 @@ fn check_honest(batch: &impl PiopBatch, proof: &PiopProof) {
         );
     }
     let bit_columns = agg_piop::claims::bit_columns(manifest);
-    assert_eq!(proof.stage1.claims.b.len(), bit_columns.len());
+    assert_eq!(proof.stage2.claims.b.len(), bit_columns.len());
     for (i, &column) in bit_columns.iter().enumerate() {
         let bit = tables.column(column);
-        assert_eq!(proof.stage1.claims.b[i], bit.evaluate(&points.r1), "{}", column.name());
         assert_eq!(proof.stage2.claims.b[i], bit.evaluate(&points.r2), "{}", column.name());
     }
     for (k, column) in manifest.leaf_digits().into_iter().enumerate() {
@@ -417,7 +416,8 @@ fn tampered_witnesses_fail_at_the_stated_stage() {
         let mut main = batch.main.clone();
         main.columns_mut()[narrow(Column::W1Bit(0, 0))][x] ^= 1;
         case("flipped bit", main, Some(3));
-        // A non-Boolean bit and w_1' = 44: stage 1.
+        // A non-Boolean bit: the Booleanity zero-check of stage 3; w_1' = 44: the range
+        // identity of stage 2.
         let mut main = batch.main.clone();
         let column = narrow(Column::W1Bit(1, 0));
         let y = (0..1024)
@@ -425,12 +425,12 @@ fn tampered_witnesses_fail_at_the_stated_stage() {
             .find(|&y| main.columns()[column][y] == 0)
             .unwrap();
         main.columns_mut()[column][y] = 2;
-        case("bit = 2", main, Some(1));
+        case("bit = 2", main, Some(3));
         let mut main = batch.main.clone();
         for (t, bit) in [0, 0, 1, 1, 0, 1].into_iter().enumerate() {
             main.columns_mut()[narrow(Column::W1Bit(t as u8, 0))][x] = bit;
         }
-        case("w1' = 44", main, Some(1));
+        case("w1' = 44", main, Some(2));
         // The honest tables pass.
         case("honest", batch.main.clone(), None);
     });
@@ -503,7 +503,7 @@ fn lane_round_trip<P: agg_witness::params::ParamSet>(relation: Relation, seed: u
     bad.stage1.rounds[3][1] += E::from_u64(1);
     assert_eq!(rejected(&bad), Some(1));
     let mut bad = proof.clone();
-    bad.stage1.claims.b[7] += E::from_u64(1);
+    bad.stage1.claims.y2[3] += E::from_u64(1);
     assert_eq!(rejected(&bad), Some(1));
     let mut bad = proof.clone();
     bad.stage2.claims.squares[4] += E::from_u64(1);
@@ -566,12 +566,12 @@ fn lane_round_trip<P: agg_witness::params::ParamSet>(relation: Relation, seed: u
     let mut main = batch.main.clone();
     main.columns_mut()[narrow(Column::W1Bit(2, 3))][x] ^= 1;
     case("flipped bit", main, Some(3));
-    // A non-Boolean bit: stage 1.
+    // A non-Boolean bit: the Booleanity zero-check of stage 3.
     let mut main = batch.main.clone();
     let column = narrow(Column::W1Bit(1, 4));
     let cell = (0..256).map(|j| j + 256 * 7).find(|&y| main.columns()[column][y] == 0).unwrap();
     main.columns_mut()[column][cell] = 2;
-    case("bit = 2", main, Some(1));
+    case("bit = 2", main, Some(3));
     // z unchanged: Z_lo + 2^16 with Z_mid - 1 (a looked-up value in [2^16, 2^17)): only the
     // lookup sees it.
     let z_lo = Column::lane_digit(z, 0, 2);
