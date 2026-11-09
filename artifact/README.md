@@ -178,26 +178,26 @@ registers and EVEX-only mnemonics are counted in `build.json`).
 
 The following medians were measured on an idle AMD EPYC 9355 node (Zen 5) at
 $N = 32{,}768$ under H-FIPS on 16C32T, one warm-up and five runs (`tab:prove`,
-`tab:bytes`, `tab:baselines`). Node-to-node spread is a few percent. The 8C16T
-and 1T medians are those `./run.sh full` produces.
+`tab:bytes`, `tab:baselines`). Node-to-node spread is a few percent. All three
+allocations are reproduced by `./run.sh full`.
 
-| Set | Tier | 16C32T prove | 16C32T verify (unc. / cached) | Aggregate (B/sig) |
-| --- | --- | --- | --- | --- |
-| 44 | `ifma` | 2.81 s | 61 / 54 ms | 1,612,294 B (49.2) |
-| 44 | `avx512` | 2.83 s | -- | 1,612,294 B (49.2) |
-| 44 | `avx2` | 3.12 s | -- | 1,612,294 B (49.2) |
-| 65 | `ifma` | 3.36 s | 81 / 69 ms | 2,143,395 B (65.4) |
-| 65 | `avx512` | 3.40 s | -- | 2,143,395 B (65.4) |
-| 65 | `avx2` | 3.73 s | -- | 2,143,395 B (65.4) |
-| 87 | `ifma` | 4.24 s | 109 / 87 ms | 2,710,812 B (82.7) |
-| 87 | `avx512` | 4.28 s | -- | 2,710,812 B (82.7) |
-| 87 | `avx2` | 4.71 s | -- | 2,710,812 B (82.7) |
+| Set | Tier | 16C32T prove | 8C16T prove | 1T prove | 16C32T verify (unc. / cached) | Aggregate (B/sig) |
+| --- | --- | --- | --- | --- | --- | --- |
+| 44 | `ifma` | 2.81 s | 4.23 s | 31.01 s | 63 / 55 ms | 1,612,294 B (49.2) |
+| 44 | `avx512` | 2.84 s | 4.26 s | 31.09 s | -- | 1,612,294 B (49.2) |
+| 44 | `avx2` | 3.10 s | 4.85 s | 37.80 s | -- | 1,612,294 B (49.2) |
+| 65 | `ifma` | 3.37 s | 4.90 s | 35.52 s | 81 / 69 ms | 2,143,395 B (65.4) |
+| 65 | `avx512` | 3.42 s | 4.92 s | 35.72 s | -- | 2,143,395 B (65.4) |
+| 65 | `avx2` | 3.71 s | 5.59 s | 43.56 s | -- | 2,143,395 B (65.4) |
+| 87 | `ifma` | 4.24 s | 6.70 s | 46.41 s | 110 / 87 ms | 2,710,812 B (82.7) |
+| 87 | `avx512` | 4.26 s | 6.63 s | 46.50 s | -- | 2,710,812 B (82.7) |
+| 87 | `avx2` | 4.69 s | 7.49 s | 56.81 s | -- | 2,710,812 B (82.7) |
 
-On 16C32T with IFMA, the opt-in reference relation H-exact proves 9.4% (44),
-12.5% (65) and 11.2% (87) faster than H-FIPS. In `tab:ablation` (ML-DSA-44,
-32K, 16C32T), running Flock after the PIOP (`AGG_FLOCK_THREADS=0`) costs about
-0.3 s against the default, and the mode-B public-bits aggregate takes about
-803 B/sig (estimates for H-FIPS). Absolute times on another microarchitecture
+On 16C32T with IFMA, the opt-in reference relation H-exact proves 9.9% (44),
+13.3% (65) and 11.2% (87) faster than H-FIPS. In `tab:ablation` (ML-DSA-44,
+32K, 16C32T), running Flock after the PIOP (`AGG_FLOCK_THREADS=0`) costs
+0.35 s against the default, and the mode-B public-bits aggregate takes 2.25 s
+and 803.1 B/sig. Absolute times on another microarchitecture
 differ; the tier order and the byte identity are the portable parts of the
 result.
 

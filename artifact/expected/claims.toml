@@ -26,7 +26,7 @@ statement = "Prove and verify times on a 16-core Zen 5 machine match the paper's
 table = "tab-prove.tex"
 cell = "IFMA / AVX-512F / AVX2 prove times; tab-scaling.tex verify times"
 command = "./run.sh full"
-expected = "paper medians on 16C32T at 32K under H-FIPS (IFMA / AVX-512F / AVX2: 2.81 / 2.83 / 3.12 s for 44, 3.36 / 3.40 / 3.73 s for 65, 4.24 / 4.28 / 4.71 s for 87)"
+expected = "paper medians on 16C32T at 32K under H-FIPS (IFMA / AVX-512F / AVX2: 2.81 / 2.84 / 3.10 s for 44, 3.37 / 3.42 / 3.71 s for 65, 4.24 / 4.26 / 4.69 s for 87)"
 tolerance = "+-10% on the same CPU class; other microarchitectures differ"
 
 [[claim]]
