@@ -31,7 +31,10 @@
 //! ([`FipsColumn`], appended to `G_main4` after `a_z`), so
 //! `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e`; and the per-signature hint slack `u_h`
 //! ([`DigitValue::HintSlack`]), a thirteenth `G_2` polynomial on `D_2` (whose last `d_sig`
-//! variables are the signature index) in the free slot 6 of lookup stack 2.
+//! variables are the signature index) in the free slot 6 of lookup stack 2. Under
+//! `HashField::Fp` (no `G_2`) `u_h` is instead the last polynomial of `G_k` on `D_k`, whose last
+//! `d_sig` variables are also the signature index, and the third column of the projection
+//! stack `[K_0 | K_1 | u_h]` ([`group_columns_in`]).
 //!
 //! ML-DSA-65 and ML-DSA-87 (every relation, [`SetShape`]): the vector index is a
 //! polynomial lane instead of two domain variables, so the main domain is `(j, i)` with
@@ -262,6 +265,9 @@ pub enum DigitValue {
     Ld,
     /// Relation H-FIPS's hint slack `u_h = omega - sum delta^2` on `D_2` (looked up).
     HintSlack,
+    /// The same hint slack on the projection domain `D_k` (looked up): its home under
+    /// `HashField::Fp`, which has no `G_2`.
+    HintSlackProj,
     /// Level-1 carry `kappa^(1)_t` (domain `D_1`).
     Kappa1(u8),
     /// Level-2 carry `kappa^(2)_t` (domain `D_2`).
@@ -285,7 +291,7 @@ impl DigitValue {
             Self::Ld => ValueForm::BitSlack(L_BIT_SLACK),
             Self::Ud => ValueForm::DigitSlack(U_DIGIT_SLACK),
             Self::K5 => ValueForm::Radix(K39_DIGITS),
-            Self::Kappa1(_) | Self::Kappa2(_) | Self::Kappa3 | Self::HintSlack => {
+            Self::Kappa1(_) | Self::Kappa2(_) | Self::Kappa3 | Self::HintSlack | Self::HintSlackProj => {
                 ValueForm::Radix(CARRY16_DIGITS)
             }
         }
@@ -300,7 +306,7 @@ impl DigitValue {
             }
             Self::Zx | Self::Zdx(_) | Self::U | Self::Ud | Self::L | Self::Ld => Group::Main,
             Self::V => Group::Main16,
-            Self::K | Self::K5 => Group::Proj,
+            Self::K | Self::K5 | Self::HintSlackProj => Group::Proj,
             Self::Kappa1(_) => Group::Level1,
             Self::Kappa2(_) | Self::HintSlack => Group::Level2,
             Self::Kappa3 => Group::Level3,
@@ -432,6 +438,13 @@ impl Column {
     /// H-FIPS's hint slack `u_h` (stored `u_h - 2^15`, on `D_2`).
     pub const HINT_SLACK: Self = Self::Digit {
         value: DigitValue::HintSlack,
+        digit: 0,
+        lane: 0,
+    };
+    /// H-FIPS's hint slack `u_h` under `HashField::Fp` (stored `u_h - 2^15`, on `D_k`, the
+    /// last polynomial of `G_k`).
+    pub const HINT_SLACK_PROJ: Self = Self::Digit {
+        value: DigitValue::HintSlackProj,
         digit: 0,
         lane: 0,
     };
@@ -633,7 +646,7 @@ impl Column {
                 DigitValue::Zdx(_) => ["z_lo", "z_mid", "a_z"][usize::from(digit)].to_owned(),
                 DigitValue::Ud => ["u_lo", "u_mid", "a_u"][usize::from(digit)].to_owned(),
                 DigitValue::Ld => ["l_lo", "l_mid", "a_l"][usize::from(digit)].to_owned(),
-                DigitValue::HintSlack => "u_h".to_owned(),
+                DigitValue::HintSlack | DigitValue::HintSlackProj => "u_h".to_owned(),
                 DigitValue::Kappa1(t) => format!("kappa1_{t}"),
                 DigitValue::Kappa2(t) => format!("kappa2_{t}"),
                 DigitValue::Kappa3 => "kappa3".to_owned(),
@@ -858,6 +871,20 @@ pub fn group_columns_for(set: Set, role: GroupRole, relation: Relation) -> Vec<C
     }
 }
 
+/// The canonical polynomial order of a group of `set` under `relation` and `hash_field`:
+/// [`group_columns_for`], except that relation H-FIPS under `HashField::Fp` appends the hint
+/// slack `u_h` ([`Column::HINT_SLACK_PROJ`]) to `G_k`. `HashField::Fp` has no `G_2`, and `D_k`
+/// ends in the `d_sig` signature variables as `D_2` does, so `u_h` keeps its `D_2` form there
+/// (one cell per signature, the others zero) without a group or catalog class of its own.
+#[must_use]
+pub fn group_columns_in(set: Set, role: GroupRole, relation: Relation, hash_field: HashField) -> Vec<Column> {
+    let mut columns = group_columns_for(set, role, relation);
+    if role == Group::Proj && relation == Relation::HFips && hash_field == HashField::Fp {
+        columns.push(Column::HINT_SLACK_PROJ);
+    }
+    columns
+}
+
 /// One committed group's exact public shape.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GroupDescriptor {
@@ -876,14 +903,14 @@ pub struct GroupDescriptor {
 }
 
 impl GroupDescriptor {
-    fn new(role: GroupRole, set: Set, d_sig: usize, relation: Relation) -> Self {
+    fn new(role: GroupRole, set: Set, d_sig: usize, relation: Relation, hash_field: HashField) -> Self {
         Self {
             role,
             round: role.round(),
             family: role.family(),
             logical_vars: role.logical_vars(set, d_sig),
             physical_vars: role.physical_vars(set, d_sig),
-            columns: group_columns_for(set, role, relation),
+            columns: group_columns_in(set, role, relation, hash_field),
         }
     }
 
@@ -1070,7 +1097,7 @@ impl CommitmentManifest {
             groups: hash_field
                 .groups()
                 .iter()
-                .map(|&role| GroupDescriptor::new(role, set, d_sig, relation))
+                .map(|&role| GroupDescriptor::new(role, set, d_sig, relation, hash_field))
                 .collect(),
             catalog_row: layout.row_name(),
         })
@@ -1260,6 +1287,17 @@ impl CommitmentManifest {
         agg_witness::dispatch_set!(self.set, |P| P::M_W - 1)
     }
 
+    /// H-FIPS's hint slack column: `u_h` on `D_2` (`G_2`, slot 6 of lookup stack 2) under
+    /// `HashField::Gf2`, on `D_k` (`G_k`, third column of the projection stack) under
+    /// `HashField::Fp`.
+    #[must_use]
+    pub const fn hint_slack(&self) -> Column {
+        match self.hash_field {
+            HashField::Gf2 => Column::HINT_SLACK,
+            HashField::Fp => Column::HINT_SLACK_PROJ,
+        }
+    }
+
     /// The H-FIPS column `column` of every row lane (one for ML-DSA-44).
     #[must_use]
     pub fn fips_lanes(&self, column: FipsColumn) -> Vec<Column> {
@@ -1276,7 +1314,11 @@ impl CommitmentManifest {
                 if stack < main_stacks {
                     stack_columns_for(self.set, stack, self.relation)
                 } else if stack == main_stacks {
-                    value_columns(self.k_value())[..2].to_vec()
+                    let mut columns = value_columns(self.k_value())[..2].to_vec();
+                    if self.is_fips() {
+                        columns.push(Column::HINT_SLACK_PROJ);
+                    }
+                    columns
                 } else {
                     panic!("{} lookup stacks under Fp", main_stacks + 1)
                 }
@@ -1310,7 +1352,8 @@ impl CommitmentManifest {
         self.main_stacks() + level - 1
     }
 
-    /// The lookup stack `[K_0 | K_1]` of the projection digits (the last one).
+    /// The lookup stack `[K_0 | K_1]` of the projection digits (the last one; `[K_0 | K_1 |
+    /// u_h]` under `HashField::Fp` and H-FIPS).
     #[must_use]
     pub fn proj_stack(&self) -> usize {
         match self.hash_field {
@@ -2174,5 +2217,36 @@ mod tests {
         assert_eq!(m87.group(Group::KeccakA(0)).polynomial_count(), 70);
         assert_eq!(m87.group(Group::KeccakA(0)).logical_vars, 20);
         assert_eq!(m87.catalog_row(), "mldsa-87-p16x-fp-batch-1024-mult-final");
+    }
+
+    #[test]
+    fn fp_h_fips_puts_the_hint_slack_in_g_k() {
+        let manifest = CommitmentManifest::for_relation_fp(1024, Relation::HFips).unwrap();
+        assert_eq!(manifest.catalog_row(), "mldsa-44-p16f-fp-batch-1024-mult-final");
+        let counts: Vec<usize> = manifest.groups().iter().map(GroupDescriptor::polynomial_count).collect();
+        assert_eq!(counts, [4, 12, 55, 55, 55, 55, 55, 55, 55, 5, 7]);
+        assert_eq!((manifest.total_polynomials(), manifest.stage3_polynomials()), (413, 406));
+        // u_h: the last G_k polynomial on D_k (7 + d_sig variables, the last d_sig of which are
+        // the signature index), looked up, third column of the projection stack (4 slots).
+        let hint = manifest.hint_slack();
+        assert_eq!(hint, Column::HINT_SLACK_PROJ);
+        assert_eq!(manifest.locate(hint), (Group::Proj, 4));
+        assert_eq!((hint.domain(), hint.alphabet_code(), hint.name()), (Group::Proj, LOOKUP_ALPHABET_CODE, "u_h".to_owned()));
+        assert!(hint.is_lookup() && !hint.is_leaf_digit() && !hint.is_bool_digit());
+        assert_eq!(manifest.stack_columns(1), [Column::K_0, Column::K_1, Column::HINT_SLACK_PROJ]);
+        let lookup = manifest.lookup_shape();
+        assert_eq!((lookup.stacks[1].columns, lookup.stacks[1].slots(), lookup.stacks[1].vars), (3, 4, 17));
+        assert_eq!(manifest.leaf_digits(), [Column::K_2, Column::K_3]);
+        // The layout matches the catalog's (G_k with five polynomials) and is bound in event 0:
+        // the G_k descriptor and the stack trailer differ from the H-exact Fp manifest's.
+        let plan = WorkPlan::for_set_fp(Set::S44, 1024, Relation::HFips).unwrap();
+        assert!(manifest.matches_plan(&plan));
+        let bytes = manifest.binding_bytes();
+        let exact = CommitmentManifest::for_relation_fp(1024, Relation::HExact).unwrap().binding_bytes();
+        assert_eq!(bytes.len(), exact.len() + 3 + 1);
+        assert_eq!(&bytes[bytes.len() - 7..], &[3, 17, 0, 0x00, 0x80, 0x00, 0x00]);
+        // Under Gf2 the hint slack stays in G_2.
+        let gf2 = CommitmentManifest::for_relation(1024, Relation::HFips).unwrap();
+        assert_eq!((gf2.hint_slack(), gf2.group(Group::Proj).polynomial_count()), (Column::HINT_SLACK, 4));
     }
 }

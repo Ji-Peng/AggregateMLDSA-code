@@ -297,8 +297,8 @@ mod tests {
                     assert_eq!(plan.hash_field(), HashField::Fp);
                     assert_eq!(plan.precommitted.len(), crate::catalogs::GROUP_COUNT_FP - 1);
                     for group in Group::ALL_FP {
-                        assert_eq!(plan.profile(group).group, group.layout(set, d_sig, relation));
-                        assert_eq!(plan.num_polynomials(group), group.num_polynomials(set, relation));
+                        assert_eq!(plan.profile(group).group, group.layout_in(set, d_sig, relation, HashField::Fp));
+                        assert_eq!(plan.num_polynomials(group), group.num_polynomials_in(set, relation, HashField::Fp));
                         assert_eq!(
                             plan.logical_vars(group) + plan.pad_vars(group),
                             plan.physical_vars(group)

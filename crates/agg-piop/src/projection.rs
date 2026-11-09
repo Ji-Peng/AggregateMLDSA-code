@@ -122,13 +122,18 @@ pub fn block_outputs(
 
 /// The committed digits of the projection outputs: `K_0 | K_1` stacked (the last lookup
 /// stack, `2 * 2^d_k` cells) and `K_2 | K_3` (`2 * 2^d_k` cells; ML-DSA-65 and ML-DSA-87 add
-/// `K_4`), at cell `o + 128 i` (`o + 128 (b + g i)` with row blocks).
+/// `K_4`), at cell `o + 128 i` (`o + 128 (b + g i)` with row blocks). Under `HashField::Fp`
+/// relation H-FIPS stacks the hint slack `u_h` as a third column and a padding slot
+/// (`K_0 | K_1 | u_h | pad`, [`Self::attach_hint_slack`]), so the lane stays the lookup stack.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectionTables {
-    /// `K_0` then `K_1` (stored balanced, looked up as `K + 2^15`).
+    /// `K_0` then `K_1` (stored balanced, looked up as `K + 2^15`), then `u_h` and a padding
+    /// slot when [`Self::hint_slot`] is set.
     pub stacked: Vec<i32>,
     /// `K_2` then `K_3` (`[-4, 3]` each, leaf and link), then `K_4` (`[-2, 1]`) for five digits.
     pub top: Vec<i8>,
+    /// True when `stacked` also holds the hint slack and a padding slot.
+    pub hint_slot: bool,
 }
 
 impl ProjectionTables {
@@ -173,7 +178,7 @@ impl ProjectionTables {
                 *k2 = digits[2] as i8;
                 *k3 = digits[3] as i8;
             });
-        Ok(Self { stacked, top })
+        Ok(Self { stacked, top, hint_slot: false })
     }
 
     /// The five digits of in-range outputs ([`K39_DIGITS`]).
@@ -199,7 +204,7 @@ impl ProjectionTables {
                 *k3 = digits[3] as i8;
                 *k4 = digits[4] as i8;
             });
-        Self { stacked, top }
+        Self { stacked, top, hint_slot: false }
     }
 
     /// The honest tables of the committed `v` digits: `v = V_lo + 2^16 V_hi + 2^15` per
@@ -238,9 +243,25 @@ impl ProjectionTables {
         Self::encode(manifest, &k)
     }
 
+    /// Append H-FIPS's hint slack as the third slot of the stacked lane (stored `u_h - 2^15`,
+    /// one `D_k` table, [`crate::source_tables::hint_slack_table`]) and a padding slot holding
+    /// `-2^15` (looked-up value 0).
+    ///
+    /// # Panics
+    /// If a slot is already attached or the table is not one `D_k` column.
+    pub fn attach_hint_slack(&mut self, stored: &[i32]) {
+        assert!(!self.hint_slot, "one hint slot");
+        let cells = self.cells();
+        assert_eq!(stored.len(), cells, "the hint slack is one D_k column");
+        self.stacked.reserve_exact(2 * cells);
+        self.stacked.extend_from_slice(stored);
+        self.stacked.resize(4 * cells, -crate::manifest::LOOKUP_SHIFT);
+        self.hint_slot = true;
+    }
+
     /// Cells of each digit polynomial.
     fn cells(&self) -> usize {
-        self.stacked.len() / 2
+        self.stacked.len() / if self.hint_slot { 4 } else { 2 }
     }
 
     /// The digit layout of the tables (four or five digits).
@@ -249,13 +270,15 @@ impl ProjectionTables {
         if self.top.len() == 2 * self.cells() { K16_DIGITS } else { K39_DIGITS }
     }
 
-    /// The four (five) `G_k` polynomials in manifest order.
+    /// The four (five) `G_k` polynomials in manifest order, then the hint slack when its slot
+    /// is attached.
     #[must_use]
     pub fn columns(&self) -> Vec<Cells<'_>> {
         let cells = self.cells();
-        vec![Cells::Wide(&self.stacked[..cells]), Cells::Wide(&self.stacked[cells..])]
+        vec![Cells::Wide(&self.stacked[..cells]), Cells::Wide(&self.stacked[cells..2 * cells])]
             .into_iter()
             .chain(self.top.chunks_exact(cells).map(Cells::Narrow))
+            .chain(self.hint_slot.then(|| Cells::Wide(&self.stacked[2 * cells..3 * cells])))
             .collect()
     }
 
@@ -448,13 +471,13 @@ pub fn lane_weights_at(manifest: &CommitmentManifest, psi: &[u8], r2: &[E], r3: 
 }
 
 /// The honest shared claim `c = sum_y eq(r', y) k(y) = K_0(r') + 2^16 K_1(r') +
-/// 2^32 K_2(r') + 2^35 K_3(r') + C_k` from the committed digits.
+/// 2^32 K_2(r') + 2^35 K_3(r') + C_k` from the committed digits of `form`, the first
+/// `form.len()` polynomials of `columns` (`G_k` may hold H-FIPS's hint slack after them).
 #[must_use]
-pub fn claim(columns: &[Cells<'_>], r2: &[E], vars: usize) -> E {
+pub fn claim(columns: &[Cells<'_>], r2: &[E], vars: usize, form: agg_witness::digits::DigitLayout) -> E {
     let point = &r2[r2.len() - vars..];
-    let form = if columns.len() == K39_DIGITS.len() { K39_DIGITS } else { K16_DIGITS };
     let weights = form.weights();
-    columns
+    columns[..form.len()]
         .par_iter()
         .zip(weights.par_iter())
         .map(|(cells, &w)| cells.evaluate(point).mul_i64(w))
@@ -577,7 +600,7 @@ mod tests {
             let point = point(&mut rng, manifest.group(GroupRole::Proj).logical_vars);
             let outputs: Vec<E> = (0..d_k).map(|y| tables.value(y)).collect();
             assert_eq!(
-                claim(&tables.columns(), &point, point.len()),
+                claim(&tables.columns(), &point, point.len(), tables.digits()),
                 aerie_falcon::protocol::algebra::evaluate_mle(&outputs, &point)
             );
         }

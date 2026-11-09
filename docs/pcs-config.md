@@ -124,9 +124,11 @@ KeccakA[0..4], KeccakC, KeccakCPrime, G_k, G_m`). Every Keccak group has layout 
 10 + d_sig, 5 Q)` with `Q = 11` (`55` polynomials, ML-DSA-44 and ML-DSA-65) or `Q = 14`
 (`70` polynomials, ML-DSA-87), and the grouped catalog rows are named
 `mldsa-<set>-p16{x,f}-fp-batch-<N*>-mult-final` (`CATALOG_D_SIG_FP`). The width-4 artifact
-holds 64 `Fp` rows beside the 140 rows of Section 4 (204 rows, 3,204,820 B): the 16 scalar
+holds 64 `Fp` rows beside the 140 rows of Section 4 (204 rows, 3,204,830 B): the 16 scalar
 Keccak rows `(10 + d_sig, 55)` and `(10 + d_sig, 70)` and 48 grouped rows for `d_sig = 3` to
-`10`.
+`10`. Under H-FIPS, `G_k` holds the hint slack `u_h` as one more polynomial
+(`Group::num_polynomials_in`, `docs/h-exact.md` 10.9). Its width-16 scalar rows are existing
+rows, so only the 24 `p16f-fp` grouped rows were re-planned.
 
 ## 4. Catalog status
 

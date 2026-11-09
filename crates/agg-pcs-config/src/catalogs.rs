@@ -297,7 +297,8 @@ pub enum Group {
     /// width 16, `HashField::Gf2` only).
     Level3,
     /// The digits `K_0, K_1, K_2, K_3` of the projection outputs `k = <Psi_o, v_i>` on the
-    /// projection domain `(o, i)` (round 2, width 16).
+    /// projection domain `(o, i)` (round 2, width 16); under `HashField::Fp`, relation H-FIPS
+    /// appends the hint slack `u_h` ([`Group::num_polynomials_in`]).
     Proj,
     /// The seven balanced base-16 digits of the multiplicity column `m` of `T_16`
     /// (round 2, width 4, Akita final group).
@@ -523,6 +524,18 @@ impl Group {
         }
     }
 
+    /// Number of committed polynomials under `hash_field`: [`Self::num_polynomials`], except
+    /// that relation H-FIPS under `HashField::Fp` (no `G_2`) puts the per-signature hint slack
+    /// `u_h` into `G_k` after the projection digits, so `G_k` has one polynomial more.
+    #[must_use]
+    pub const fn num_polynomials_in(self, set: Set, relation: Relation, hash_field: HashField) -> usize {
+        let base = self.num_polynomials(set, relation);
+        match (self, relation, hash_field) {
+            (Self::Proj, Relation::HFips, HashField::Fp) => base + 1,
+            _ => base,
+        }
+    }
+
     /// Logical variable count of the group's domain for a given parameter set and `d_sig`.
     ///
     /// Every Keccak group has `d_K = 10 + d_sig` variables for all parameter sets.
@@ -592,6 +605,15 @@ impl Group {
     #[must_use]
     pub const fn layout(self, set: Set, d_sig: usize, relation: Relation) -> PolynomialGroupLayout {
         PolynomialGroupLayout::new(self.physical_vars(set, d_sig), self.num_polynomials(set, relation))
+    }
+
+    /// Akita group layout under `hash_field` ([`Self::num_polynomials_in`]).
+    #[must_use]
+    pub const fn layout_in(self, set: Set, d_sig: usize, relation: Relation, hash_field: HashField) -> PolynomialGroupLayout {
+        PolynomialGroupLayout::new(
+            self.physical_vars(set, d_sig),
+            self.num_polynomials_in(set, relation, hash_field),
+        )
     }
 
     /// Short label used in catalog row names and logs.
@@ -668,7 +690,7 @@ impl BatchLayout {
             groups: hash_field
                 .groups()
                 .iter()
-                .map(|&group| group.layout(set, d_sig, relation))
+                .map(|&group| group.layout_in(set, d_sig, relation, hash_field))
                 .collect(),
         })
     }
@@ -1048,11 +1070,19 @@ mod tests {
         // 23 + 46 + 7 * 55 + 5 + 7 = 466 polynomials.
         assert_eq!(fp65.total_polynomials(), 466);
 
+        // H-FIPS under Fp: u_h is G_k's last polynomial (4 + 12 + 7 * 55 + 5 + 7 = 413).
+        let fips44 = BatchLayout::new_fp(Set::S44, 10, Relation::HFips).unwrap();
+        assert_eq!(fips44.row_name(), "mldsa-44-p16f-fp-batch-1024-mult-final");
+        assert_eq!(fips44.groups[Group::Proj.index_in(HashField::Fp)], PolynomialGroupLayout::new(17, 5));
+        assert_eq!(fips44.total_polynomials(), 413);
+        assert_eq!(Group::Proj.num_polynomials_in(Set::S44, Relation::HFips, HashField::Gf2), 4);
+        assert_eq!(Group::Proj.num_polynomials_in(Set::S44, Relation::HExact, HashField::Fp), 4);
+
         let fp87 = BatchLayout::new_fp(Set::S87, 10, Relation::HFips).unwrap();
         assert_eq!(fp87.row_name(), "mldsa-87-p16f-fp-batch-1024-mult-final");
         assert_eq!(fp87.max_physical_vars(), 20);
-        // 31 + 86 + 7 * 70 + 5 + 7 = 619 polynomials.
-        assert_eq!(fp87.total_polynomials(), 619);
+        // 31 + 86 + 7 * 70 + 6 + 7 = 620 polynomials.
+        assert_eq!(fp87.total_polynomials(), 620);
     }
 
     #[test]

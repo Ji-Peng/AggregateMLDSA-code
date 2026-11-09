@@ -187,9 +187,6 @@ pub enum ConfigurationError {
     PublicBitsSet(Set),
     /// The all-prime-field aggregate (`FpKeccak`) for a parameter set other than ML-DSA-44.
     FpKeccakSet(Set),
-    /// The all-prime-field aggregate (`FpKeccak`) under a relation it does not define yet
-    /// (it is defined under H-exact).
-    FpKeccakRelation(Relation),
 }
 
 impl std::fmt::Display for ConfigurationError {
@@ -216,10 +213,6 @@ impl std::fmt::Display for ConfigurationError {
                 f,
                 "the all-prime-field aggregate is defined for ML-DSA-44 only, not ML-DSA-{}",
                 set.name()
-            ),
-            Self::FpKeccakRelation(relation) => write!(
-                f,
-                "the all-prime-field aggregate is defined under H-exact only, not {relation}"
             ),
         }
     }
@@ -974,9 +967,6 @@ fn run_fp(
     };
     if set != Set::S44 {
         return Err(VerifyError::Configuration(ConfigurationError::FpKeccakSet(set)));
-    }
-    if relation != Relation::HExact {
-        return Err(VerifyError::Configuration(ConfigurationError::FpKeccakRelation(relation)));
     }
     let mut clock = Lap(Instant::now());
     let proof = AggregateProof::from_bytes_for(proof_bytes, HashField::Fp)?;

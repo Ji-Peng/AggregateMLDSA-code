@@ -384,6 +384,7 @@ fn prove_with(
         &tables.tables.group(GroupRole::Proj),
         &run.point,
         manifest.group(GroupRole::Proj).logical_vars,
+        manifest.proj_digits(),
     );
     transcript.absorb_extensions(PROJ_CLAIM_SITE, &[projection])?;
     Ok((

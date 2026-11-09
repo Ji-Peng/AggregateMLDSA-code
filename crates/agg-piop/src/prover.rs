@@ -1506,12 +1506,6 @@ pub fn prove_with_tables_using(
     }
     let public = public.unwrap_or_else(|| PublicData::from_instance(inputs.instance));
     if manifest.hash_field() == HashField::Fp {
-        if manifest.relation() != Relation::HExact {
-            return Err(ProveError::Internal(format!(
-                "the Fp aggregate is defined under H-exact only, not {}",
-                manifest.relation()
-            )));
-        }
         return prove_core_fp(total, committer, &public, inputs, manifest, main, keccak, flock, hooks);
     }
     prove_core(

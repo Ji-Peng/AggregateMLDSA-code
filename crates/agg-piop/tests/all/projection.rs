@@ -138,7 +138,7 @@ fn cheating_digits_in(form: DigitLayout, k: &[i64]) -> ProjectionTables {
         stacked[y] = low as i32;
         stacked[cells + y] = i32::try_from((rest - low) >> 16).expect("K_1 fits i32");
     }
-    let tables = ProjectionTables { stacked, top: vec![0; (form.len() - 2) * cells] };
+    let tables = ProjectionTables { stacked, top: vec![0; (form.len() - 2) * cells], hint_slot: false };
     for (y, &value) in k.iter().enumerate() {
         assert_eq!(tables.value(y), E::from_i64(value));
     }

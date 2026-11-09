@@ -1122,12 +1122,20 @@ fn keccak_stage3_reductions_round_trip() {
     });
 }
 
-/// The all-prime-field aggregate end to end ((ML-DSA-44, H-exact, `N = 8`)): the prover commits
+/// The all-prime-field aggregate end to end (ML-DSA-44, H-exact): the prover commits
 /// the lattice and Keccak groups in round 1, `G_k` and `G_m` in round 2, runs the lookup and
 /// the three stages with the Keccak instances, and opens all eleven groups once; the
 /// verifier accepts the proof bytes from the public records alone. A witness with one `A'`
 /// bit flipped, proven without the prover's self-checks, is rejected by a stage.
 fn round_trip(n_records: usize) {
+    round_trip_in(n_records, Relation::HExact);
+}
+
+/// [`round_trip`] under `relation`. Under H-FIPS `G_k` carries the hint slack `u_h` as its
+/// fifth polynomial (406 opening claims instead of 402); at `N = 8` a hint slack moved by one
+/// is rejected by stage 3's weight identity, and the H-exact verifier rejects the proof on its
+/// relation byte.
+fn round_trip_in(n_records: usize, relation: Relation) {
     use agg_piop::binding::FlockProfile;
     use agg_piop::manifest::HashField;
     use agg_piop::prover::{prove_with_tables, FpKeccakSide, ProveHooks, ProverInputs, SeededMatrices};
@@ -1137,10 +1145,10 @@ fn round_trip(n_records: usize) {
 
     on_large_stack(move || {
         let seed = 0x518_u64;
-        let batch = Batch::build_as(Relation::HExact, common::records(seed, n_records, 0), seed);
+        let batch = Batch::build_as(relation, common::records(seed, n_records, 0), seed);
         let n = batch.records.len();
         assert_eq!(n, n_records);
-        let manifest = CommitmentManifest::for_relation_fp(n, Relation::HExact).expect("fp manifest");
+        let manifest = CommitmentManifest::for_relation_fp(n, relation).expect("fp manifest");
         let inputs: Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> = batch
             .records
             .iter()
@@ -1154,7 +1162,7 @@ fn round_trip(n_records: usize) {
             instance: &batch.instance,
             records: &inputs,
             signatures: &signatures,
-            relation: Relation::HExact,
+            relation,
         };
         let prove = |hooks: &ProveHooks<'_>| {
             prove_with_tables(
@@ -1167,10 +1175,18 @@ fn round_trip(n_records: usize) {
                 hooks,
             )
         };
-        let public: Vec<(&[u8], &[u8])> = batch.records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice())).collect();
-        let verify_bytes = |bytes: &[u8]| {
-            verify(&public, bytes, &SeededMatrices, &FpKeccakVerifier, FlockProfile::FpKeccak, Relation::HExact, None)
+        let prove_main = |main: &agg_piop::source_tables::MainTables| {
+            let hooks = ProveHooks { unchecked: true, ..ProveHooks::default() };
+            prove_with_tables(&prover_inputs, &manifest, main, &SeededMatrices, &FpKeccakSide, FlockProfile::FpKeccak, &hooks)
+                .expect("unchecked Fp prove")
+                .proof
+                .to_bytes()
         };
+        let public: Vec<(&[u8], &[u8])> = batch.records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice())).collect();
+        let verify_as = |bytes: &[u8], relation: Relation| {
+            verify(&public, bytes, &SeededMatrices, &FpKeccakVerifier, FlockProfile::FpKeccak, relation, None)
+        };
+        let verify_bytes = |bytes: &[u8]| verify_as(bytes, relation);
 
         let start = std::time::Instant::now();
         let output = prove(&ProveHooks::default()).expect("honest Fp prove");
@@ -1182,9 +1198,14 @@ fn round_trip(n_records: usize) {
         assert_eq!((proof.keccak_commitments.len(), proof.bridge_commitments.len()), (7, 2));
         assert!(proof.flock_commitments.is_empty() && proof.final_vectors.is_empty());
         assert!(proof.flock_shares.is_empty() && proof.flock_proofs.is_empty());
+        let opened = match relation {
+            Relation::HExact => 402,
+            Relation::HFips => 406,
+        };
+        assert_eq!(manifest.stage3_polynomials(), opened);
         assert_eq!(
             (proof.stage1.claims.keccak.len(), proof.stage2.claims.keccak.len(), proof.stage3.claims.0.len()),
-            (740, 516, 402)
+            (740, 516, opened)
         );
         assert_eq!(output.points.1.len(), manifest.d_stage());
 
@@ -1195,7 +1216,7 @@ fn round_trip(n_records: usize) {
         assert_eq!(verified.session, output.session);
         let size = proof.size();
         eprintln!(
-            "Fp N = {n}: proof {} bytes (commitments {}, lookup {}, PIOP {}, opening {}), prover {prove_time:.2?} ({}), verifier {verify_time:.2?}",
+            "Fp {relation} N = {n}: proof {} bytes (commitments {}, lookup {}, PIOP {}, opening {}), prover {prove_time:.2?} ({}), verifier {verify_time:.2?}",
             bytes.len(),
             size.akita_commitments,
             size.lookup,
@@ -1205,6 +1226,10 @@ fn round_trip(n_records: usize) {
         );
 
         if n != 8 { return; }
+        if relation == Relation::HFips {
+            hint_slack_rejections(&manifest, &batch, &prove_main, &verify_as, &bytes);
+            return;
+        }
 
         // The header names the hash field: bit 3 of the flags byte is set, the F_p parse
         // round-trips, the GF(2) parse refuses it on the flags, and a cleared bit is refused.
@@ -1268,8 +1293,44 @@ fn round_trip(n_records: usize) {
     });
 }
 
+/// The H-FIPS rejections of [`round_trip_in`] at `N = 8`: the honest proof is rejected by the
+/// H-exact verifier before event 0, and a hint slack moved by one (up or down on record 3,
+/// down on record 7) keeps every committed cell in `T_16` but breaks the weight identity
+/// `sum delta^2 + u_h = 80` of stage 3.
+fn hint_slack_rejections(
+    manifest: &CommitmentManifest,
+    batch: &Batch,
+    prove_main: &dyn Fn(&agg_piop::source_tables::MainTables) -> Vec<u8>,
+    verify_as: &dyn Fn(&[u8], Relation) -> Result<agg_piop::verifier::VerifiedAggregate, agg_piop::verifier::VerifyError>,
+    honest: &[u8],
+) {
+    use agg_piop::verifier::VerifyError;
+    let outcome = verify_as(honest, Relation::HExact);
+    assert!(
+        matches!(outcome, Err(VerifyError::Relation { expected: Relation::HExact, found: Relation::HFips })),
+        "{outcome:?}"
+    );
+    // u_h is G_k's last polynomial and the third column of the projection stack.
+    let g_k = manifest.group(GroupRole::Proj);
+    assert_eq!(g_k.columns.last(), Some(&Column::HINT_SLACK_PROJ));
+    assert_eq!(manifest.stack_columns(manifest.proj_stack()).last(), Some(&Column::HINT_SLACK_PROJ));
+    assert!(batch.main.hint_slack().iter().all(|&u| (1..=80).contains(&u)));
+    for (record, delta) in [(3, 1), (3, -1), (7, -1)] {
+        let mut main = batch.main.clone();
+        main.hint_slack_mut()[record] += delta;
+        let outcome = verify_as(&prove_main(&main), Relation::HFips);
+        assert!(
+            matches!(outcome, Err(VerifyError::Stage(agg_piop::stage::StageError::Terminal(3)))),
+            "u_h of record {record} moved by {delta:+}: {outcome:?}"
+        );
+    }
+}
+
 #[test]
 fn round_trip_8() { round_trip(8); }
+
+#[test]
+fn round_trip_hfips_8() { round_trip_in(8, Relation::HFips); }
 
 #[test]
 fn round_trip_100() { round_trip(100); }

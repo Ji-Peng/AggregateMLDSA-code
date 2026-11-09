@@ -442,7 +442,10 @@ claims follow as 1,256 coefficients folded into 695 per-(polynomial, point) redu
 twelve `k_absorb` groups: 1,278 coefficients. Stage 3 has 402 opening claims (385 Keccak, 17
 lattice); the seven multiplicity digits are opened separately. See
 `crates/agg-piop/src/keccak_fp/` for the constraints and reductions, and `crates/agg-fpkeccak`
-for the trace and layout.
+for the trace and layout. Under H-FIPS (the default relation) the hint slack `u_h` is `G_k`'s
+fifth polynomial and the projection stack's third column (`docs/h-exact.md` 10.9). Stage 2
+adds `F_e`, and stage 3 adds the H-FIPS checks and reductions: 1,284 coefficients and 406
+opening claims.
 
 ## 8. Weight tables (`weights`)
 

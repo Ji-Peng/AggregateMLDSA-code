@@ -1,5 +1,6 @@
-//! The all-prime-field aggregate (`HashField::Fp`, ML-DSA-44, H-exact) through the agg-cli
-//! library: round trips at 17, 100 and 1,024 signatures, the header's hash-field flag,
+//! The all-prime-field aggregate (`HashField::Fp`, ML-DSA-44, H-exact and H-FIPS) through the
+//! agg-cli library: round trips at 17, 100 and 1,024 signatures (H-exact) and at 32 signatures
+//! and on the weight-omega corner records (H-FIPS), the header's hash-field flag,
 //! rejection of each hash field's aggregate by a verifier of the other, the configurations
 //! the aggregator and the verifier refuse under `Fp`, the wire round trip, rejection of a
 //! flipped byte in each region of the wire format, and byte identity of the `agg` binary's
@@ -49,19 +50,29 @@ fn statements(records: &[Record]) -> Vec<(&[u8], &[u8])> {
         .collect()
 }
 
-fn fp_config() -> AggregatorConfig {
+/// The `Fp` aggregator configuration under `relation`.
+fn fp_config_for(relation: Relation) -> AggregatorConfig {
     AggregatorConfig {
         hash_field: HashField::Fp,
-        relation: Relation::HExact,
+        relation,
         ..AggregatorConfig::default()
     }
 }
 
+fn fp_config() -> AggregatorConfig {
+    fp_config_for(Relation::HExact)
+}
+
+/// The `Fp` verifier of `relation`.
+fn fp_verifier_for(relation: Relation) -> AggregateVerifier {
+    AggregateVerifier::new()
+        .relation(relation)
+        .hash_field(HashField::Fp)
+}
+
 /// The `Fp` verifier of [`fp_config`]'s relation.
 fn fp_verifier() -> AggregateVerifier {
-    AggregateVerifier::new()
-        .relation(Relation::HExact)
-        .hash_field(HashField::Fp)
+    fp_verifier_for(Relation::HExact)
 }
 
 /// A rejection for the wrong hash field: the PIOP verifier's header check or the parser's
@@ -76,11 +87,16 @@ fn assert_hash_field_rejection(
 }
 
 fn round_trip(seed: u64, own: usize, shared: usize) {
-    let records = records(seed, own, shared);
+    round_trip_records(Relation::HExact, &records(seed, own, shared));
+}
+
+/// Aggregate `records` under `Fp` and `relation`, check the report and the header, verify the
+/// aggregate with the verifier of `relation`, and return its bytes.
+fn round_trip_records(relation: Relation, records: &[Record]) -> Vec<u8> {
     let n = records.len();
     let start = Instant::now();
-    let aggregate = Aggregator::new(fp_config())
-        .aggregate(&signed(&records))
+    let aggregate = Aggregator::new(fp_config_for(relation))
+        .aggregate(&signed(records))
         .expect("Fp aggregate");
     let prove = start.elapsed();
     let report = &aggregate.report;
@@ -88,17 +104,36 @@ fn round_trip(seed: u64, own: usize, shared: usize) {
     assert_eq!(report.profile, FlockProfile::FpKeccak);
     assert!(report.parts.is_empty() && report.flock_records.is_zero());
     assert_eq!(aggregate.bytes[2] & HASH_FIELD_FP_FLAG, HASH_FIELD_FP_FLAG);
-    let verifier = fp_verifier();
+    assert_eq!(aggregate.bytes[2] & 0x07, relation.id());
+    let verifier = fp_verifier_for(relation);
     assert_eq!(verifier.hash_field_of(), HashField::Fp);
-    let verdict = verifier.verify(&statements(&records), &aggregate.bytes, None);
+    let verdict = verifier.verify(&statements(records), &aggregate.bytes, None);
     assert!(verdict.accepted(), "Fp verifier: {verdict}");
     assert!(verdict.parts.is_empty());
     eprintln!(
-        "Fp N = {n}: {} B ({:.1} B/sig), prove {:.2} s, verify {:.1} ms",
+        "Fp {relation} N = {n}: {} B ({:.1} B/sig), prove {:.2} s, verify {:.1} ms",
         aggregate.bytes.len(),
         report.bytes_per_signature(),
         prove.as_secs_f64(),
         verdict.total().as_secs_f64() * 1e3
+    );
+    aggregate.bytes
+}
+
+/// The verifier of the other relation rejects an `Fp` aggregate before event 0.
+fn assert_other_relation_rejects(relation: Relation, records: &[Record], bytes: &[u8]) {
+    let other = match relation {
+        Relation::HExact => Relation::HFips,
+        Relation::HFips => Relation::HExact,
+    };
+    let verdict = fp_verifier_for(other).verify(&statements(records), bytes, None);
+    assert!(
+        matches!(
+            verdict.report.outcome,
+            Err(VerifyError::Relation { expected, found }) if expected == other && found == relation
+        ),
+        "{:?}",
+        verdict.report.outcome
     );
 }
 
@@ -114,6 +149,36 @@ fn fp_round_trip_44_hexact() {
 #[cfg_attr(debug_assertions, ignore = "1,024 records: run with --release")]
 fn fp_round_trip_44_hexact_1024() {
     on_large_stack(|| round_trip(42, 768, 256));
+}
+
+/// H-FIPS (the default relation) under `Fp` at 32 signatures: the default configuration with
+/// only the hash field set proves H-FIPS, the H-FIPS verifier accepts, and the H-exact
+/// verifier rejects the aggregate on its relation byte.
+#[test]
+fn fp_round_trip_44_hfips() {
+    on_large_stack(|| {
+        assert_eq!(
+            AggregatorConfig { hash_field: HashField::Fp, ..AggregatorConfig::default() }.relation,
+            Relation::HFips
+        );
+        let records = records(0x44f, 24, 8);
+        let bytes = round_trip_records(Relation::HFips, &records);
+        assert_other_relation_rejects(Relation::HFips, &records, &bytes);
+    });
+}
+
+/// H-FIPS under `Fp` on the two weight-80 records of `agg_witness::gen::hint_corner_record_for`
+/// alone (`N = 2`, padded to the smallest catalog batch `N* = 8`): each has the coefficient
+/// `w' = q - gamma2, h = 0` and the `e = -1` wrap to `w1' = 43`, so its hint slack is 0. The
+/// aggregate verifies, and the H-exact verifier rejects it.
+#[test]
+fn fp_hint_corner_44_hfips() {
+    use agg_witness::params::Set44;
+    on_large_stack(|| {
+        let records: Vec<Record> = (1..=2).map(gen::hint_corner_record_for::<Set44>).collect();
+        let bytes = round_trip_records(Relation::HFips, &records);
+        assert_other_relation_rejects(Relation::HFips, &records, &bytes);
+    });
 }
 
 /// The 17-record `Fp` aggregate shared by the wire and flipped-byte tests: the records and
@@ -244,7 +309,7 @@ fn fp_rejected_by_gf2_and_gf2_by_fp() {
 }
 
 #[test]
-fn fp_refuses_other_sets_and_relations() {
+fn fp_refuses_other_sets() {
     on_large_stack(|| {
         let records = records(0xfa, 8, 0);
         let signed = signed(&records);
@@ -255,25 +320,6 @@ fn fp_refuses_other_sets_and_relations() {
         assert!(matches!(
             Aggregator::new(config).aggregate(&signed),
             Err(AggregateError::HashFieldSet(Set::S65))
-        ));
-        // H-FIPS (the default relation) is not defined under Fp yet, for the aggregator and
-        // for the verifier.
-        let config = AggregatorConfig {
-            relation: Relation::HFips,
-            ..fp_config()
-        };
-        assert!(matches!(
-            Aggregator::new(config).aggregate(&signed),
-            Err(AggregateError::HashFieldRelation(Relation::HFips))
-        ));
-        let verdict = AggregateVerifier::new()
-            .hash_field(HashField::Fp)
-            .verify(&statements(&records), &[0; 64], None);
-        assert!(matches!(
-            verdict.report.outcome,
-            Err(VerifyError::Configuration(ConfigurationError::FpKeccakRelation(
-                Relation::HFips
-            )))
         ));
         let verdict = AggregateVerifier::for_set(Set::S65)
             .hash_field(HashField::Fp)
@@ -380,10 +426,14 @@ fn cli_hash_field_fp_round_trip() {
         agg(&["verify", "--records", &records, "--aggregate", &aggregate, "--relation", "h-exact"]).0,
         0
     );
-    // H-FIPS, the default relation, is refused under Fp with a configuration error.
-    let (code, out) = agg(&["aggregate", "--records", &records, "--out", &aggregate, "--hash-field", "fp"]);
+    // Without --relation, fp proves the default relation H-FIPS; its verifier needs no
+    // --relation either, and the H-exact verifier rejects the aggregate.
+    run(&["aggregate", "--records", &records, "--out", &aggregate, "--hash-field", "fp"]);
+    run(&["verify", "--records", &records, "--aggregate", &aggregate, "--hash-field", "fp"]);
+    let (code, out) = agg(&[
+        "verify", "--records", &records, "--aggregate", &aggregate, "--hash-field", "fp", "--relation", "h-exact",
+    ]);
     assert_ne!(code, 0, "{out}");
-    assert!(out.contains("H-exact only"), "{out}");
     for command in ["aggregate", "verify", "bench"] {
         for (option, value) in [
             ("--flock-profile", "slim"),

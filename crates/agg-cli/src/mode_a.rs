@@ -1256,8 +1256,6 @@ pub enum AggregateError {
     Relation(Set, Relation),
     /// The all-prime-field aggregate (`HashField::Fp`) for a parameter set other than ML-DSA-44.
     HashFieldSet(Set),
-    /// The all-prime-field aggregate (`HashField::Fp`) under a relation other than H-exact.
-    HashFieldRelation(Relation),
 }
 
 impl std::fmt::Display for AggregateError {
@@ -1282,9 +1280,6 @@ impl std::fmt::Display for AggregateError {
                 "the F_p hash field is available for ML-DSA-44 only, not ML-DSA-{}",
                 set.name()
             ),
-            Self::HashFieldRelation(relation) => {
-                write!(f, "the F_p hash field is available under H-exact only, not {relation}")
-            }
         }
     }
 }
@@ -1945,9 +1940,6 @@ impl Aggregator {
         let relation = self.config.relation;
         if self.config.set != Set::S44 {
             return Err(AggregateError::HashFieldSet(self.config.set));
-        }
-        if relation != Relation::HExact {
-            return Err(AggregateError::HashFieldRelation(relation));
         }
         if n == 0 || n > 1 << 15 {
             return Err(AggregateError::Count(n));

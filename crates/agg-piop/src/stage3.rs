@@ -30,7 +30,8 @@
 //! `e (e - 1)(w_1' - 43) = 0` once `F_s`, `F_delta` and stage 2's `F_e` give `e in {-1, 0, 1}`), and
 //! the hint-weight identity `F_omega`, `sum_i eq(r^(2)_sig, i) (sum_pos delta^2 + sum_hi u_h) =
 //! omega`, one instance with two parts at [`EqPoint::HalfR2`] (`delta^2` on the main domain
-//! with scale `2^(d_main - d_sig)`, `u_h = U + 2^15` on `D_2` with scale `2^(d_2 - d_sig)`);
+//! with scale `2^(d_main - d_sig)`, `u_h = U + 2^15` on `D_2` with scale `2^(d_2 - d_sig)`, on
+//! `D_k` with scale `2^(d_k - d_sig)` under `HashField::Fp`);
 //! after the 37 reductions the reductions of stage 2's `delta(r^(2))`, `e(r^(2))`. The ring
 //! reads the affine `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e` with
 //! `L = l_lo + 29,696 l_hi + 2^15`. H-FIPS has 56 coefficients (ML-DSA-44).
@@ -564,8 +565,8 @@ pub fn spec_with(manifest: &CommitmentManifest, weights: &[Vec<E>], keccak: Opti
         instances,
     });
     if gammas.fips {
-        // F_omega: sum_pos delta^2 over every row lane (main) plus sum_hi u_h (D_2), both at
-        // (1/2, ..., r^(2)_sig).
+        // F_omega: sum_pos delta^2 over every row lane (main) plus sum_hi u_h (D_2, or D_k
+        // under HashField::Fp), both at (1/2, ..., r^(2)_sig).
         let gamma = gammas.fips_omega();
         let lifted = |role: GroupRole| -> E {
             E::from_u64(1_u64 << (manifest.group(role).logical_vars - manifest.d_sig()))
@@ -580,13 +581,14 @@ pub fn spec_with(manifest: &CommitmentManifest, weights: &[Vec<E>], keccak: Opti
                 terms: (0..gammas.lanes).map(|rho| Term::Product(vec![rho, rho])).collect(),
             }],
         });
+        let hint = manifest.hint_slack();
         groups.push(GroupSpec {
-            domain: GroupRole::Level2,
+            domain: hint.domain(),
             eq: EqPoint::HalfR2,
-            lanes: vec![LaneId::Column(Column::HINT_SLACK)],
+            lanes: vec![LaneId::Column(hint)],
             instances: vec![InstanceSpec {
                 gamma,
-                scale: lifted(GroupRole::Level2),
+                scale: lifted(hint.domain()),
                 terms: vec![Term::Affine {
                     weight: None,
                     lanes: vec![(0, 1)],
@@ -1453,6 +1455,33 @@ mod tests {
     /// one folded range; every committed polynomial but the multiplicity digits is read at
     /// `r^(3)`, the Keccak ones through the reduction groups. The `HashField::Gf2` layout keeps
     /// its 50 coefficients.
+    #[test]
+    fn fp_h_fips_stage_three_reads_the_hint_slack_on_d_k() {
+        let manifest = CommitmentManifest::for_relation_fp(8, crate::manifest::Relation::HFips).unwrap();
+        let gammas = Gammas::new(&manifest);
+        // ring, links K_2, K_3, bools bz_hi, l_hi, a_z, F_s, F_delta, F_w1, F_omega, bool_b 10..15,
+        // b_t from r^(2) 16..21, delta and e from r^(2) 22, 23, stacks 24, 25, projection 26, 27,
+        // then the 1,256 Keccak claims.
+        assert_eq!((gammas.fips_omega(), gammas.bool_b(0), gammas.fips_reduction(0)), (9, 10, 22));
+        assert_eq!((gammas.stack(0), gammas.proj_v(), gammas.keccak_claims()), (24, 26, 28..1284));
+        let mut rng = SplitMix64::new(13);
+        let weights: Vec<Vec<E>> =
+            (0..gammas.stacks).map(|j| point(&mut rng, manifest.stack_columns(j).len())).collect();
+        let spec = spec(&manifest, &weights);
+        spec.validate().unwrap();
+        assert_eq!(spec.gamma_count, 1284);
+        // F_omega: delta^2 on the main domain (scale 2^10) and u_h + 2^15 on D_k (scale 2^7),
+        // both at (1/2, ..., r^(2)_sig); the projection stack reads u_h as its third column.
+        let omega: Vec<&GroupSpec> = spec.groups.iter().filter(|g| g.eq == EqPoint::HalfR2).collect();
+        assert_eq!((omega[0].domain, omega[1].domain), (GroupRole::Main, GroupRole::Proj));
+        assert_eq!(omega[1].lanes, [LaneId::Column(Column::HINT_SLACK_PROJ)]);
+        assert_eq!(omega[1].instances[0].scale, E::from_u64(1 << 7));
+        let stack = spec.groups.iter().find(|g| g.eq == EqPoint::Lookup(1)).expect("projection stack");
+        assert_eq!(stack.lanes.last(), Some(&LaneId::Column(Column::HINT_SLACK_PROJ)));
+        assert!(spec.groups.iter().all(|g| !matches!(g.domain, GroupRole::Level1 | GroupRole::Level2 | GroupRole::Level3)));
+        assert_eq!(Stage3Claims::len(&manifest), 406);
+    }
+
     #[test]
     fn fp_stage_three_drops_the_bridge_and_reduces_every_keccak_claim() {
         let gf2 = Gammas::new(&CommitmentManifest::for_relation(8, crate::manifest::Relation::HExact).unwrap());

@@ -111,12 +111,13 @@ calls `agg_piop::prover::prove_with_tables_using` with `FpKeccakSide`. The verif
 `AggregateVerifier::verify_fp`, which calls `agg_piop::verifier::verify_timed` with
 `FpKeccakVerifier`.
 
-The `F_p` hash field is defined for ML-DSA-44 under relation H-exact only, so `fp` needs
-`--relation h-exact` (the default relation H-FIPS is refused). The aggregator refuses another
-set (`AggregateError::HashFieldSet`) or relation (`AggregateError::HashFieldRelation`). A
-verifier of another set or relation rejects every aggregate
-(`ConfigurationError::FpKeccakSet`, `ConfigurationError::FpKeccakRelation`). The test hooks
-(`AggregateHooks`) are not available under `F_p`.
+The `F_p` hash field is defined for ML-DSA-44 under both relations: H-FIPS (the default, so
+`--hash-field fp` alone proves H-FIPS) and H-exact (`--relation h-exact`). Under H-FIPS the hint
+slack `u_h` is the last polynomial of `G_k` (`docs/h-exact.md` Section 10.9). The aggregator
+refuses another set (`AggregateError::HashFieldSet`), and a verifier of another set rejects
+every aggregate (`ConfigurationError::FpKeccakSet`); a verifier of the other relation rejects
+it before event 0 (`VerifyError::Relation`). The test hooks (`AggregateHooks`) are not
+available under `F_p`.
 
 `agg aggregate`, `agg verify` and `agg bench` take `--hash-field gf2|fp` (default `gf2`).
 Under `fp` the options `--flock-profile`, `--flock-span` and `--part-log2` have no meaning.
@@ -136,7 +137,7 @@ other field fails with `WireError::Flags`. Verifying an aggregate therefore need
 
 The byte gate of the `fp` mode is `artifact/expected/hashes-fp.json`, kept apart from
 `hashes.json` so that the default digests stay as they are. It pins the 1K ML-DSA-44 `fp`
-aggregates of the artifact records (it holds no entry until the `fp` mode supports H-FIPS),
+aggregates of the artifact records (no entry is pinned yet),
 which must be byte-identical under every `AGG_ISA` tier and with `RAYON_NUM_THREADS=1`. The
 tier identity is checked at 1K against this file;
 `fp_single_thread_byte_identical` (Section 3) checks the single-thread identity at 100 records.

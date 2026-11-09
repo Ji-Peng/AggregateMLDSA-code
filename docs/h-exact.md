@@ -1044,6 +1044,25 @@ Prover RSS at `2^15` (estimate). The local delta grows linearly with `N` (+0.34 
 `u_h` all scale with `N`. Scaling by 2 gives about +1.3 to +1.4 GiB at 32K, about +5% over H-u's 25.8 GiB on the cloud. This holds if the
 mode-A peak at 32K falls while the H-FIPS tables are live. The cloud run should measure it.
 
+### 10.9 The hint slack under the `F_p` hash field
+
+The `F_p` hash field (`HashField::Fp`, `docs/piop.md` 7.6) has no bridge, so no `G_2` holds
+`u_h`. It becomes the last polynomial of `G_k` (`Column::HINT_SLACK_PROJ`,
+`manifest::group_columns_in`) and the third column of the projection stack `[K_0 | K_1 | u_h]`
+(4 slots). `D_k = (o, i)` ends in the `d_sig` signature variables as `D_2` does, so `u_h(i)` sits at
+`D_k` index `128 i` and `F7`'s second part runs on `D_k` with scale `2^(d_k - d_sig) = 2^7`
+(10.7 otherwise unchanged). The other option, a round-2 group of its own with `D_2`'s layout, needs
+a new width-16 scalar row `(13, 1)` and a fifth precommitted class in every grouped row, and
+adds a group to the opening. `G_k` with five polynomials needs no new scalar row: the
+`(13..=17, 5)` rows of ML-DSA-65's `G_k` exist, and so do the `(13..=18, 6)` rows that ML-DSA-65 and
+ML-DSA-87 use. Only the 24 `p16f-fp` grouped rows were re-planned (`d_sig` 3 to 10, 21 min,
+4 workers). The grouped rows' estimated openings equal H-exact's (65,399 B at `2^10`). The cost is
+`2^7` committed cells per signature (all zero but one) and a projection stack twice as tall.
+ML-DSA-44 under `F_p` and H-FIPS commits 413 polynomials (`G_main4` 12, `G_k` 5) and opens 406 at
+`r^(3)`. The stage-3 vector has 1,284 coefficients (28 lattice, 1,256 Keccak). The aggregate of
+the artifact records at `N = 1,024` measures 145,354 B, against 145,147 B under H-exact. The default
+`--hash-field fp` proves H-FIPS. Under `HashField::Gf2` nothing changes.
+
 ## 11. ML-DSA-65 and ML-DSA-87
 
 FIPS 204 Table 1: `gamma1 = 2^19`, `gamma2 = (q - 1)/32 = 261,888`, `beta = 196` (65) and

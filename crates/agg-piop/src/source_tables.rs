@@ -1505,16 +1505,16 @@ pub const fn fips_u_with(gamma2: i64, l: i64, s: i64, delta: i64, e: i64) -> i64
     gamma2 * s + l + 1 - gamma2 - 2 * gamma2 * delta - e
 }
 
-/// H-FIPS's hint slack as a `D_2` table: `u_h(i)` at index
-/// `i 2^(d_2 - d_sig)` (the low `d_2 - d_sig` variables of `D_2` are position variables when
-/// `d_sig < 13`), zero elsewhere.
+/// H-FIPS's hint slack as a table on its domain (`D_2`, or `D_k` under `HashField::Fp`):
+/// `u_h(i)` at index `i 2^(d - d_sig)` (the low `d - d_sig` variables of the domain are
+/// position or row variables; on `D_2` there are none from `d_sig = 13` on), zero elsewhere.
 ///
 /// # Panics
 /// If `hint_slack` does not hold `N*` values.
 #[must_use]
 pub fn hint_slack_table(manifest: &CommitmentManifest, hint_slack: &[i64]) -> Vec<i64> {
     assert_eq!(hint_slack.len(), manifest.padded_records(), "one slack per signature");
-    let vars = manifest.group(GroupRole::Level2).logical_vars;
+    let vars = manifest.group(manifest.hint_slack().domain()).logical_vars;
     let shift = vars - manifest.d_sig();
     let mut table = vec![0_i64; 1 << vars];
     for (i, &slack) in hint_slack.iter().enumerate() {
@@ -1688,13 +1688,30 @@ impl BridgeGroupTables {
     }
 
     /// The round-2 tables under `HashField::Fp`: the projection digits of the committed `v`
-    /// under `psi` and the multiplicities of the main-domain and projection stacks. There is
-    /// no bridge, so the carries, the parities and the public `Y` are empty.
+    /// under `psi` (with H-FIPS's hint slack after them) and the multiplicities of the
+    /// main-domain and projection stacks. There is no bridge, so the carries, the parities and
+    /// the public `Y` are empty.
     pub fn build_fp(manifest: &CommitmentManifest, main: &MainTables, psi: &[u8]) -> Result<Self, SourceTableError> {
         assert_eq!(manifest.hash_field(), crate::manifest::HashField::Fp, "the Fp round-2 tables");
         let lanes = 0..manifest.shape().lanes_k as u8;
         let v_lo: Vec<&[i32]> = lanes.clone().map(|lane| main.column(manifest, Column::V_LO.in_lane(lane)).wide()).collect();
         let v_hi: Vec<&[i32]> = lanes.map(|lane| main.column(manifest, Column::V_HI.in_lane(lane)).wide()).collect();
+        let mut proj = ProjectionTables::build(manifest, &v_lo, &v_hi, psi)?;
+        if manifest.is_fips() {
+            // H-FIPS: the hint slack is G_k's last polynomial and the projection stack's third
+            // column.
+            let stored: Vec<i32> = hint_slack_table(manifest, main.hint_slack())
+                .into_iter()
+                .map(|u| {
+                    i32::try_from(u)
+                        .ok()
+                        .filter(|u| (0..1 << 16).contains(u))
+                        .map(|u| u - LOOKUP_SHIFT)
+                        .ok_or(SourceTableError::Encode("hint slack outside [0, 2^16)"))
+                })
+                .collect::<Result<_, _>>()?;
+            proj.attach_hint_slack(&stored);
+        }
         let mut tables = Self {
             parity1: None,
             level1: Vec::new(),
@@ -1702,7 +1719,7 @@ impl BridgeGroupTables {
             level2: Vec::new(),
             level3: Vec::new(),
             y: Vec::new(),
-            proj: ProjectionTables::build(manifest, &v_lo, &v_hi, psi)?,
+            proj,
             psi: psi.to_vec(),
             zeros: Vec::new(),
             multiplicity: Vec::new(),
