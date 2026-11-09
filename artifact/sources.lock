@@ -6,13 +6,12 @@
 
 [[source]]
 name = "ours"
-url = "https://anonymous.4open.science/r/AggregateMLDSA/"
 commit = "c1c7590ef7a4bbeff08c47b5015eb1f796b46bf9"
 license = "MIT OR Apache-2.0"
 role = "prover, verifier"
 in_repo = true
 path = "."
-note = "The artifact lives in this tree; `commit` is the main revision the artifact is based on."
+note = "This repository itself. `commit` stamps the binaries when the tree has no git history (an archive download)."
 
 [[source]]
 name = "aerie"
