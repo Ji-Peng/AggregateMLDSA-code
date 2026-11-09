@@ -177,9 +177,9 @@ registers and EVEX-only mnemonics are counted in `build.json`).
 ### Expected times
 
 The following medians were measured on an idle AMD EPYC 9355 node (Zen 5) at
-$N = 32{,}768$ under H-FIPS on 16C32T, one warm-up and five runs (`tab:prove`,
-`tab:bytes`, `tab:baselines`). Node-to-node spread is a few percent. All three
-allocations are reproduced by `./run.sh full`.
+$N = 32{,}768$ under H-FIPS on 16C32T, 8C16T and 1T, one warm-up and five runs (`tab:prove`,
+`tab:bytes`, `tab:baselines`). Node-to-node spread is a few percent; `./run.sh full`
+reproduces every cell.
 
 | Set | Tier | 16C32T prove | 8C16T prove | 1T prove | 16C32T verify (unc. / cached) | Aggregate (B/sig) |
 | --- | --- | --- | --- | --- | --- | --- |
