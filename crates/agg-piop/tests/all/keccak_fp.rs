@@ -865,3 +865,266 @@ fn keccak_stage12_groups_prove_and_replay() {
         assert_eq!(pad_s1_out, pad_s1_verified);
     });
 }
+
+/// A transcript of `manifest` at the stage-3 batching site: the round-1 and round-2 events,
+/// the lookup branch and the stage-1 and stage-2 messages and terminals carry zeros, so
+/// `r^(1)` and `r^(2)` are the round challenges of the two stages. Returns the trunk and
+/// both points.
+fn transcript_at_stage3(manifest: &CommitmentManifest) -> (Transcript, Vec<OpeningField>, Vec<OpeningField>) {
+    use agg_piop::claims::Kappa1Claims;
+    use agg_piop::lookup::{LookupSite, DEGREE as LOOKUP_DEGREE};
+    use agg_piop::transcript::{
+        gamma_site, lookup_site, round_sites, stage_degrees, stage_gammas, stage_terminals, MULTIPLICITY_CLAIMS,
+        MULTIPLICITY_SITE, PROJ_CLAIM_SITE,
+    };
+    let zeros = |n: usize| vec![OpeningField::zero(); n];
+    let mut trunk = Transcript::new(manifest, &manifest.binding_bytes()).expect("transcript");
+    for role in [GroupRole::Main16, GroupRole::Main] {
+        trunk.absorb(commitment_site(role), 1, &[0]).expect("round 1");
+    }
+    trunk.absorb_items(FLOCK_COMMIT_SITE, &[vec![]]).expect("flock commit");
+    trunk.challenge_bytes(BRIDGE_SEED_SITE, 1).expect("bridge seed");
+    trunk.challenge_psi().expect("psi");
+    for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Proj, GroupRole::Mult] {
+        trunk.absorb(commitment_site(role), 1, &[0]).expect("round 2");
+    }
+    trunk.challenge_bytes(FLOCK_SEEDS_SITE, 1).expect("flock seeds");
+    trunk.absorb(FINAL_VECTORS_SITE, 1, &[0; FINAL_VECTOR_BYTES]).expect("final vectors");
+    trunk.absorb_items(FLOCK_SHARES_SITE, &[vec![]]).expect("flock shares");
+    let (mut lookup, mut stages) = trunk.fork().expect("fork");
+
+    // Branch L: the lookup's events with zero payloads.
+    let shape = manifest.lookup_shape();
+    let site = lookup_site;
+    lookup.challenge_extensions(&site(LookupSite::X), shape.challenges).expect("X");
+    lookup.absorb_extensions(&site(LookupSite::Layer1), &zeros(4 * shape.tree_count())).expect("layer 1");
+    lookup.challenge_extensions(&site(LookupSite::Mu(1)), 1).expect("mu 1");
+    for s in 2..=shape.max_depth() {
+        let (active, continuing, ending) = shape.session_counts(s);
+        lookup.challenge_extensions(&site(LookupSite::Gamma(s)), 2 * active).expect("session gamma");
+        for round in 0..s - 1 {
+            lookup.absorb_extensions(&site(LookupSite::Round(s, round)), &zeros(LOOKUP_DEGREE)).expect("round");
+            lookup.challenge_extensions(&site(LookupSite::RoundChallenge(s, round)), 1).expect("challenge");
+        }
+        lookup.absorb_extensions(&site(LookupSite::Terminals(s)), &zeros(4 * continuing)).expect("terminals");
+        lookup.absorb_extensions(&site(LookupSite::Leaves(s)), &zeros(2 * ending)).expect("leaves");
+        lookup.challenge_extensions(&site(LookupSite::Mu(s)), 1).expect("mu");
+    }
+    lookup.absorb_extensions(MULTIPLICITY_SITE, &zeros(MULTIPLICITY_CLAIMS)).expect("multiplicities");
+
+    // Branch S: tau, the pre-stage claims, stages 1 and 2 with zero messages.
+    stages.challenge_extensions(TAU_SITE, manifest.d_stage()).expect("tau");
+    stages.absorb_extensions(PRESTAGE_SITE, &zeros(PreStageClaims::len(manifest))).expect("prestage");
+    let (degrees, gammas, terminals) = (stage_degrees(manifest), stage_gammas(manifest), stage_terminals(manifest));
+    let mut points = Vec::new();
+    for stage in 1..=2 {
+        if stage == 2 {
+            stages.absorb_extensions(KAPPA1_SITE, &zeros(Kappa1Claims::len(manifest))).expect("kappa1");
+        }
+        stages.challenge_extensions(&gamma_site(stage), gammas[stage - 1]).expect("stage gamma");
+        let mut point = Vec::with_capacity(manifest.d_stage());
+        for round in 0..manifest.d_stage() {
+            let (message, challenge) = round_sites(stage, round);
+            stages.absorb_extensions(&message, &zeros(degrees[stage - 1])).expect("message");
+            point.push(stages.challenge_extensions(&challenge, 1).expect("challenge")[0]);
+        }
+        stages.absorb_extensions(&terminal_site(stage), &zeros(terminals[stage - 1])).expect("terminal");
+        if stage == 2 {
+            stages.absorb_extensions(PROJ_CLAIM_SITE, &zeros(1)).expect("projection claim");
+        }
+        points.push(point);
+    }
+    trunk.join(lookup, stages).expect("join");
+    let r2 = points.pop().expect("r^(2)");
+    let r1 = points.pop().expect("r^(1)");
+    (trunk, r1, r2)
+}
+
+/// The multilinear extension of a table at `point`.
+fn mle_at(table: &[OpeningField], point: &[OpeningField]) -> OpeningField {
+    let eq = agg_piop::aerie_falcon::protocol::algebra::eq_table(point);
+    assert_eq!(eq.len(), table.len());
+    table.iter().zip(&eq).fold(OpeningField::zero(), |acc, (&a, &b)| acc + a * b)
+}
+
+/// Stage 3 under `HashField::Fp` with the Keccak groups alone (ML-DSA-44, `N = 8`): the
+/// stage-1 and stage-2 Keccak claims of honest tables at `r^(1)`, `r^(2)` (drawn by a
+/// transcript at the stage-3 site) are reduced to `r^(3)` through `prove_stage`,
+/// `replay_stage` and `check_terminal`, the verifier resolving the weights with
+/// `KeccakReductions::evaluate`. The rank-one driver path sends the same messages as the
+/// materialized weights; every opening claim equals the committed polynomial at its group's
+/// point. A changed stage-1 `Rot` or stage-2 `Prev` claim is rejected.
+#[test]
+fn keccak_stage3_reductions_round_trip() {
+    use agg_piop::keccak_fp::masks::KeccakPoint;
+    use agg_piop::stage::{draw_gammas, prove_stage_drawn, suffix, LaneId, WeightId};
+    use agg_piop::stage3;
+
+    on_large_stack(|| {
+        let seed = 0x513_u64;
+        let batch = Batch::build(common::records(seed, 6, 2), seed);
+        let manifest = CommitmentManifest::for_batch_fp(batch.records.len()).expect("fp manifest");
+        let n_star = manifest.padded_records();
+        assert_eq!(n_star, 8);
+        let k_layout = KeccakLayout::for_set(Set::S44);
+        let inputs = keccak_inputs_from_batch(&batch);
+        let keccak_tables = KeccakTables::build(&k_layout, &inputs, n_star);
+        let keccak_publics = KeccakPublics::from_records(&k_layout, &inputs, n_star);
+        let keccak_prover = KeccakProverTables::build(&keccak_tables, &keccak_publics);
+        let source_tables = SourceTables {
+            manifest: &manifest,
+            main: &batch.main,
+            bridge: &batch.bridge,
+        };
+        let mut tables = ProverTables::new(source_tables, &batch.matrices);
+        tables.set_keccak(&keccak_prover);
+
+        // The Keccak claims of stages 1 and 2: the multilinear extensions of the prover's
+        // materialized lanes at the Keccak suffixes of r^(1), r^(2).
+        let (_, r1, r2) = transcript_at_stage3(&manifest);
+        let d_k = manifest.d_keccak();
+        let cells = 1 << d_k;
+        let lane_table = |id: LaneId| -> Vec<OpeningField> {
+            let lane = tables.lane(id);
+            (0..cells).map(|x| lane.value(x)).collect()
+        };
+        let r1_lanes = keccak_claim_lanes(&stage1::spec(&manifest));
+        let r2_lanes = keccak_claim_lanes(&stage2::spec(&manifest));
+        assert_eq!((r1_lanes.len(), r2_lanes.len()), (740, 516));
+        let (r1_k, r2_k) = (suffix(&r1, d_k), suffix(&r2, d_k));
+        let r1_claims: Vec<OpeningField> = r1_lanes.iter().map(|&id| mle_at(&lane_table(id), &r1_k)).collect();
+        let r2_claims: Vec<OpeningField> = r2_lanes.iter().map(|&id| mle_at(&lane_table(id), &r2_k)).collect();
+
+        // The stage-3 Keccak groups at their gamma indices of the full stage; the lattice
+        // indices before them are declared folded so that the batching vector has the
+        // registry's length.
+        let reductions = stage3::keccak_reductions(&manifest).expect("Fp reductions");
+        let range = reductions.gammas();
+        assert_eq!(range, stage3::Gammas::new(&manifest).keccak_claims());
+        let gamma_count = stage3::gamma_count(&manifest);
+        let spec = StageSpec {
+            stage: 3,
+            degree: stage3::DEGREE,
+            gamma_count,
+            groups: reductions.groups(),
+            folded: 0..gamma_count,
+        };
+        spec.validate().expect("the Keccak stage-3 spec validates");
+        let claims_for = |r1_claims: &[OpeningField], r2_claims: &[OpeningField]| {
+            let mut claims = vec![OpeningField::zero(); gamma_count];
+            claims[range.clone()].copy_from_slice(&reductions.claimed_sums(r1_claims, r2_claims, &r1, &r2));
+            claims
+        };
+        let claims = claims_for(&r1_claims, &r2_claims);
+        let points = Points {
+            r1: r1.clone(),
+            r2: r2.clone(),
+            ..Points::default()
+        };
+        let resolve_with = |weights: &agg_piop::keccak_fp::weights::KeccakReduceTables, id: LaneId| -> Lane<'_> {
+            match id {
+                LaneId::Weight(w @ (WeightId::KeccakReduce { .. } | WeightId::KeccakAbsorb { .. })) => {
+                    Lane::Folded(weights.rank_one(w).expect("a Keccak weight").materialize())
+                }
+                other => tables.lane(other),
+            }
+        };
+
+        // The driver's path: draw gamma^(3), build the weights, run the rank-one groups.
+        let (mut drawn_tx, _, _) = transcript_at_stage3(&manifest);
+        let gammas = draw_gammas(&spec, &claims, &mut drawn_tx).expect("gamma^(3)");
+        let weights = reductions.tables(&gammas[range.clone()], &r1, &r2);
+        let rank_one = |id: LaneId| match id {
+            LaneId::Weight(w) => weights.rank_one(w),
+            _ => None,
+        };
+        let drawn = prove_stage_drawn(
+            &spec,
+            &manifest,
+            &points,
+            &claims,
+            gammas.clone(),
+            |id| match id {
+                LaneId::Weight(_) => Lane::Folded(Vec::new()),
+                other => tables.lane(other),
+            },
+            None,
+            Some(&rank_one),
+            &mut drawn_tx,
+            true,
+        )
+        .expect("honest rank-one stage 3");
+
+        // prove_stage on the materialized weights draws the same coefficients.
+        let (mut prover_tx, _, _) = transcript_at_stage3(&manifest);
+        let run = prove_stage(&spec, &manifest, &points, &claims, |id| resolve_with(&weights, id), &mut prover_tx)
+            .expect("honest stage 3");
+        assert_eq!(run.gammas, gammas);
+        assert_eq!(run.messages, drawn.messages);
+        assert_eq!(run.point, drawn.point);
+
+        // The verifier: replay, then the weights at r^(3) and the opening claims.
+        let opening = |run: &agg_piop::stage::StageRun, id: LaneId| run.value(&spec, id);
+        let verify = |claims: &[OpeningField], run: &agg_piop::stage::StageRun| -> Result<(), StageError> {
+            let (mut verifier_tx, _, _) = transcript_at_stage3(&manifest);
+            let replay = replay_stage(&spec, &manifest, claims, &run.messages, &mut verifier_tx)?;
+            let values = reductions.evaluate(&replay.gammas[range.clone()], &r1, &r2, &replay.point);
+            check_terminal(&spec, &manifest, &points, &replay, |id| match id {
+                LaneId::Weight(w) => values.get(w),
+                other => opening(run, other),
+            })
+        };
+        verify(&claims, &run).expect("honest stage 3 verifies");
+
+        // The opening claims: every committed Keccak polynomial at the d_K suffix of r^(3), in
+        // manifest group order, each equal to its multilinear extension there; the bits of
+        // the absorbed blocks at the main suffix.
+        let pi_m = vec![OpeningField::zero(); manifest.group(GroupRole::Mult).logical_vars];
+        let group_points = group_points_fp(&manifest, &run.point, &pi_m).expect("group points");
+        let mut keccak_openings = 0;
+        for group in manifest.groups().iter().filter(|g| matches!(g.role, GroupRole::KeccakA(_) | GroupRole::KeccakC | GroupRole::KeccakCPrime)) {
+            let at = &group_points[group.role.index_in(manifest.hash_field())];
+            assert_eq!(at, &suffix(&run.point, d_k));
+            for &column in &group.columns {
+                let id = LaneId::Column(column);
+                assert_eq!(opening(&run, id), mle_at(&lane_table(id), at), "{}", column.name());
+                keccak_openings += 1;
+            }
+        }
+        assert_eq!(keccak_openings, 385);
+        let r3_main = suffix(&run.point, manifest.d_main());
+        let main_cells = 1 << manifest.d_main();
+        for w in reductions.absorbs().iter().filter(|w| w.point == KeccakPoint::R1) {
+            let id = LaneId::Column(Column::W1Bit(w.t, w.lane));
+            let lane = tables.lane(id);
+            let bits: Vec<OpeningField> = (0..main_cells).map(|x| lane.value(x)).collect();
+            assert_eq!(opening(&run, id), mle_at(&bits, &r3_main));
+        }
+
+        // A changed stage-1 Rot claim or stage-2 Prev claim: the prover's self-check fails,
+        // and so does the verifier's terminal check on an unchecked proof.
+        let rot = r1_lanes.iter().position(|id| matches!(id, LaneId::KeccakRot(_))).expect("a Rot claim");
+        let prev = r2_lanes.iter().position(|id| matches!(id, LaneId::KeccakPrev(_))).expect("a Prev claim");
+        for (stage, index) in [(1, rot), (2, prev)] {
+            let (mut bad_r1, mut bad_r2) = (r1_claims.clone(), r2_claims.clone());
+            let claim = if stage == 1 { &mut bad_r1[index] } else { &mut bad_r2[index] };
+            *claim += OpeningField::from_u64(1);
+            let bad = claims_for(&bad_r1, &bad_r2);
+            let (mut checked_tx, _, _) = transcript_at_stage3(&manifest);
+            assert!(matches!(
+                prove_stage(&spec, &manifest, &points, &bad, |id| resolve_with(&weights, id), &mut checked_tx),
+                Err(StageError::Terminal(3))
+            ));
+            let (mut unchecked_tx, _, _) = transcript_at_stage3(&manifest);
+            let bad_run =
+                prove_stage_unchecked(&spec, &manifest, &points, &bad, |id| resolve_with(&weights, id), &mut unchecked_tx)
+                    .expect("unchecked stage 3");
+            assert!(matches!(verify(&bad, &bad_run), Err(StageError::Terminal(3))), "stage {stage}");
+        }
+        eprintln!(
+            "keccak stage 3 (N = 8): gamma^(3) {gamma_count}, Keccak claims {}, groups {}, Keccak openings {keccak_openings}",
+            range.len(),
+            spec.groups.len()
+        );
+    });
+}

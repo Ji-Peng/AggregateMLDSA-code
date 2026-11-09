@@ -53,15 +53,27 @@
 //! the row and `m_w - 1 = 15`), one `F_omega` over every lane of `delta` and `u_h` (claim
 //! `omega` of the set), and the reductions of stage 2's `delta^(rho)(r^(2))`, `e^(rho)(r^(2))`:
 //! 136 coefficients for ML-DSA-65, 173 for ML-DSA-87.
+//!
+//! Under `HashField::Fp` the bridge is gone: no `b_t` claim at `r^(2)`, no level reductions
+//! and only the lookup stacks of the manifest (`[Z_lo | U_lo]` and `[K_0 | K_1]` for
+//! ML-DSA-44). After the projection identity come the Keccak claims of stages 1 and 2
+//! (`keccak_fp::weights`): one coefficient per claim, folded into one rank-one weight per
+//! (committed Keccak polynomial, point) on the Keccak domain and one per (bit lane, point)
+//! on the main domain, whose record factor `eq(r_i, i)` both domains share. The claimed sums
+//! are the claims minus their public round-constant and padding parts. Every Keccak claim
+//! thus reaches `r^(3)`, where the opening proves every committed Keccak polynomial at the
+//! `d_K` suffix: 1,271 coefficients and 401 opening claims (385 Keccak) for ML-DSA-44 under
+//! H-u.
 
 use agg_witness::params::{N, Q};
 use jolt_field::{One, Ring, Zero};
 
 use crate::claims::{bit_columns, Kappa1Claims, PreStageClaims, Stage1Claims, Stage2Claims, Stage3Claims};
+use crate::keccak_fp::weights::KeccakReductions;
 use crate::kernel::{Lane, Source, Term};
 use crate::lane_public::LanePublicData;
 use crate::lookup::LookupClaims;
-use crate::manifest::{value_columns, Column, CommitmentManifest, FipsColumn, GroupRole, LOOKUP_SHIFT, V16_DIGITS};
+use crate::manifest::{value_columns, Column, CommitmentManifest, FipsColumn, GroupRole, HashField, LOOKUP_SHIFT, V16_DIGITS};
 use crate::range::digits;
 use crate::stage::{
     check_terminal, draw_gammas, prove_stage, prove_stage_drawn, prove_stage_unchecked, replay_stage, EqPoint,
@@ -117,6 +129,11 @@ pub struct Gammas {
     pub bit_lanes: usize,
     /// Lookup stacks.
     pub stacks: usize,
+    /// The bridge of `HashField::Gf2`: the bit reductions from `r^(2)` and the level
+    /// reductions exist only with it.
+    pub bridge: bool,
+    /// Keccak claims of stages 1 and 2 reduced to `r^(3)` (`HashField::Fp`; zero otherwise).
+    pub keccak: usize,
 }
 
 impl Gammas {
@@ -133,6 +150,8 @@ impl Gammas {
             bits: shape.w1_bits,
             bit_lanes: shape.w1_bits * shape.lanes_k,
             stacks: manifest.lookup_shape().stacks.len(),
+            bridge: manifest.hash_field() == HashField::Gf2,
+            keccak: Stage1Claims::keccak_len(manifest) + Stage2Claims::keccak_len(manifest),
         }
     }
 
@@ -157,16 +176,44 @@ impl Gammas {
         self.rings + self.links + self.bools + self.fips_checks()
     }
 
-    /// The reductions of the level parities and carries start after the two bit reductions.
+    /// The reductions of the level parities and carries start after the bit reductions (from
+    /// `r^(1)` and `r^(2)` with the bridge, from `r^(1)` alone without it: the bits then
+    /// carry no stage-2 claim).
     const fn level_reductions(self) -> usize {
-        self.first_reduction() + 2 * self.bit_lanes
+        if self.bridge {
+            self.first_reduction() + 2 * self.bit_lanes
+        } else {
+            self.first_reduction() + self.bit_lanes
+        }
+    }
+
+    /// The level reductions of the bridge (`y^(2)_t` twice, `K^(2)_t`, `K^(3)`, `K^(1)_t`).
+    const fn bridge_reductions(self) -> usize {
+        if self.bridge {
+            4 * self.bits + 1
+        } else {
+            0
+        }
     }
 
     /// Batching coefficients: for ML-DSA-44 49 under H-u, 50 under H-exact, 56 under H-FIPS;
-    /// 105 for ML-DSA-65 and 132 for ML-DSA-87 (136 and 173 under H-FIPS).
+    /// 105 for ML-DSA-65 and 132 for ML-DSA-87 (136 and 173 under H-FIPS). Under
+    /// `HashField::Fp` the Keccak reductions follow the projection identity.
     #[must_use]
     pub const fn count(self) -> usize {
+        self.keccak_first() + self.keccak
+    }
+
+    /// Gamma index of the first Keccak claim (after the projection identity).
+    const fn keccak_first(self) -> usize {
         self.stack(self.stacks) + PROJ_INSTANCES
+    }
+
+    /// Gamma indices of the Keccak claims of stages 1 and 2 (stage 1's first), folded into
+    /// the reduction weights (empty under `HashField::Gf2`).
+    #[must_use]
+    pub const fn keccak_claims(self) -> std::ops::Range<usize> {
+        self.keccak_first()..self.keccak_first() + self.keccak
     }
 
     /// Gamma index of `ring[rho]` (`ring` at 0 for ML-DSA-44).
@@ -210,7 +257,7 @@ impl Gammas {
     /// Gamma index of H-FIPS reduction `k` of ML-DSA-44 (`delta`, `e` from `r^(2)`).
     #[must_use]
     pub const fn fips_reduction(self, k: usize) -> usize {
-        self.level_reductions() + 4 * self.bits + 1 + k
+        self.level_reductions() + self.bridge_reductions() + k
     }
 
     /// Gamma index of the H-FIPS reduction of stage 2's terminal claim `k` (the order of
@@ -239,7 +286,7 @@ impl Gammas {
         self.first_reduction() + i
     }
 
-    /// Gamma index of the reduction of bit polynomial `i` from `r^(2)`.
+    /// Gamma index of the reduction of bit polynomial `i` from `r^(2)` (with the bridge only).
     #[must_use]
     pub const fn b_r2(self, i: usize) -> usize {
         self.first_reduction() + self.bit_lanes + i
@@ -278,7 +325,7 @@ impl Gammas {
     /// Gamma index of the reduction of lookup stack `j`.
     #[must_use]
     pub const fn stack(self, j: usize) -> usize {
-        self.level_reductions() + 4 * self.bits + 1 + self.fips_reductions() + j
+        self.level_reductions() + self.bridge_reductions() + self.fips_reductions() + j
     }
 }
 
@@ -294,7 +341,8 @@ pub struct Stage3Proof {
     /// Compressed degree-3 messages (3 elements each).
     pub rounds: Vec<Vec<E>>,
     /// The opening claims at `r^(3)` and its suffixes (for ML-DSA-44: 35 under H-u, 36 under
-    /// H-exact, 40 under H-FIPS; `Stage3Claims::len` in general).
+    /// H-exact, 40 under H-FIPS, 401 under H-u with `HashField::Fp`; `Stage3Claims::len` in
+    /// general).
     pub claims: Stage3Claims,
 }
 
@@ -343,13 +391,29 @@ fn column_lanes(columns: &[Column]) -> Vec<LaneId> {
     columns.iter().map(|&c| LaneId::Column(c)).collect()
 }
 
+/// The reduction table of the Keccak claims of stages 1 and 2, with the claims at the gamma
+/// indices [`Gammas::keccak_claims`] (`None` under `HashField::Gf2`).
+#[must_use]
+pub fn keccak_reductions(manifest: &CommitmentManifest) -> Option<KeccakReductions> {
+    let gammas = Gammas::new(manifest);
+    (manifest.hash_field() == HashField::Fp)
+        .then(|| KeccakReductions::for_manifest(manifest, gammas.keccak_claims().start))
+}
+
 /// The instance table; `weights[j]` are the column weights of lookup stack `j`
 /// ([`stack_weights`]).
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
+    spec_with(manifest, weights, keccak_reductions(manifest).as_ref())
+}
+
+/// [`spec`] with the Keccak reduction table already built (`HashField::Fp`).
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn spec_with(manifest: &CommitmentManifest, weights: &[Vec<E>], keccak: Option<&KeccakReductions>) -> StageSpec {
     let gammas = Gammas::new(manifest);
     assert_eq!(weights.len(), gammas.stacks, "one weight vector per lookup stack");
+    assert_eq!(keccak.is_some(), !gammas.bridge, "the Keccak reductions exactly under HashField::Fp");
     let shape = manifest.shape();
     let (lanes_k, lanes_l) = (shape.lanes_k as u8, shape.lanes_l as u8);
     let all = digits(manifest);
@@ -485,11 +549,13 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
             instances.push(InstanceSpec::new(gammas.fips_terminal_reduction(k), vec![Term::Product(vec![position(column)])]));
         }
     }
-    instances.extend(
-        bits.iter()
-            .enumerate()
-            .map(|(i, &column)| InstanceSpec::new(gammas.b_r2(i), vec![Term::Product(vec![position(column)])])),
-    );
+    if gammas.bridge {
+        instances.extend(
+            bits.iter()
+                .enumerate()
+                .map(|(i, &column)| InstanceSpec::new(gammas.b_r2(i), vec![Term::Product(vec![position(column)])])),
+        );
+    }
     groups.push(GroupSpec {
         domain: GroupRole::Main,
         eq: EqPoint::R2,
@@ -562,6 +628,61 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
         lanes: bit_ids,
     });
 
+    if gammas.bridge {
+        bridge_groups(manifest, gammas, &mut groups);
+    }
+
+    // The projection identity (`projection`), both sides with the shared claim c: on the
+    // main domain without an equality factor, W^(rho) (V_lo + 2^16 V_hi + 2^15) per lane of v;
+    // on the projection domain at the suffix r' of r^(2), the composition of the digits of
+    // k (K_0 + 2^16 K_1 + 2^32 K_2 + 2^35 K_3 + 2^34 + 2^31 + 2^15 for ML-DSA-44), beside the
+    // links of its leaf-checked digits.
+    projection_groups(manifest, gammas, &all, &mut groups);
+
+    // The lookup stacks: one equality group per stack at its low point, one part per column
+    // with the column weight as scale.
+    let domains = manifest.stack_domains();
+    for (j, stack_weights) in weights.iter().enumerate() {
+        let columns = manifest.stack_columns(j);
+        assert_eq!(stack_weights.len(), columns.len(), "one weight per stack column");
+        groups.push(GroupSpec {
+            domain: domains[j],
+            eq: EqPoint::Lookup(j),
+            lanes: column_lanes(&columns),
+            instances: stack_weights
+                .iter()
+                .enumerate()
+                .map(|(c, &scale)| InstanceSpec {
+                    gamma: gammas.stack(j),
+                    scale,
+                    terms: vec![Term::Product(vec![c])],
+                })
+                .collect(),
+        });
+    }
+
+    // HashField::Fp: every Keccak claim of stages 1 and 2 reduced to r^(3), one weighted
+    // part per (committed Keccak polynomial, point) and per (bit lane, point); their
+    // coefficients live in the weights.
+    let folded = match keccak {
+        Some(keccak) => {
+            assert_eq!(keccak.gammas(), gammas.keccak_claims(), "the Keccak claims follow the projection identity");
+            groups.extend(keccak.groups());
+            keccak.gammas()
+        }
+        None => 0..0,
+    };
+    StageSpec {
+        stage: STAGE,
+        degree: DEGREE,
+        gamma_count: gammas.count(),
+        groups,
+        folded,
+    }
+}
+
+/// The level reductions of the bridge on `D_1`, `D_2` and `D_3` (`HashField::Gf2`).
+fn bridge_groups(manifest: &CommitmentManifest, gammas: Gammas, groups: &mut Vec<GroupSpec>) {
     // D_1, eq(r^(1)_1): K^(1)_t reductions.
     let kappa1 = column_lanes(&manifest.stack_columns(manifest.carry_stack(1)));
     groups.push(GroupSpec {
@@ -603,12 +724,17 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
         instances: reductions(&kappa3, |_| gammas.kappa3_tau()),
         lanes: kappa3,
     });
+}
 
-    // The projection identity (`projection`), both sides with the shared claim c: on the
-    // main domain without an equality factor, W^(rho) (V_lo + 2^16 V_hi + 2^15) per lane of v;
-    // on the projection domain at the suffix r' of r^(2), the composition of the digits of
-    // k (K_0 + 2^16 K_1 + 2^32 K_2 + 2^35 K_3 + 2^34 + 2^31 + 2^15 for ML-DSA-44), beside the
-    // links of its leaf-checked digits.
+/// Both sides of the projection identity: `W^(rho) v^(rho)` per lane of `v` on the main
+/// domain, and the composition of `k` with the links of its leaf-checked digits on `D_k`.
+fn projection_groups(
+    manifest: &CommitmentManifest,
+    gammas: Gammas,
+    all: &[crate::range::Digit],
+    groups: &mut Vec<GroupSpec>,
+) {
+    let lanes_k = manifest.shape().lanes_k as u8;
     let v_form = V16_DIGITS;
     for lane in 0..lanes_k {
         groups.push(GroupSpec {
@@ -654,40 +780,12 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
         lanes: column_lanes(&k_columns),
         instances: proj_instances,
     });
-
-    // The lookup stacks: one equality group per stack at its low point, one part per column
-    // with the column weight as scale.
-    let domains = manifest.stack_domains();
-    for (j, stack_weights) in weights.iter().enumerate() {
-        let columns = manifest.stack_columns(j);
-        assert_eq!(stack_weights.len(), columns.len(), "one weight per stack column");
-        groups.push(GroupSpec {
-            domain: domains[j],
-            eq: EqPoint::Lookup(j),
-            lanes: column_lanes(&columns),
-            instances: stack_weights
-                .iter()
-                .enumerate()
-                .map(|(c, &scale)| InstanceSpec {
-                    gamma: gammas.stack(j),
-                    scale,
-                    terms: vec![Term::Product(vec![c])],
-                })
-                .collect(),
-        });
-    }
-    StageSpec {
-        stage: STAGE,
-        degree: DEGREE,
-        gamma_count: gammas.count(),
-        groups,
-        folded: 0..0,
-    }
 }
 
 /// The claimed sums in gamma order (the Booleanity zero-checks claim zero); `t_at_r2[rho]`
-/// is `T~_rho(r^(2))` (one value, `T(r^(2))`, for ML-DSA-44) and `stacks[j]` stack `j`'s
-/// column claim ([`stack_reductions`]).
+/// is `T~_rho(r^(2))` (one value, `T(r^(2))`, for ML-DSA-44), `stacks[j]` stack `j`'s
+/// column claim ([`stack_reductions`]) and `keccak` the claimed sums of the Keccak
+/// reductions ([`KeccakReductions::claimed_sums`]; empty under `HashField::Gf2`).
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn claimed_sums(
@@ -699,9 +797,11 @@ pub fn claimed_sums(
     stage2: &Stage2Claims,
     stacks: &[E],
     stage2_projection: E,
+    keccak: &[E],
 ) -> Vec<E> {
     let gammas = Gammas::new(manifest);
     assert_eq!(t_at_r2.len(), gammas.rings, "one T claim per ring instance");
+    assert_eq!(keccak.len(), gammas.keccak, "one claimed sum per Keccak claim");
     let mut claims = vec![E::zero(); gammas.count()];
     for (rho, &t) in t_at_r2.iter().enumerate() {
         claims[gammas.ring(rho)] = t;
@@ -717,21 +817,39 @@ pub fn claimed_sums(
     }
     for i in 0..gammas.bit_lanes {
         claims[gammas.b_r1(i)] = stage1.b[i];
-        claims[gammas.b_r2(i)] = stage2.b[i];
     }
-    for t in 0..gammas.bits {
-        claims[gammas.y2_tau(t)] = prestage.y2[t];
-        claims[gammas.y2_r1(t)] = stage1.y2[t];
-        claims[gammas.kappa2_tau(t)] = prestage.kappa2[t];
-        claims[gammas.kappa1_r1(t)] = kappa1.0[t];
+    if gammas.bridge {
+        for i in 0..gammas.bit_lanes {
+            claims[gammas.b_r2(i)] = stage2.b[i];
+        }
+        for t in 0..gammas.bits {
+            claims[gammas.y2_tau(t)] = prestage.y2[t];
+            claims[gammas.y2_r1(t)] = stage1.y2[t];
+            claims[gammas.kappa2_tau(t)] = prestage.kappa2[t];
+            claims[gammas.kappa1_r1(t)] = kappa1.0[t];
+        }
+        claims[gammas.kappa3_tau()] = prestage.kappa3;
     }
-    claims[gammas.kappa3_tau()] = prestage.kappa3;
     for (j, &claim) in stacks.iter().enumerate() {
         claims[gammas.stack(j)] = claim;
     }
     claims[gammas.proj_v()] = stage2_projection;
     claims[gammas.proj_k()] = stage2_projection;
+    claims[gammas.keccak_claims()].copy_from_slice(keccak);
     claims
+}
+
+/// The claimed sums of the Keccak reductions: the stage-1 and stage-2 Keccak claims minus
+/// their public parts at `r^(1)`, `r^(2)` (empty without a reduction table).
+fn keccak_sums(keccak: Option<&KeccakReductions>, stage1: &Stage1Output, stage2: &Stage2Output) -> Vec<E> {
+    keccak.map_or_else(Vec::new, |keccak| {
+        keccak.claimed_sums(&stage1.claims.keccak, &stage2.claims.keccak, &stage1.point, &stage2.point)
+    })
+}
+
+/// True for the stage-3 Keccak reduction weights.
+const fn is_keccak_weight(id: LaneId) -> bool {
+    matches!(id, LaneId::Weight(WeightId::KeccakReduce { .. } | WeightId::KeccakAbsorb { .. }))
 }
 
 /// The lookup inputs of stage 3: the stack weights, the stack claims and the low points.
@@ -850,7 +968,8 @@ fn prove_with(
     transcript: &mut Transcript,
     check: bool,
 ) -> Result<(Stage3Proof, Stage3Output), StageError> {
-    let spec = spec(manifest, &lookup.weights);
+    let keccak = keccak_reductions(manifest);
+    let spec = spec_with(manifest, &lookup.weights, keccak.as_ref());
     let claims = claimed_sums(
         manifest,
         &ring.t_values(),
@@ -860,32 +979,52 @@ fn prove_with(
         &stage2.claims,
         &lookup.claims,
         stage2.projection,
+        &keccak_sums(keccak.as_ref(), stage1, stage2),
     );
-    let run = match ring {
-        RingInputs::Rows(_) if check => {
+    let run = match (ring, &keccak) {
+        (RingInputs::Rows(_), None) if check => {
             prove_stage(&spec, manifest, points, &claims, |id| tables.lane(id), transcript)?
         }
-        RingInputs::Rows(_) => prove_stage_unchecked(&spec, manifest, points, &claims, |id| tables.lane(id), transcript)?,
-        RingInputs::Lanes { public, .. } => {
+        (RingInputs::Rows(_), None) => {
+            prove_stage_unchecked(&spec, manifest, points, &claims, |id| tables.lane(id), transcript)?
+        }
+        (ring, keccak) => {
             let gammas = draw_gammas(&spec, &claims, transcript)?;
-            let rows = Gammas::new(manifest);
-            let row_gammas: Vec<E> = (0..rows.rings).map(|rho| gammas[rows.ring(rho)]).collect();
             let clock = std::time::Instant::now();
-            // The plane-layout kernels read the weights as canonical planes, built in place;
-            // the row layout reads one `K` table per column.
-            let ring = if crate::kernel::layout() == crate::kernel::Layout::Plane {
-                RingWeights::Planes(public.ring_weight_planes(&points.r2, &row_gammas), public.padded_records() * N)
-            } else {
-                RingWeights::Rows(public.ring_weight_tables(&points.r2, &row_gammas))
+            let ring = match ring {
+                RingInputs::Rows(_) => None,
+                RingInputs::Lanes { public, .. } => {
+                    let rows = Gammas::new(manifest);
+                    let row_gammas: Vec<E> = (0..rows.rings).map(|rho| gammas[rows.ring(rho)]).collect();
+                    // The plane-layout kernels read the weights as canonical planes, built in
+                    // place; the row layout reads one `K` table per column.
+                    Some(if crate::kernel::layout() == crate::kernel::Layout::Plane {
+                        RingWeights::Planes(public.ring_weight_planes(&points.r2, &row_gammas), public.padded_records() * N)
+                    } else {
+                        RingWeights::Rows(public.ring_weight_tables(&points.r2, &row_gammas))
+                    })
+                }
             };
+            let lane_clock = clock.elapsed();
+            // The Keccak reduction weights depend on their coefficients in gamma^(3), so they
+            // are built here, between the draw and the first round.
+            let keccak_weights = keccak.as_ref().map(|k| k.tables(&gammas[k.gammas()], &stage1.point, &stage2.point));
             if std::env::var_os("AGG_STAGE_TRACE").is_some() {
-                eprintln!("weights: lane w_A {:.1} ms", clock.elapsed().as_secs_f64() * 1e3);
+                eprintln!("weights: lane w_A {:.1} ms", lane_clock.as_secs_f64() * 1e3);
+                if keccak_weights.is_some() {
+                    eprintln!("weights: Keccak reductions {:.1} ms", (clock.elapsed() - lane_clock).as_secs_f64() * 1e3);
+                }
             }
-            let resolve = |id| match id {
-                LaneId::Weight(WeightId::Ring(s)) => ring.lane(usize::from(s)),
-                other => tables.lane(other),
+            let resolve = |id| match (id, &ring) {
+                (LaneId::Weight(WeightId::Ring(s)), Some(ring)) => ring.lane(usize::from(s)),
+                // The stage takes the factors; the lane is only a placeholder.
+                (id, _) if is_keccak_weight(id) => Lane::Folded(Vec::new()),
+                (other, _) => tables.lane(other),
             };
-            let rank_one = |id| tables.rank_one(id);
+            let rank_one = |id| match (id, &keccak_weights) {
+                (LaneId::Weight(w), Some(weights)) if is_keccak_weight(id) => weights.rank_one(w),
+                (other, _) => tables.rank_one(other),
+            };
             prove_stage_drawn(&spec, manifest, points, &claims, gammas, resolve, None, Some(&rank_one), transcript, check)?
         }
     };
@@ -940,7 +1079,8 @@ pub(crate) fn verify_streamed(
 ) -> Result<Stage3Output, StageError> {
     assert_eq!(psi.len(), manifest.proj_bytes(), "Psi has 128 rows of P bits");
     let gammas = Gammas::new(manifest);
-    let spec = spec(manifest, &lookup.weights);
+    let keccak = keccak_reductions(manifest);
+    let spec = spec_with(manifest, &lookup.weights, keccak.as_ref());
     let claims = claimed_sums(
         manifest,
         &vec![E::zero(); gammas.rings],
@@ -950,6 +1090,7 @@ pub(crate) fn verify_streamed(
         &stage2.claims,
         &lookup.claims,
         stage2.projection,
+        &keccak_sums(keccak.as_ref(), stage1, stage2),
     );
     let mut replay = replay_stage(&spec, manifest, &claims, &proof.rounds, transcript)?;
     if proof.claims.0.len() != Stage3Claims::len(manifest) {
@@ -970,10 +1111,16 @@ pub(crate) fn verify_streamed(
     } else {
         vec![crate::projection::weight_at(manifest, psi, &stage2.point, &replay.point)]
     };
+    let keccak_values = keccak
+        .as_ref()
+        .map(|k| k.evaluate(&replay.gammas[k.gammas()], &stage1.point, &stage2.point, &replay.point));
     check_terminal(&spec, manifest, points, &replay, |id| match id {
         LaneId::Column(c) => proof.claims.column(manifest, c),
         LaneId::Weight(WeightId::Ring(s)) => ring_weights[usize::from(s)],
         LaneId::Weight(WeightId::Proj(lane)) => proj_weights[usize::from(lane)],
+        LaneId::Weight(w) if is_keccak_weight(id) => {
+            keccak_values.as_ref().expect("Keccak weights under HashField::Fp").get(w)
+        }
         other => panic!("{other:?} is not a stage-3 lane"),
     })?;
     Ok(Stage3Output {
@@ -1056,6 +1203,7 @@ mod tests {
             &Stage2Claims::from_slice(&manifest, &point(&mut rng, Stage2Claims::len(&manifest))).unwrap(),
             &point(&mut rng, STACKS),
             c,
+            &[],
         );
         assert_eq!((claims[gammas.proj_v()], claims[gammas.proj_k()]), (c, c));
     }
@@ -1304,6 +1452,99 @@ mod tests {
             // u = U_lo + 2^16 U_mid + 523,267 a_u - 228,865, v = V_lo + 2^16 V_hi + 2^15.
             assert_eq!(*constant, 228_865 - Q * (1 << 15));
         }
+    }
+
+    /// `HashField::Fp`, ML-DSA-44, H-u: the bridge reductions go (no `b_t` claim at `r^(2)`,
+    /// no `D_1`, `D_2`, `D_3`), two lookup stacks remain, and the 1,256 Keccak claims of stages
+    /// 1 and 2 follow the projection identity as one folded range; every committed
+    /// polynomial but the multiplicity digits is read at `r^(3)`, the Keccak ones through the
+    /// reduction groups. The `HashField::Gf2` layout keeps its 49 coefficients.
+    #[test]
+    fn fp_stage_three_drops_the_bridge_and_reduces_every_keccak_claim() {
+        let gf2 = Gammas::new(&CommitmentManifest::for_batch(8).unwrap());
+        assert_eq!((gf2.count(), gf2.keccak_claims(), gf2.bridge), (49, 49..49, true));
+        let manifest = CommitmentManifest::for_batch_fp(8).unwrap();
+        let gammas = Gammas::new(&manifest);
+        assert_eq!(
+            (gammas.rings, gammas.links, gammas.bools, gammas.bit_lanes, gammas.stacks, gammas.bridge),
+            (1, 4, 0, 6, 2, false)
+        );
+        // ring 0, links 1..4, b_t from r^(1) 5..10, stacks 11, 12, projection 13, 14, then the
+        // 740 stage-1 and 516 stage-2 Keccak claims.
+        assert_eq!((gammas.b_r1(0), gammas.stack(0), gammas.proj_v(), gammas.proj_k()), (5, 11, 13, 14));
+        assert_eq!(gammas.keccak, 740 + 516);
+        assert_eq!(gammas.keccak_claims(), 15..1271);
+        assert_eq!(gamma_count(&manifest), 1271);
+        let mut rng = SplitMix64::new(12);
+        let weights: Vec<Vec<E>> = (0..gammas.stacks)
+            .map(|j| point(&mut rng, manifest.stack_columns(j).len()))
+            .collect();
+        let spec = spec(&manifest, &weights);
+        spec.validate().unwrap();
+        assert_eq!((spec.gamma_count, spec.folded.clone()), (1271, 15..1271));
+        let keccak_groups = spec.groups.iter().filter(|g| g.domain == GroupRole::KeccakA(0)).count();
+        let absorb_groups = spec
+            .groups
+            .iter()
+            .filter(|g| matches!(g.lanes[0], LaneId::Weight(WeightId::KeccakAbsorb { .. })))
+            .count();
+        // Lattice: eq(r^(2)), w_A, eq(r^(1)) bits, the v side, the k side, two stacks.
+        assert_eq!((spec.groups.len(), keccak_groups, absorb_groups), (7 + 695 + 12, 695, 12));
+        let mut counts = vec![0; gammas.count()];
+        for group in &spec.groups {
+            assert!(!matches!(group.domain, GroupRole::Level1 | GroupRole::Level2 | GroupRole::Level3));
+            for instance in &group.instances {
+                if instance.gamma != crate::stage::UNBATCHED {
+                    counts[instance.gamma] += 1;
+                }
+                let inner = usize::from(group.eq != EqPoint::None);
+                for term in &instance.terms {
+                    assert!(term.degree() + inner <= DEGREE, "{term:?}");
+                }
+            }
+        }
+        assert_eq!(counts[GAMMA_RING], 2);
+        assert!(counts[1..gammas.stack(0)].iter().all(|&c| c == 1));
+        assert!(counts[gammas.keccak_claims()].iter().all(|&c| c == 0), "folded into the weights");
+        let mut keccak_polys = 0;
+        for group in manifest.groups() {
+            for &column in &group.columns {
+                assert_eq!(
+                    spec.lane_ids().contains(&LaneId::Column(column)),
+                    group.role != GroupRole::Mult && !column.is_zero(),
+                    "{}",
+                    column.name()
+                );
+                keccak_polys += usize::from(column.domain() == GroupRole::KeccakA(0));
+            }
+        }
+        // The opening claims: the 12 lattice polynomials of G_main16 and G_main4, the four of
+        // G_k and the 385 Keccak polynomials.
+        let lattice = Stage3Claims::len(&manifest) - keccak_polys;
+        assert_eq!((keccak_polys, lattice, Stage3Claims::len(&manifest)), (385, 16, 401));
+        // The claimed sums: the Keccak sums at their range, the bridge entries absent.
+        let keccak: Vec<E> = point(&mut rng, gammas.keccak);
+        let claims = claimed_sums(
+            &manifest,
+            &[E::one()],
+            &PreStageClaims { y2: Vec::new(), kappa2: Vec::new(), kappa3: E::zero() },
+            &Stage1Claims::from_slice_for(&manifest, &point(&mut rng, Stage1Claims::len(&manifest))).unwrap(),
+            &Kappa1Claims(Vec::new()),
+            &Stage2Claims::from_slice(&manifest, &point(&mut rng, Stage2Claims::len(&manifest))).unwrap(),
+            &point(&mut rng, gammas.stacks),
+            E::zero(),
+            &keccak,
+        );
+        assert_eq!(&claims[gammas.keccak_claims()], keccak.as_slice());
+        eprintln!(
+            "fp stage 3 (ML-DSA-44, H-u, N = 8): gamma^(3) {}, Keccak claims {}, groups {}, opening claims {} ({} Keccak, {} lattice)",
+            gammas.count(),
+            gammas.keccak,
+            spec.groups.len(),
+            Stage3Claims::len(&manifest),
+            keccak_polys,
+            lattice
+        );
     }
 
     fn check_spec(manifest: &CommitmentManifest, count: usize) -> StageSpec {
