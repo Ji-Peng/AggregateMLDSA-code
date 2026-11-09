@@ -423,29 +423,6 @@ fn prove_stage_with<'a>(
     prove_stage_drawn(spec, manifest, points, claims, gammas, resolve, split, None, transcript, check)
 }
 
-fn draw_stage_gammas(stage: usize, count: usize, transcript: &mut Transcript) -> Result<Vec<E>, TranscriptError> {
-    let site = gamma_site(stage);
-    #[cfg(not(test))]
-    {
-        transcript.challenge_extensions(&site, count)
-    }
-    #[cfg(test)]
-    {
-        match transcript.challenge_extensions(&site, count) {
-            Err(TranscriptError::EventShape { .. }) => {
-                for full in [26, 37, 45, 10, 9, 49, 50, 56, 105, 132] {
-                    if let Ok(mut gammas) = transcript.challenge_extensions(&site, full) {
-                        gammas.truncate(count);
-                        return Ok(gammas);
-                    }
-                }
-                transcript.challenge_extensions(&site, count)
-            }
-            other => other,
-        }
-    }
-}
-
 /// Validate a stage's table and claims and draw its batching coefficients `gamma` (the
 /// first event of every stage).
 pub fn draw_gammas(spec: &StageSpec, claims: &[E], transcript: &mut Transcript) -> Result<Vec<E>, StageError> {
@@ -453,7 +430,7 @@ pub fn draw_gammas(spec: &StageSpec, claims: &[E], transcript: &mut Transcript) 
     if claims.len() != spec.gamma_count {
         return Err(StageError::Internal("one claim per gamma".into()));
     }
-    Ok(draw_stage_gammas(spec.stage, spec.gamma_count, transcript)?)
+    Ok(transcript.challenge_extensions(&gamma_site(spec.stage), spec.gamma_count)?)
 }
 
 /// The rounds of a stage whose coefficients [`draw_gammas`] drew, so that the caller can
@@ -1663,7 +1640,7 @@ pub fn replay_stage(
     if messages.len() != rounds || messages.iter().any(|m| m.len() != spec.degree) {
         return Err(StageError::Shape(format!("stage {} rounds", spec.stage)));
     }
-    let gammas = draw_stage_gammas(spec.stage, spec.gamma_count, transcript)?;
+    let gammas = transcript.challenge_extensions(&gamma_site(spec.stage), spec.gamma_count)?;
     let mut claim = gamma_weighted_claim(&gammas, claims);
     let mut point = Vec::with_capacity(rounds);
     for (round, message) in messages.iter().enumerate() {
@@ -1837,18 +1814,23 @@ mod tests {
         let vars = manifest.group(domain).logical_vars;
         assert_eq!(vars, 13);
         let mask = 0x00FF_u16;
+        let gamma_count = crate::stage1::gamma_count(&manifest);
+        let mut instances = vec![
+            InstanceSpec::new(0, vec![Term::Bool(0)]),
+            InstanceSpec::new(1, vec![Term::Bool(1)]),
+        ];
+        for gamma in 2..gamma_count {
+            instances.push(InstanceSpec::new(gamma, Vec::new()));
+        }
         let spec = StageSpec {
             stage: 1,
             degree: 4,
-            gamma_count: 2,
+            gamma_count,
             groups: vec![GroupSpec {
                 domain,
                 eq: EqPoint::TauMasked(mask),
                 lanes: vec![LaneId::Column(col0), LaneId::Column(col1)],
-                instances: vec![
-                    InstanceSpec::new(0, vec![Term::Bool(0)]),
-                    InstanceSpec::new(1, vec![Term::Bool(1)]),
-                ],
+                instances,
             }],
         };
         spec.validate().expect("valid masked stage spec");
@@ -1904,7 +1886,7 @@ mod tests {
             )
         };
 
-        let claims = [E::zero(), E::zero()];
+        let claims = vec![E::zero(); gamma_count];
         let (mut prover_tx, points) = stage1_transcript();
         let run = prove_stage(
             &spec,

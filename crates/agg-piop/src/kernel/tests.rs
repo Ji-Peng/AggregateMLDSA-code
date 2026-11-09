@@ -1003,5 +1003,67 @@ fn masked_group_matches_explicit_masked_eq_table() {
             }
         }
     }
+
+    // Exercise the parallel bucket reduction in `Group::masked_slot_round`
+    // (`records * s_pairs >= MIN_PARALLEL_ITEMS`, i.e., `d_sig >= 9` in the first slot round).
+    let par_vars = 6 + 4 + 9;
+    let par_len = 1_usize << par_vars;
+    let col0: Vec<i8> = (0..par_len).map(|_| (rng.next_u64() & 1) as i8).collect();
+    let col1: Vec<i8> = (0..par_len).map(|_| (rng.next_u64() % 5) as i8 - 2).collect();
+    let par_lanes = vec![Lane::column(&col0), Lane::column(&col1)];
+    let par_instances = vec![
+        instance(&mut rng, vec![Term::Bool(0), Term::Product(vec![])]),
+        instance(&mut rng, vec![Term::Product(vec![0, 1])]),
+    ];
+    let par_tau = point(&mut rng, par_vars);
+    let par_mask = 0x5A3C_u16;
+    let mut par_eq_table = eq_table(&par_tau);
+    for (idx, w) in par_eq_table.iter_mut().enumerate() {
+        let s = (idx >> 6) & 15;
+        if (par_mask >> s) & 1 == 0 {
+            *w = E::zero();
+        }
+    }
+    let mut par_group = Group::new_masked(
+        par_lanes.clone(),
+        par_instances.clone(),
+        Some(&par_tau),
+        Some(par_mask),
+        par_vars,
+        3,
+    )
+    .expect("parallel masked group");
+    let mut ref_lanes = par_lanes;
+    let mut eq_lane = Lane::Source(Source::Field(&par_eq_table));
+    let mut par_challenges = Vec::with_capacity(par_vars);
+    for round in 0..par_vars {
+        let got = par_group.round_message(round);
+        if (6..10).contains(&round) {
+            let want = compress(&reference_round(&ref_lanes, Some(&eq_lane), &par_instances, 3, 0), 3);
+            assert_eq!(got, want, "parallel masked slot round {round}");
+        }
+        let r = field(&mut rng);
+        par_group.bind(round, r);
+        for lane in &mut ref_lanes {
+            lane.fold(r);
+        }
+        eq_lane.fold(r);
+        par_challenges.push(r);
+    }
+    let par_terms = par_group.terminal_values();
+    let par_eq_z = eq_evaluation(&par_tau[..6], &par_challenges[..6]);
+    let par_eq_i = eq_evaluation(&par_tau[10..], &par_challenges[10..]);
+    let par_eq_tau_s = eq_table(&par_tau[6..10]);
+    let par_eq_r_s = eq_table(&par_challenges[6..10]);
+    let par_eq_s = (0..16)
+        .filter(|&s| (par_mask >> s) & 1 != 0)
+        .fold(E::zero(), |acc, s| acc + par_eq_tau_s[s] * par_eq_r_s[s]);
+    let par_eq_factor = par_eq_z * par_eq_s * par_eq_i;
+    assert_eq!(par_eq_factor, eq_lane.terminal(), "parallel masked eq_factor");
+    assert_eq!(
+        par_group.claim(),
+        expected_terminal(&par_instances, &par_terms, par_eq_factor, 0),
+        "parallel masked terminal"
+    );
 }
 
