@@ -28,7 +28,8 @@ usage: agg <command> [options]
 
 Every command takes --params 44|65|87, the ML-DSA parameter set (default 44). Key and
 record files of a set are refused by the commands of another set; an aggregate names its
-set, and verify rejects one of another set than --params.
+set, and verify rejects one of another set than --params. The hash field defaults to gf2;
+fp proves the Keccak chain over F_p without Flock.
 
 commands:
   keygen-batch --count K [--seed S] [--params 44|65|87] --out KEYS
@@ -38,7 +39,7 @@ commands:
       N signed records (pure mode, empty context); record i is signed by key i mod K,
       messages are derived from S (length L, or pseudo-random in [0, 160)).
   aggregate --records RECORDS --out AGGREGATE [--params 44|65|87] [--part-log2 D]
-            [--flock-profile P] [--flock-span on|off] [--relation R]
+            [--flock-profile P] [--flock-span on|off] [--relation R] [--hash-field gf2|fp]
       Mode-A aggregate of the records (strict FIPS 204 verification of every signature);
       Flock parts of 2^D record positions (default 13, one tied part per segment); Flock
       profile P = fast, slim or slim8 (Ligerito rate 1/2, 1/4 or 1/8, all 128-bit in
@@ -50,14 +51,14 @@ commands:
       h-u z in [-2^19, 2^19), |u| <= 523,777; h-exact |z| <= 524,091 resp. 524,167;
       h-fips also the hint.
   verify --records RECORDS --aggregate AGGREGATE [--params 44|65|87] [--cache CACHE]
-         [--flock-profile P] [--relation R]
+         [--flock-profile P] [--relation R] [--hash-field gf2|fp]
       Verify the aggregate for the records' (pk, M) (signatures are ignored), under the
       Flock profile its items name (or only under P), under relation R (default h-u; an
       aggregate of another relation is rejected) and for the set of --params. With
       --cache, expanded keys are read from and added to the cache file (one file per
       set). Exit status 0 on accept, 1 on reject.
   bench --count N [--keys K] [--seed S] [--warmup W] [--reps R] [--params 44|65|87]
-        [--part-log2 D] [--flock-profile P] [--flock-span on|off] [--relation R]
+        [--part-log2 D] [--flock-profile P] [--flock-span on|off] [--relation R] [--hash-field gf2|fp]
         [--json PATH]
       Generate N records over K keys (default N); aggregate W + R times, verify W + R times
       uncached and W + R times with cached keys (W warmup runs discarded, default W = 1,
@@ -201,6 +202,29 @@ impl Options {
             None => Ok(Relation::Hu),
             Some(v) => Relation::parse(&v).ok_or_else(|| format!("--{name}: h-u, h-exact or h-fips, not {v:?}")),
         }
+    }
+
+    /// `--name gf2|fp`: the hash field, GF(2) when absent.
+    fn hash_field(&mut self, name: &str) -> Result<HashField, String> {
+        match self.take(name).as_deref() {
+            None | Some("gf2") => Ok(HashField::Gf2),
+            Some("fp") => Ok(HashField::Fp),
+            Some(v) => Err(format!("--{name}: gf2 or fp, not {v:?}")),
+        }
+    }
+
+    fn check_hash_field_options(&self, field: HashField) -> Result<(), String> {
+        if field == HashField::Fp {
+            for name in ["flock-profile", "flock-span", "part-log2"] {
+                if self.0.contains_key(name) {
+                    return Err(format!("--{name} has no meaning under --hash-field fp: the Keccak chain is proven over F_p without Flock"));
+                }
+            }
+            if std::env::var_os("AGG_FLOCK_THREADS").is_some() {
+                eprintln!("AGG_FLOCK_THREADS is ignored under --hash-field fp");
+            }
+        }
+        Ok(())
     }
 
     /// `--name 44|65|87`: the ML-DSA parameter set, ML-DSA-44 when absent.
@@ -428,6 +452,8 @@ fn statements(records: &[RecordEntry]) -> Vec<(&[u8], &[u8])> {
 }
 
 fn aggregate(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
+    let hash_field = opts.hash_field("hash-field")?;
+    opts.check_hash_field_options(hash_field)?;
     let records = record::read_records(&opts.path("records")?)?;
     let out = opts.path("out")?;
     let part_log2: u32 = opts.number("part-log2", Some(DEFAULT_PART_LOG2))?;
@@ -443,7 +469,7 @@ fn aggregate(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
         span,
         relation,
         set,
-        hash_field: HashField::Gf2,
+        hash_field,
     });
     let aggregate = run_large(move || aggregator.aggregate(&signed(&records)))?;
     std::fs::write(&out, &aggregate.bytes)?;
@@ -453,6 +479,8 @@ fn aggregate(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
 }
 
 fn verify(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
+    let hash_field = opts.hash_field("hash-field")?;
+    opts.check_hash_field_options(hash_field)?;
     let records = record::read_records(&opts.path("records")?)?;
     let bytes = std::fs::read(opts.path("aggregate")?)?;
     let cache_path = opts.take("cache").map(PathBuf::from);
@@ -471,7 +499,8 @@ fn verify(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
             Some(p) => AggregateVerifier::for_set(set).require(p),
             None => AggregateVerifier::for_set(set),
         }
-        .relation(relation);
+        .relation(relation)
+        .hash_field(hash_field);
         let cache = key_cache.as_mut().map_or(KeyCacheMut::None, cache::KeyStore::as_mut);
         let report = verifier.verify_with(&statements(&records), &bytes, cache);
         (report, key_cache)
@@ -609,8 +638,13 @@ pub fn bench_records(
     cold_start();
     let reset = rss::reset_peak();
     let verifier = AggregateVerifier::for_set(config.set)
-        .require(config.profile)
-        .relation(config.relation);
+        .relation(config.relation)
+        .hash_field(config.hash_field);
+    let verifier = if config.hash_field == HashField::Gf2 {
+        verifier.require(config.profile)
+    } else {
+        verifier
+    };
     let statements = statements(records);
     let mut uncached_report = String::new();
     let verify_uncached = timed_runs(warmup, reps, || {
@@ -761,6 +795,7 @@ fn write_bench_json(
     profile: FlockProfile,
     span: bool,
     relation: Relation,
+    hash_field: HashField,
     result: &BenchResult,
 ) -> std::io::Result<()> {
     let mut out = String::new();
@@ -783,6 +818,7 @@ fn write_bench_json(
         "  \"relation\": {},",
         json_string(&relation.to_string().to_lowercase())
     );
+    let _ = writeln!(out, "  \"hash_field\": {},", json_string(hash_field.flag()));
     let _ = writeln!(out, "  \"warmup\": {},", result.warmup);
     let _ = writeln!(out, "  \"reps\": {},", result.prove_times.len());
     let revision_str = git_revision().map_or_else(|| "null".to_string(), |r| json_string(&r));
@@ -867,6 +903,8 @@ fn write_bench_json(
 }
 
 fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
+    let hash_field = opts.hash_field("hash-field")?;
+    opts.check_hash_field_options(hash_field)?;
     let count: usize = opts.number("count", None)?;
     let n_keys: usize = opts.number("keys", Some(count))?;
     let seed: u64 = opts.number("seed", Some(1))?;
@@ -898,7 +936,7 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
                 span,
                 relation,
                 set,
-                hash_field: HashField::Gf2,
+                hash_field,
             },
             warmup,
             reps,
@@ -913,9 +951,10 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let protocol = format!("median of {reps}, {warmup} warmup");
     let mldsa_backend = mldsa_backend_name();
     println!(
-        "agg bench: ML-DSA-{}, N = {count}, {} keys, part_log2 {part_log2}, Flock profile {profile:?}, span {span}, relation {relation}, warmup {warmup}, reps {reps}, revision {}, agg-simd backend {}, piop layout {}, aerie backend {}, mldsa backend {}",
+        "agg bench: ML-DSA-{}, N = {count}, {} keys, part_log2 {part_log2}, Flock profile {profile:?}, span {span}, relation {relation}, hash field {}, warmup {warmup}, reps {reps}, revision {}, agg-simd backend {}, piop layout {}, aerie backend {}, mldsa backend {}",
         set.name(),
         n_keys.min(count),
+        hash_field.flag(),
         git_revision().unwrap_or_else(|| "unknown (set AGG_GIT_REV)".into()),
         simd_backend_name(),
         piop_layout_name(),
@@ -992,6 +1031,7 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
             profile,
             span,
             relation,
+            hash_field,
             &result,
         )?;
     }
@@ -1050,6 +1090,13 @@ mod tests {
         assert!(o.flock_profile("flock-profile").is_err());
         assert_eq!(parse_flock_profile("fast"), Some(FlockProfile::Fast));
         assert_eq!(parse_flock_profile("slim8"), Some(FlockProfile::Slim8));
+        let mut o = Options::parse(&strings(&["--hash-field", "fp"])).unwrap();
+        assert_eq!(o.hash_field("hash-field"), Ok(HashField::Fp));
+        assert_eq!(o.hash_field("hash-field"), Ok(HashField::Gf2));
+        let mut o = Options::parse(&strings(&["--hash-field", "gf2"])).unwrap();
+        assert_eq!(o.hash_field("hash-field"), Ok(HashField::Gf2));
+        let mut o = Options::parse(&strings(&["--hash-field", "other"])).unwrap();
+        assert!(o.hash_field("hash-field").is_err());
         let mut o = Options::parse(&strings(&["--relation", "h-exact"])).unwrap();
         assert_eq!(o.relation("relation"), Ok(Relation::HExact));
         assert_eq!(o.relation("relation"), Ok(Relation::Hu));

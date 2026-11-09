@@ -167,3 +167,130 @@ fn fp_refuses_other_sets_and_relations() {
         ));
     });
 }
+
+fn agg(args: &[&str]) -> (i32, String) {
+    agg_env(args, &[])
+}
+
+fn agg_env(args: &[&str], env: &[(&str, &str)]) -> (i32, String) {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_agg"))
+        .args(args)
+        .envs(env.iter().copied())
+        .output()
+        .expect("run agg");
+    (
+        out.status.code().unwrap_or(-1),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Flock and Akita proofs: run with --release"
+)]
+fn cli_hash_field_fp_round_trip() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("agg-cli-hash-field");
+    std::fs::create_dir_all(&dir).unwrap();
+    let keys = dir.join("keys.bin");
+    let records = dir.join("records.bin");
+    let aggregate = dir.join("aggregate.bin");
+    let json = dir.join("bench.json");
+    let path = |p: &std::path::Path| p.to_str().unwrap().to_owned();
+    let (keys, records, aggregate, json) =
+        (path(&keys), path(&records), path(&aggregate), path(&json));
+    let run = |args: &[&str]| {
+        let (code, out) = agg(args);
+        assert_eq!(code, 0, "{out}");
+    };
+    run(&[
+        "keygen-batch",
+        "--params",
+        "44",
+        "--count",
+        "17",
+        "--seed",
+        "42",
+        "--out",
+        &keys,
+    ]);
+    run(&[
+        "sign-batch",
+        "--params",
+        "44",
+        "--keys",
+        &keys,
+        "--count",
+        "17",
+        "--seed",
+        "43",
+        "--out",
+        &records,
+    ]);
+    run(&[
+        "aggregate",
+        "--records",
+        &records,
+        "--out",
+        &aggregate,
+        "--hash-field",
+        "fp",
+    ]);
+    run(&[
+        "verify",
+        "--records",
+        &records,
+        "--aggregate",
+        &aggregate,
+        "--hash-field",
+        "fp",
+    ]);
+    assert_ne!(
+        agg(&["verify", "--records", &records, "--aggregate", &aggregate]).0,
+        0
+    );
+    for command in ["aggregate", "verify", "bench"] {
+        for (option, value) in [
+            ("--flock-profile", "slim"),
+            ("--flock-span", "on"),
+            ("--part-log2", "13"),
+        ] {
+            let (code, out) = agg(&[command, "--hash-field", "fp", option, value]);
+            assert_ne!(code, 0, "{out}");
+            assert!(
+                out.contains(option) && out.contains("--hash-field"),
+                "{out}"
+            );
+        }
+    }
+    let (code, out) = agg_env(
+        &[
+            "bench",
+            "--count",
+            "17",
+            "--warmup",
+            "0",
+            "--reps",
+            "1",
+            "--params",
+            "44",
+            "--hash-field",
+            "fp",
+            "--json",
+            &json,
+        ],
+        &[("AGG_FLOCK_THREADS", "1")],
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("hash field fp") && out.contains("AGG_FLOCK_THREADS is ignored"),
+        "{out}"
+    );
+    assert!(std::fs::read_to_string(json)
+        .unwrap()
+        .contains("\"hash_field\": \"fp\""));
+}
