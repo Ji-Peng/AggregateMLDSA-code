@@ -892,4 +892,100 @@ mod tests {
             assert_ne!(fp.digest(), gf2.digest(), "N = {n}");
         }
     }
+
+    #[test]
+    fn fp_plans_reproduce_the_script() {
+        use crate::manifest::Relation;
+        use crate::transcript::{stage_degrees, stage_gammas};
+        use agg_witness::params::Set;
+        // The F_p registry's plans against
+        // `python3 -I docs/scripts/pow_plan.py --hash-field fp --set S --relation R`: the stage
+        // batching vectors (gamma^(1) the Keccak zero-checks, gamma^(2) the leaves and range
+        // checks plus the Keccak boundary links, gamma^(3) the reductions plus every Keccak claim
+        // of stages 1 and 2), the stage degrees 4, 5, 3 over d_stage = max(d_main, 10 + d_sig)
+        // rounds, and per N* the sites, nonces, stream bits, stream bytes, sum 2^g and digest.
+        type Row = (usize, [usize; 4], u64, &'static str);
+        let cases: [(Set, Relation, [usize; 3], [Row; 2]); 6] = [
+            (
+                Set::S44,
+                Relation::HExact,
+                [719, 154, 1278],
+                [
+                    (10, [317, 316, 2925, 366], 4940, "aec253f38f9e64a9a3716e49de0b90d8ad5efce3925eadf0ac6fa7590ee062cb"),
+                    (15, [457, 456, 4200, 525], 5590, "f21b06e476753a716987707033533bf9088a86c9efb808b26c21fd8c2843b731"),
+                ],
+            ),
+            (
+                Set::S44,
+                Relation::HFips,
+                [719, 154, 1284],
+                [
+                    (10, [317, 316, 2926, 366], 4948, "624be9a2f5fa8e94e101a63af2afccf5735744a641634129c9c6efea13a78a8c"),
+                    (15, [457, 456, 4201, 526], 5598, "bd9d323cf2aebe2d47ecff43bc1ac429ccfe9fe99e56fdd27aea847004207c97"),
+                ],
+            ),
+            (
+                Set::S65,
+                Relation::HExact,
+                [721, 164, 1320],
+                [
+                    (10, [317, 316, 2943, 368], 5220, "a97ba7e3ca5563d5a33871cf7dc12737b143450f4e3701301cd6d0edbf4d0f8a"),
+                    (15, [457, 456, 4223, 528], 5950, "c82d2eaed2a2d875fb784654b9e5cd968a6cf3c29375ce6635558f48c39f853d"),
+                ],
+            ),
+            (
+                Set::S65,
+                Relation::HFips,
+                [721, 164, 1351],
+                [
+                    (10, [317, 316, 2943, 368], 5220, "a97ba7e3ca5563d5a33871cf7dc12737b143450f4e3701301cd6d0edbf4d0f8a"),
+                    (15, [457, 456, 4223, 528], 5950, "c82d2eaed2a2d875fb784654b9e5cd968a6cf3c29375ce6635558f48c39f853d"),
+                ],
+            ),
+            (
+                Set::S87,
+                Relation::HExact,
+                [918, 218, 1711],
+                [
+                    (10, [317, 316, 2945, 369], 5244, "b614b75f025375f62410b7368b1d6f05fcabbe8eff0913da033db0406504b666"),
+                    (15, [457, 456, 4225, 529], 5974, "ee65eb5a69f844931767346204875efa7311356cde7a9808bc9d081aa4d969df"),
+                ],
+            ),
+            (
+                Set::S87,
+                Relation::HFips,
+                [918, 218, 1752],
+                [
+                    (10, [317, 316, 2945, 369], 5244, "b614b75f025375f62410b7368b1d6f05fcabbe8eff0913da033db0406504b666"),
+                    (15, [457, 456, 4225, 529], 5974, "ee65eb5a69f844931767346204875efa7311356cde7a9808bc9d081aa4d969df"),
+                ],
+            ),
+        ];
+        let bit_length = |count: usize| (usize::BITS - count.leading_zeros()) as u8;
+        for (set, relation, gammas, rows) in cases {
+            for (d_sig, [sites, nonces, bits, bytes], work, want) in rows {
+                let manifest = CommitmentManifest::for_set_fp(set, 1 << d_sig, relation).unwrap();
+                assert_eq!(stage_gammas(&manifest), gammas, "{set:?} {relation:?}");
+                assert_eq!(stage_degrees(&manifest), [4, 5, 3], "{set:?} {relation:?}");
+                let d_stage = manifest.d_stage();
+                assert_eq!(d_stage, 10 + d_sig);
+                let plan = PowPlan::new(&manifest, FlockProfile::FpKeccak, &KeccakPlan::default());
+                let at = |class: SiteClass| plan.sites().iter().filter(move |s| s.class == class);
+                let tau: Vec<u8> = at(SiteClass::Tau).map(|s| s.bits).collect();
+                assert_eq!(tau, vec![bit_length(d_stage)]);
+                let found: Vec<u8> = at(SiteClass::StageGamma).map(|s| s.bits).collect();
+                assert_eq!(found, gammas.map(bit_length).to_vec(), "{set:?} {relation:?}");
+                for (stage, round_bits) in [(1, 3), (2, 3), (3, 2)] {
+                    let rounds: Vec<u8> = at(SiteClass::StageRound).filter(|s| s.i == stage).map(|s| s.bits).collect();
+                    assert_eq!(rounds, vec![round_bits; d_stage], "stage {stage}");
+                }
+                assert_eq!(plan.sites().len(), sites, "{set:?} {relation:?} 2^{d_sig}");
+                assert_eq!(plan.sites().iter().filter(|s| s.bits > 0).count(), nonces);
+                assert_eq!(plan.work_bits(), bits, "{set:?} {relation:?} 2^{d_sig}");
+                assert_eq!(plan.work_bits().div_ceil(8), bytes);
+                assert_eq!(plan.expected_work(), work, "{set:?} {relation:?} 2^{d_sig}");
+                assert_eq!(hex(&plan.digest()), want, "{set:?} {relation:?} 2^{d_sig}");
+            }
+        }
+    }
 }

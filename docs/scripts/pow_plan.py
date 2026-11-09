@@ -9,6 +9,8 @@ Run (isolated mode, standard library only):
     python3 -I docs/scripts/pow_plan.py --set 65            # ML-DSA-65, relation H-FIPS
     python3 -I docs/scripts/pow_plan.py --set 65 --relation h-exact
     python3 -I docs/scripts/pow_plan.py --set 87 --details 15
+    python3 -I docs/scripts/pow_plan.py --hash-field fp --set 65 --relation h-exact
+    python3 -I docs/scripts/pow_plan.py --hash-field fp --details 15
 
 What it computes, with exact integer arithmetic:
 
@@ -27,6 +29,12 @@ What it computes, with exact integer arithmetic:
   docs/soundness.md);
 * the audit of Flock's outer (pre-binding) challenge sites against the Flock paper's
   list-size accounting (docs/soundness.md).
+
+With `--hash-field fp` (the all-prime-field aggregate: the Keccak permutations are proved by
+the PIOP over F_p, crates/agg-piop/src/keccak_fp) it prints the plan of that registry
+instead: proj.psi, the lookup, tau and the three stages only (no seed, tied-part or Flock
+site), with the stage batching vectors derived in fp_gammas and d_stage = max(d_main, d_K)
+rounds per stage.
 """
 
 from __future__ import annotations
@@ -96,7 +104,7 @@ SET = SETS["44"]
 LANE_FIPS = {"65": {"gammas": (13, 18, 136), "carry2_slots": 8},
              "87": {"gammas": (13, 22, 173), "carry2_slots": 8}}
 CARRY2_SLOTS = None  # level-2 carry-stack slots when they differ from SET["carry_slots"]
-PROFILE_ID = {"fast": 1, "slim": 4, "slim8": 5, "modeB": 3}
+PROFILE_ID = {"fast": 1, "slim": 4, "slim8": 5, "modeB": 3, "fp": 6}
 # Level-0 Ligerito rate exponent r (rho = 2^-r) per profile; eta = 0.02 at level 0 in every
 # shipped and derived config (vendor/flock-core/configs/ligerito/m*_{fast,slim,slim8}.toml).
 L0_RATE = {"fast": 1, "slim": 2, "slim8": 3}
@@ -204,11 +212,13 @@ def piop_sites(geo: dict) -> list:
         for r in range(s - 1):
             sites.append(("lookup.round", s, r, 3, 3, K))
         sites.append(("lookup.mu", s, 0, 1, 1, K))
-    sites.append(("tau", 0, 0, d_main, d_main, K))
+    # The stages run over d_stage rounds: d_main, or max(d_main, d_K) under the F_p hash field.
+    d_stage = geo.get("d_stage", d_main)
+    sites.append(("tau", 0, 0, d_stage, d_stage, K))
     for stage in (1, 2, 3):
         sites.append(("stage.gamma", stage, 0, 1, STAGE_GAMMAS[stage - 1], K))
         deg = STAGE_DEGREES[stage - 1]
-        for r in range(d_main):
+        for r in range(d_stage):
             sites.append(("stage.round", stage, r, deg, deg, K))
     return sites
 
@@ -605,6 +615,244 @@ def self_check_sets() -> None:
         configure("44", "h-fips")
 
 
+# ---------------------------------------------------------------------------------------------
+# The all-prime-field aggregate (--hash-field fp).
+#
+# The Keccak permutations of c~ = H(mu || w1Encode(w1')) are proved by the PIOP itself over
+# F_p (crates/agg-piop/src/keccak_fp): no bridge, no Flock commitment, no seed sd, no tied
+# part. The registry (crates/agg-piop/src/transcript.rs Registry::new under HashField::Fp)
+# keeps the site classes proj.psi, lookup.*, tau, stage.gamma and stage.round with these
+# changes:
+# * the stages and tau run over d_stage = max(d_main, d_K) coordinates, d_K = 10 + d_sig the
+#   Keccak domain (per record 2^10 cells of each Keccak polynomial: 64 lane bits x 16 time
+#   slots);
+#   d_stage = d_main for ML-DSA-44, d_main + 2 for ML-DSA-65 and ML-DSA-87;
+# * the lookup has the main-domain stacks of the default and one stack [K_0 | K_1] on D_k
+#   (H-FIPS adds the projected hint slack, three columns in four slots), the table T_16, two
+#   challenges: (main stacks + 2) x 2 trees, D = max(d_stage + 1, 16) sessions;
+# * stage 1 holds the Keccak zero-checks (degree 4: the cubic chi and parity terms with
+#   their equality factor), stage 2 the leaves, range and H-FIPS checks of the default minus
+#   the bridge's def_y1 plus the Keccak boundary links (degree 5), stage 3 the reductions of
+#   the default minus the bridge's plus every Keccak claim of stages 1 and 2 (degree 3).
+FP_DEGREES = (4, 5, 3)
+KECCAK_LANES = 25
+KECCAK_COLS = 5
+ROUNDS_PER_PERM = 24
+TIME_SLOTS = 16
+# SHAKE256 absorbs 136 bytes (17 lanes) per permutation; mu fills lanes 0..8 of the first
+# block, so w1Encode bits enter the first permutation in 9 lanes.
+T0_W1_LANES = 136 // 8 - 64 // 8
+# Per set: Keccak-f[1600] permutations of one signature (FIPS 204 Algorithm 8: 64 bytes of
+# mu, w1Encode of 768, 768, 1024 bytes, SHAKE256 output c~ of lambda/4 = 32, 48, 64 bytes),
+# the w1' bits and the rows k of A (FIPS 204 Table 1).
+FP_SETS = {
+    "44": {"perms": 7, "c_tilde_bytes": 32, "w1_bits": 6, "k": 4},
+    "65": {"perms": 7, "c_tilde_bytes": 48, "w1_bits": 4, "k": 6},
+    "87": {"perms": 9, "c_tilde_bytes": 64, "w1_bits": 4, "k": 8},
+}
+KECCAK_SLOTS_LOG = 10  # d_K - d_sig
+FP_K_SLOTS = 2  # slots of the stack [K_0 | K_1] of the selected relation (configure_fp)
+
+
+def gf2_gammas(set_name: str, relation: str) -> tuple:
+    """The default (GF(2) hash field) stage batching vectors of a set and relation."""
+    if SETS[set_name]["gammas"] is None:
+        return RELATION_GAMMAS[relation]
+    if relation == "h-fips":
+        return LANE_FIPS[set_name]["gammas"]
+    return SETS[set_name]["gammas"]
+
+
+def keccak_counts(set_name: str) -> dict:
+    """Instance and claim counts of the F_p Keccak constraints (crates/agg-piop/src/keccak_fp)."""
+    perms = FP_SETS[set_name]["perms"]
+    rounds = ROUNDS_PER_PERM * perms
+    q = -(-rounds // TIME_SLOTS)  # slot groups Q
+    out = FP_SETS[set_name]["c_tilde_bytes"] // 8  # output lanes of c~
+    # Slot groups that hold a permutation boundary t = 24 m, 1 <= m < P.
+    boundary = len({(ROUNDS_PER_PERM * m) // TIME_SLOTS for m in range(1, perms)})
+    # A' columns of the last slot group read by the output checks: lane (x, y) of c~ reads
+    # pi^-1((x + d) mod 5, y) for d = 0, 1, 2 (chi), with pi^-1(x, y) = ((x + 3 y) mod 5, x);
+    # lane (0, 0) is read only by output lane 0 at d = 0 (its iota-shifted rotation).
+    seen = set()
+    for o in range(out):
+        x, y = o % KECCAK_COLS, o // KECCAK_COLS
+        for d in range(3):
+            src = ((x + d) % KECCAK_COLS + 3 * y) % KECCAK_COLS, (x + d) % KECCAK_COLS
+            if src != (0, 0) or (o == 0 and d == 0):
+                seen.add(src)
+    return {
+        "perms": perms,
+        "Q": q,
+        "out": out,
+        "boundary": boundary,
+        "out_rot": len(seen),
+        # Stage-1 zero-checks per slot group: Booleanity of the 25 lanes of A and of the 5
+        # columns C, the theta column sums (5) and parities (5), the 25 round links; then one
+        # output check per lane of c~.
+        "zc1": (2 * KECCAK_LANES + 3 * KECCAK_COLS) * q + out,
+        # Stage-2 boundary links: the 25 lanes at each of the P - 1 permutation boundaries.
+        "zc2": KECCAK_LANES * (perms - 1),
+        # Stage-1 terminal claims (non-public lanes) per slot group 2 x 25 + 3 x 5 + 1, the
+        # first permutation's w1Encode input lanes and the output rotations; stage-2 terminal
+        # claims 3 x 25 + 2 x 5 + 1 per boundary slot group. Stage 3 reduces each of them.
+        "claims1": (2 * KECCAK_LANES + 3 * KECCAK_COLS + 1) * q + T0_W1_LANES + len(seen),
+        "claims2": (3 * KECCAK_LANES + 2 * KECCAK_COLS + 1) * boundary,
+    }
+
+
+def fp_gammas(set_name: str, relation: str) -> tuple:
+    """Stage batching vectors under the F_p hash field (stage{1,2,3}.rs gamma_count).
+
+    Derived from the default vectors (w bits of w1', k rows):
+    gamma^(1) = the Keccak zero-checks only (the bridge's 3 w + 1 instances go);
+    gamma^(2) = default - w (def_y1 goes) + 25 (P - 1) boundary links;
+    gamma^(3) = default - (4 w + 1) bridge level reductions - 3 stacks (D_1, D_2, D_3)
+                - w k bit reductions from r^(2) (65/87 only: without def_y1 and without the
+                bit-range identity of ML-DSA-44 no bit is claimed at r^(2))
+                + the Keccak claims of stages 1 and 2.
+    """
+    w, k = FP_SETS[set_name]["w1_bits"], FP_SETS[set_name]["k"]
+    kc = keccak_counts(set_name)
+    g2, g3 = gf2_gammas(set_name, relation)[1:]
+    b_r2 = 0 if set_name == "44" else w * k
+    return (kc["zc1"], g2 - w + kc["zc2"], g3 - (4 * w + 1) - 3 - b_r2 + kc["claims1"] + kc["claims2"])
+
+
+def fp_k_slots(relation: str) -> int:
+    """Slots of the stack [K_0 | K_1] (H-FIPS: a third column, the projected hint slack)."""
+    return 4 if relation == "h-fips" else 2
+
+
+def fp_geometry(d_sig: int) -> dict:
+    """The F_p registry's geometry (CommitmentManifest::d_stage, lookup_shape under Fp)."""
+    d_main = SET["d_pos"] + d_sig
+    d_kec = KECCAK_SLOTS_LOG + d_sig
+    d_stage = max(d_main, d_kec)
+    d_k = SET["dk_rows"] + d_sig
+    slots = FP_K_SLOTS
+    stacks = [d_main + (c - 1).bit_length() for c in SET["main_stacks"]] + [d_k + (slots - 1).bit_length()]
+    trees = (stacks + [16]) * CHALLENGES
+    return {
+        "d_sig": d_sig,
+        "d_main": d_main,
+        "d_keccak": d_kec,
+        "d_stage": d_stage,
+        "d_k": d_k,
+        "trees": trees,
+        "D": max(trees),
+        "L": sum(SET["main_stacks"]) * 2**d_main + slots * 2**d_k,
+    }
+
+
+FP_D_SIGS = range(10, 16)  # the N* of the F_p census
+
+
+def configure_fp(set_name: str, relation: str) -> None:
+    """Select the parameter set and relation of the F_p registry."""
+    global SET, STAGE_DEGREES, STAGE_GAMMAS, CARRY2_SLOTS, FP_K_SLOTS
+    SET = SETS[set_name]
+    STAGE_DEGREES = FP_DEGREES
+    STAGE_GAMMAS = fp_gammas(set_name, relation)
+    CARRY2_SLOTS = None
+    FP_K_SLOTS = fp_k_slots(relation)
+
+
+def print_summary_fp(args) -> None:
+    kc = keccak_counts(args.set)
+    print(f"== F_p hash field, ML-DSA-{args.set}, relation {args.relation}: STAGE_DEGREES = {STAGE_DEGREES}, STAGE_GAMMAS = {STAGE_GAMMAS} ==")
+    w, k = FP_SETS[args.set]["w1_bits"], FP_SETS[args.set]["k"]
+    g2, g3 = gf2_gammas(args.set, args.relation)[1:]
+    b_r2 = 0 if args.set == "44" else w * k
+    print(f"Keccak: P = {kc['perms']} permutations, Q = {kc['Q']} slot groups, {kc['out']} output lanes,"
+          f" {kc['boundary']} boundary slot groups, {kc['out_rot']} output rotations")
+    print(f"gamma^(1) = 65 Q + {kc['out']} = {STAGE_GAMMAS[0]}")
+    print(f"gamma^(2) = {g2} - {w} (def_y1) + 25 (P - 1) = {STAGE_GAMMAS[1]}")
+    print(f"gamma^(3) = {g3} - {4 * w + 1} (bridge) - 3 (stacks) - {b_r2} (bits at r^(2))"
+          f" + {kc['claims1']} + {kc['claims2']} (Keccak claims) = {STAGE_GAMMAS[2]}")
+    print()
+    print("== PIOP sites per N* (F_p registry order) ==")
+    print("d_sig  N*      d_stage  D   L            X-site log2   sites  nonces  bits  bytes  work(sum 2^g)  est.ms  max weight  ledger(before work)")
+    for d_sig in FP_D_SIGS:
+        geo = fp_geometry(d_sig)
+        sites = piop_sites(geo)
+        s = summarize(sites)
+        x_site = next(site for site in sites if site[0] == "lookup.x")
+        x_log2 = math.log2(Fraction(x_site[4], x_site[5]))
+        assert s["max_weight_log2"] <= -TARGET, "a site exceeds 2^-128"
+        print(
+            f"{d_sig:>5}  {1 << d_sig:>6}  {geo['d_stage']:>7}  {geo['D']:>2}  {geo['L']:>11}  {x_log2:>12.1f}  {len(sites):>5}  {s['nonces']:>6}  {s['bits']:>4}  {s['bytes']:>5}  {s['work']:>13}  {s['work'] * PREVIEW_NS / 1e6:>6.2f}  2^{s['max_weight_log2']:.2f}  {s['union_nu']}/|K| = 2^{math.log2(Fraction(s['union_nu'], K)):.1f}"
+        )
+    print()
+    geo = fp_geometry(15)
+    print(f"== PIOP site classes at N* = 2^15 (d_stage = {geo['d_stage']}, D = {geo['D']}, trees {sorted(geo['trees'], reverse=True)}) ==")
+    print("class         count  nu      e_t               g   nonce bits")
+    for (cls, nu, num, g), count in class_table(piop_sites(geo)):
+        label = "byte" if cls == "proj.psi" else ("joint" if cls == "lookup.x" else str(nu))
+        print(f"{cls:<12}  {count:>5}  {label:<6}  {fmt_e(cls, nu, num):<16}  {g:>2}  {width(g):>3}")
+    print()
+    print("== Plan digests (SHA3-256, profile id 6, span 0, d_part 0; N = N*) ==")
+    for d_sig in FP_D_SIGS:
+        geo = fp_geometry(d_sig)
+        print(f"N* = 2^{d_sig:<2} fp  {plan_digest(geo, piop_sites(geo), [], 'fp', 0, 0)}")
+    print()
+    # Akita's capped searches of the F_p opening (eleven groups) are not re-derived here; the
+    # bound uses the default's count, an estimate.
+    worst = max(len(piop_sites(fp_geometry(d))) for d in FP_D_SIGS) + AKITA_SITES_2_15
+    print(
+        f"Honest failure: per site <= exp(-128) = 2^{-128 / math.log(2):.1f};"
+        f" at most {worst} capped searches per proof (PIOP + {AKITA_SITES_2_15} Akita, the default's count, est.):"
+        f" <= 2^{math.log2(worst) - 128 / math.log(2):.1f}"
+    )
+
+
+def print_details_fp(d_sig: int) -> None:
+    geo = fp_geometry(d_sig)
+    print(f"== Every site at N* = 2^{d_sig} (F_p hash field) ==")
+    print("#    class         i   j   nu      e_t numerator     g  width")
+    for idx, (cls, i, j, nu, num, den) in enumerate(piop_sites(geo)):
+        g = site_bits(cls, num, den)
+        e = "2^-128" if cls == "proj.psi" else (f"{num}/|K|" if cls != "lookup.x" else "((L+M-1)/|K|)^2")
+        print(f"{idx:<4} {cls:<12} {i:>2}  {j:>2}  {str(nu) if nu is not None else '-':<6}  {e:<16}  {g:>2}  {width(g):>2}")
+
+
+def self_check_fp() -> None:
+    """The F_p plans pinned in crates/agg-piop/src/pow.rs (Rust PowPlan of the F_p manifest)."""
+    # Keccak layout counts (agg_fpkeccak::KeccakLayout, keccak_fp::masks).
+    for name, want in (("44", (11, 4, 6, 5)), ("65", (11, 6, 6, 8)), ("87", (14, 8, 8, 10))):
+        kc = keccak_counts(name)
+        assert (kc["Q"], kc["out"], kc["boundary"], kc["out_rot"]) == want, (name, kc)
+    # Stage batching vectors (stage{1,2,3}::gamma_count under HashField::Fp).
+    want = {("44", "h-exact"): (719, 154, 1278), ("44", "h-fips"): (719, 154, 1284),
+            ("65", "h-exact"): (721, 164, 1320), ("65", "h-fips"): (721, 164, 1351),
+            ("87", "h-exact"): (918, 218, 1711), ("87", "h-fips"): (918, 218, 1752)}
+    for (name, rel), gammas in want.items():
+        assert fp_gammas(name, rel) == gammas, (name, rel, fp_gammas(name, rel))
+    # Lookup volume and depth (lookup_shape().lookups(0), max_depth()) and the totals
+    # (sites, nonces, bits, sum 2^g) at 2^10 and 2^15.
+    pinned = {
+        ("44", "h-exact"): {10: (2359296, 21, 317, 316, 2925, 4940), 15: (75497472, 26, 457, 456, 4200, 5590)},
+        ("44", "h-fips"): {10: (2621440, 21, 317, 316, 2926, 4948), 15: (83886080, 26, 457, 456, 4201, 5598)},
+        ("65", "h-exact"): {10: (3145728, 21, 317, 316, 2943, 5220), 15: (100663296, 26, 457, 456, 4223, 5950)},
+        ("65", "h-fips"): {10: (3407872, 21, 317, 316, 2943, 5220), 15: (109051904, 26, 457, 456, 4223, 5950)},
+        ("87", "h-exact"): {10: (4456448, 21, 317, 316, 2945, 5244), 15: (142606336, 26, 457, 456, 4225, 5974)},
+        ("87", "h-fips"): {10: (4980736, 21, 317, 316, 2945, 5244), 15: (159383552, 26, 457, 456, 4225, 5974)},
+    }
+    try:
+        for (name, rel), rows in pinned.items():
+            configure_fp(name, rel)
+            for d_sig, row in rows.items():
+                geo = fp_geometry(d_sig)
+                sites = piop_sites(geo)
+                s = summarize(sites)
+                got = (geo["L"], geo["D"], len(sites), s["nonces"], s["bits"], s["work"])
+                assert got == row, (name, rel, d_sig, got)
+                assert geo["D"] == max(geo["d_stage"] + 1, 16)
+                assert not any(c in ("tie", "chain.eq", "chain.round") for c, *_ in sites)
+    finally:
+        configure("44", "h-fips")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--details", type=int, metavar="D_SIG", help="print every site of N* = 2^D_SIG")
@@ -612,9 +860,20 @@ def main() -> None:
                         help="the relation whose stage batching vectors to use (default h-fips)")
     parser.add_argument("--set", choices=sorted(SETS), default="44",
                         help="the ML-DSA parameter set (default 44)")
+    parser.add_argument("--hash-field", choices=("gf2", "fp"), default="gf2",
+                        help="the field of the hash argument (default gf2: Flock and the bridge;"
+                             " fp: the Keccak permutations in the PIOP over F_p)")
     args = parser.parse_args()
     self_check()
     self_check_sets()
+    self_check_fp()
+    if args.hash_field == "fp":
+        configure_fp(args.set, args.relation)
+        if args.details is not None:
+            print_details_fp(args.details)
+        else:
+            print_summary_fp(args)
+        return
     configure(args.set, args.relation)
     if args.details is not None:
         print_details(args.details)
