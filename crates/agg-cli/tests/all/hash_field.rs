@@ -15,7 +15,7 @@ use std::time::Instant;
 use agg_cli::mode_a::{AggregateError, AggregateVerifier, Aggregator, AggregatorConfig};
 use agg_piop::binding::FlockProfile;
 use agg_piop::manifest::{HashField, Relation};
-use agg_piop::verifier::{ConfigurationError, VerifyError};
+use agg_piop::verifier::VerifyError;
 use agg_piop::wire::{AggregateProof, WireError, HASH_FIELD_FP_FLAG};
 use agg_witness::gen::{self, Record};
 use agg_witness::params::Set;
@@ -308,32 +308,23 @@ fn fp_rejected_by_gf2_and_gf2_by_fp() {
     });
 }
 
+/// Under `Fp`, as under `Gf2`, an ML-DSA-65 or ML-DSA-87 batch holds at least
+/// `LANE_MIN_RECORDS` records; the count is checked before the records are read.
 #[test]
-fn fp_refuses_other_sets() {
+fn fp_lane_sets_refuse_short_batches() {
     on_large_stack(|| {
         let records = records(0xfa, 8, 0);
         let signed = signed(&records);
-        let config = AggregatorConfig {
-            set: Set::S65,
-            ..fp_config()
-        };
-        assert!(matches!(
-            Aggregator::new(config).aggregate(&signed),
-            Err(AggregateError::HashFieldSet(Set::S65))
-        ));
-        let verdict = AggregateVerifier::for_set(Set::S65)
-            .hash_field(HashField::Fp)
-            .verify_with(
-                &statements(&records),
-                &[0; 64],
-                agg_cli::mode_a::KeyCacheMut::None,
-            );
-        assert!(matches!(
-            verdict.report.outcome,
-            Err(VerifyError::Configuration(ConfigurationError::FpKeccakSet(
-                Set::S65
-            )))
-        ));
+        for set in [Set::S65, Set::S87] {
+            let config = AggregatorConfig {
+                set,
+                ..fp_config()
+            };
+            assert!(matches!(
+                Aggregator::new(config).aggregate(&signed),
+                Err(AggregateError::Count(8))
+            ));
+        }
     });
 }
 

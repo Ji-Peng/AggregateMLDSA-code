@@ -68,7 +68,7 @@ use agg_piop::prover::{
 use agg_piop::public_data::{KeyCache, PublicData};
 use agg_piop::source_tables::{BridgeGroupTables, MainTables, SourceTableError};
 use agg_piop::verifier::{
-    verify_lanes_timed, verify_timed, ConfigurationError, FpKeccakVerifier, KeccakVerifier,
+    verify_lanes_timed, verify_timed, FpKeccakVerifier, KeccakVerifier,
     SegmentContext, VerifyError, VerifyReport, VerifyTimings,
 };
 use agg_piop::wire::{pack_final_vector, unpack_final_vector, AggregateProof, ProofSize};
@@ -1202,7 +1202,7 @@ pub struct AggregatorConfig {
     pub set: Set,
     /// The field the commitment hash `c~ = H(mu || w1Encode(w1'))` is proven in (default
     /// `Gf2`: Flock tied to the PIOP by the parity bridge). `Fp` proves the Keccak chain
-    /// inside the PIOP (ML-DSA-44, H-exact); the Flock fields above are then unused.
+    /// inside the PIOP (every set and relation); the Flock fields above are then unused.
     pub hash_field: HashField,
 }
 
@@ -1254,8 +1254,6 @@ pub enum AggregateError {
     Profile(FlockProfile),
     /// The relation is not defined for the parameter set.
     Relation(Set, Relation),
-    /// The all-prime-field aggregate (`HashField::Fp`) for a parameter set other than ML-DSA-44.
-    HashFieldSet(Set),
 }
 
 impl std::fmt::Display for AggregateError {
@@ -1273,11 +1271,6 @@ impl std::fmt::Display for AggregateError {
             Self::Relation(set, relation) => write!(
                 f,
                 "relation {relation} is not available for ML-DSA-{}",
-                set.name()
-            ),
-            Self::HashFieldSet(set) => write!(
-                f,
-                "the F_p hash field is available for ML-DSA-44 only, not ML-DSA-{}",
                 set.name()
             ),
         }
@@ -1619,6 +1612,20 @@ struct Instance44<'r> {
     setup: Option<EarlySetup>,
 }
 
+/// [`EarlySetup`] of a parameter set with polynomial lanes.
+type LaneEarlySetup =
+    std::thread::JoinHandle<(Option<agg_piop::pcs::TableCommitter>, Option<LanePublicData>)>;
+
+/// [`Instance44`] of a parameter set with polynomial lanes (ML-DSA-65, ML-DSA-87).
+struct InstanceLanes<'r, P: ParamSet> {
+    instance: Arc<PublicInstance<P>>,
+    inputs: Vec<(&'r [u8], &'r [u8], P::CTilde)>,
+    signatures: Vec<&'r [u8]>,
+    /// From the start of the aggregation to the instance.
+    time: Duration,
+    setup: Option<LaneEarlySetup>,
+}
+
 /// The mode-A aggregator (holds the sponge gate, built once).
 pub struct Aggregator {
     gate: ChainGate,
@@ -1665,7 +1672,11 @@ impl Aggregator {
         hooks: &AggregateHooks<'_>,
     ) -> Result<Aggregate, AggregateError> {
         if self.config.hash_field == HashField::Fp {
-            return self.aggregate_44_fp(records, hooks);
+            return match self.config.set {
+                Set::S44 => self.aggregate_44_fp(records, hooks),
+                Set::S65 => self.aggregate_lanes_fp::<Set65>(records, hooks),
+                Set::S87 => self.aggregate_lanes_fp::<Set87>(records, hooks),
+            };
         }
         match self.config.set {
             Set::S44 => self.aggregate_44(records, hooks),
@@ -1742,47 +1753,13 @@ impl Aggregator {
             return Err(AggregateError::Profile(profile));
         }
         let relation = self.config.relation;
-        if !relation.is_available(P::SET) {
-            return Err(AggregateError::Relation(P::SET, relation));
-        }
-        // The Akita setup and the lane public data on their own thread, as for ML-DSA-44.
-        let (public_tx, public_rx) = std::sync::mpsc::channel::<Arc<PublicInstance<P>>>();
-        let early_setup = std::thread::Builder::new()
-            .name("agg-setup".into())
-            .spawn(move || {
-                let committer = CommitmentManifest::for_set(P::SET, n, relation)
-                    .ok()
-                    .and_then(|m| agg_piop::pcs::TableCommitter::new(m).ok());
-                if let Some(committer) = &committer {
-                    let _ = committer.warm();
-                }
-                let public = public_rx
-                    .recv()
-                    .ok()
-                    .map(|instance| LanePublicData::from_instance(&instance));
-                (committer, public)
-            })
-            .ok();
-        for (i, (pk, _, sig)) in records.iter().enumerate() {
-            if pk.len() != P::PK_BYTES {
-                return Err(AggregateError::Malformed(i, "public key length"));
-            }
-            if sig.len() != P::SIG_BYTES {
-                return Err(AggregateError::Malformed(i, "signature length"));
-            }
-        }
-        let inputs: Vec<(&[u8], &[u8], P::CTilde)> = records
-            .iter()
-            .map(|&(pk, msg, sig)| (pk, msg, P::c_tilde_from_slice(&sig[..P::C_TILDE_BYTES])))
-            .collect();
-        let signatures: Vec<&[u8]> = records.iter().map(|r| r.2).collect();
-        let instance = Arc::new(PublicInstance::<P>::new_for(&inputs).map_err(|e| match e {
-            InstanceError::PublicKey(i) => AggregateError::Malformed(i, "public key"),
-            InstanceError::Geometry(_) => AggregateError::Count(n),
-        })?);
-        let _ = public_tx.send(Arc::clone(&instance));
-        let instance_time = start.elapsed();
-        agg_piop::prover::phase_stamp("instance");
+        let InstanceLanes {
+            instance,
+            inputs,
+            signatures,
+            time: instance_time,
+            setup: early_setup,
+        } = self.instance_lanes::<P>(records, start)?;
         let prover_inputs = ProverInputs {
             instance: &instance,
             records: &inputs,
@@ -1857,6 +1834,129 @@ impl Aggregator {
         Ok(self.finish(start, n, instance_time, tables_time, flock_time, output, side.log()))
     }
 
+    /// [`Self::aggregate_with`] under `HashField::Fp` for a parameter set with polynomial
+    /// lanes (ML-DSA-65, ML-DSA-87): the lane instance and the main tables, then the PIOP
+    /// commits and zero-checks the Keccak chain itself, as for ML-DSA-44 under `Fp`.
+    fn aggregate_lanes_fp<P: ParamSet>(
+        &self,
+        records: &[SignedRecord<'_>],
+        hooks: &AggregateHooks<'_>,
+    ) -> Result<Aggregate, AggregateError>
+    where
+        P::CTilde: Sync,
+    {
+        assert!(
+            hooks.tamper_main.is_none()
+                && hooks.tamper_bridge.is_none()
+                && hooks.tamper_flock_records.is_none()
+                && hooks.flock_witness.is_none()
+                && !hooks.stale_bridge
+                && hooks.part_floor.is_none(),
+            "the aggregation hooks are not available under the F_p hash field"
+        );
+        let start = Instant::now();
+        agg_piop::prover::phase_stamp("start");
+        let n = records.len();
+        if !(agg_piop::prover::LANE_MIN_RECORDS..=1 << 15).contains(&n) {
+            return Err(AggregateError::Count(n));
+        }
+        let relation = self.config.relation;
+        let manifest = CommitmentManifest::for_set_fp(P::SET, n, relation)
+            .map_err(|e| AggregateError::Prove(agg_piop::pcs::PcsError::Plan(e).into()))?;
+        let InstanceLanes {
+            instance,
+            inputs,
+            signatures,
+            time: instance_time,
+            setup,
+        } = self.instance_lanes::<P>(records, start)?;
+        let prover_inputs = ProverInputs {
+            instance: &instance,
+            records: &inputs,
+            signatures: &signatures,
+            relation,
+        };
+        let clock = Instant::now();
+        let main = MainTables::build_for(&manifest, &instance, &signatures).map_err(ProveError::Tables)?;
+        let tables_time = clock.elapsed();
+        agg_piop::prover::phase_stamp("tables");
+        let (committer, public) = setup
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or((None, None));
+        let output = prove_lanes_with_tables_using(
+            committer,
+            public,
+            &prover_inputs,
+            &manifest,
+            &main,
+            &SeededMatrices,
+            &FpKeccakSide,
+            FlockProfile::FpKeccak,
+            &ProveHooks::default(),
+        )?;
+        Ok(self.finish(start, n, instance_time, tables_time, Duration::ZERO, output, Vec::new()))
+    }
+
+    /// [`Self::instance_44`] for a parameter set with polynomial lanes: the relation, the
+    /// record lengths, the lane instance and the prover inputs, with the Akita setup of the
+    /// configured hash field and the lane public data built on their own thread.
+    fn instance_lanes<'r, P: ParamSet>(
+        &self,
+        records: &[SignedRecord<'r>],
+        start: Instant,
+    ) -> Result<InstanceLanes<'r, P>, AggregateError> {
+        let n = records.len();
+        let relation = self.config.relation;
+        let hash_field = self.config.hash_field;
+        if !relation.is_available(P::SET) {
+            return Err(AggregateError::Relation(P::SET, relation));
+        }
+        let (public_tx, public_rx) = std::sync::mpsc::channel::<Arc<PublicInstance<P>>>();
+        let setup = std::thread::Builder::new()
+            .name("agg-setup".into())
+            .spawn(move || {
+                let committer = CommitmentManifest::for_hash_field(P::SET, n, relation, hash_field)
+                    .ok()
+                    .and_then(|m| agg_piop::pcs::TableCommitter::new(m).ok());
+                if let Some(committer) = &committer {
+                    let _ = committer.warm();
+                }
+                let public = public_rx
+                    .recv()
+                    .ok()
+                    .map(|instance| LanePublicData::from_instance(&instance));
+                (committer, public)
+            })
+            .ok();
+        for (i, (pk, _, sig)) in records.iter().enumerate() {
+            if pk.len() != P::PK_BYTES {
+                return Err(AggregateError::Malformed(i, "public key length"));
+            }
+            if sig.len() != P::SIG_BYTES {
+                return Err(AggregateError::Malformed(i, "signature length"));
+            }
+        }
+        let inputs: Vec<(&[u8], &[u8], P::CTilde)> = records
+            .iter()
+            .map(|&(pk, msg, sig)| (pk, msg, P::c_tilde_from_slice(&sig[..P::C_TILDE_BYTES])))
+            .collect();
+        let signatures: Vec<&[u8]> = records.iter().map(|r| r.2).collect();
+        let instance = Arc::new(PublicInstance::<P>::new_for(&inputs).map_err(|e| match e {
+            InstanceError::PublicKey(i) => AggregateError::Malformed(i, "public key"),
+            InstanceError::Geometry(_) => AggregateError::Count(n),
+        })?);
+        let _ = public_tx.send(Arc::clone(&instance));
+        let time = start.elapsed();
+        agg_piop::prover::phase_stamp("instance");
+        Ok(InstanceLanes {
+            instance,
+            inputs,
+            signatures,
+            time,
+            setup,
+        })
+    }
+
     /// The steps of an ML-DSA-44 aggregation before the tables: the record lengths, the
     /// instance and the prover inputs. The Akita prover setup and the public data depend only
     /// on the record count, the relation, the hash field and the instance: the setup is built
@@ -1917,7 +2017,7 @@ impl Aggregator {
         })
     }
 
-    /// [`Self::aggregate_with`] under `HashField::Fp` (ML-DSA-44, H-exact): the instance and the
+    /// [`Self::aggregate_with`] under `HashField::Fp` for ML-DSA-44: the instance and the
     /// main tables as for the default, then the PIOP commits and zero-checks the Keccak chain
     /// itself, so there are no sponge records, Flock parts or Flock thread pool.
     fn aggregate_44_fp(
@@ -1938,9 +2038,6 @@ impl Aggregator {
         agg_piop::prover::phase_stamp("start");
         let n = records.len();
         let relation = self.config.relation;
-        if self.config.set != Set::S44 {
-            return Err(AggregateError::HashFieldSet(self.config.set));
-        }
         if n == 0 || n > 1 << 15 {
             return Err(AggregateError::Count(n));
         }
@@ -2294,8 +2391,8 @@ impl AggregateVerifier {
     }
 
     /// Verify under `hash_field` (default `Gf2`). The hash field is the verifier's choice: an
-    /// aggregate whose header names the other one is rejected. `Fp` is defined for ML-DSA-44
-    /// only; a verifier of another set rejects every aggregate under it.
+    /// aggregate whose header names the other one is rejected. `Fp` is defined for every
+    /// set and relation.
     #[must_use]
     pub const fn hash_field(mut self, hash_field: HashField) -> Self {
         self.hash_field = hash_field;
@@ -2474,16 +2571,26 @@ impl AggregateVerifier {
                 cache,
             )
         };
+        let run_lanes = |cache| {
+            verify_lanes_timed(
+                self.set,
+                statements,
+                aggregate,
+                &SeededMatrices,
+                &FpKeccakVerifier,
+                profile,
+                self.relation,
+                cache,
+            )
+        };
         let report = match (self.set, cache) {
             (Set::S44, KeyCacheMut::None) => run(None),
             (Set::S44, KeyCacheMut::Rows(cache)) => run(Some(cache)),
-            (Set::S44, KeyCacheMut::Lanes(_)) => {
-                panic!("a key cache of another parameter set than ML-DSA-44")
+            (set, KeyCacheMut::None) if set != Set::S44 => run_lanes(None),
+            (set, KeyCacheMut::Lanes(cache)) if set != Set::S44 && cache.set() == set => {
+                run_lanes(Some(cache))
             }
-            (set, _) => VerifyReport {
-                outcome: Err(VerifyError::Configuration(ConfigurationError::FpKeccakSet(set))),
-                timings: VerifyTimings::default(),
-            },
+            (set, _) => panic!("a key cache of another parameter set than ML-DSA-{}", set.name()),
         };
         VerifyCostReport {
             report,

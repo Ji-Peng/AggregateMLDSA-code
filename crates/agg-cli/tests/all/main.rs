@@ -2,6 +2,7 @@
 
 mod cli;
 mod hash_field;
+mod hash_field_sets;
 mod isa_cap;
 mod mode_a;
 mod mode_a_sets;

@@ -185,9 +185,6 @@ pub enum ConfigurationError {
     /// Mode B (public bits) for a parameter set other than ML-DSA-44: its direct bit check
     /// reads ML-DSA-44's six `w_1` bits per coefficient.
     PublicBitsSet(Set),
-    /// The all-prime-field aggregate (`FpKeccak`) for a parameter set that the calling front
-    /// end does not route through it (this crate's verifier takes every set).
-    FpKeccakSet(Set),
 }
 
 impl std::fmt::Display for ConfigurationError {
@@ -208,11 +205,6 @@ impl std::fmt::Display for ConfigurationError {
             Self::PublicBitsSet(set) => write!(
                 f,
                 "mode B (public bits) is defined for ML-DSA-44 only, not ML-DSA-{}",
-                set.name()
-            ),
-            Self::FpKeccakSet(set) => write!(
-                f,
-                "the all-prime-field aggregate is not available for ML-DSA-{} here",
                 set.name()
             ),
         }

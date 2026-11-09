@@ -29,7 +29,7 @@ usage: agg <command> [options]
 Every command takes --params 44|65|87, the ML-DSA parameter set (default 44). Key and
 record files of a set are refused by the commands of another set; an aggregate names its
 set, and verify rejects one of another set than --params. The hash field defaults to gf2;
-fp proves the Keccak chain over F_p without Flock (ML-DSA-44, either relation).
+fp proves the Keccak chain over F_p without Flock (every set, either relation).
 
 commands:
   keygen-batch --count K [--seed S] [--params 44|65|87] --out KEYS

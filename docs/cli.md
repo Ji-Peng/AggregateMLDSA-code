@@ -106,17 +106,19 @@ to the PIOP. `HashField::Fp` proves the Keccak chain of every record over `F_p` 
 PIOP: seven more Akita groups in round 1, their zero-checks in stages 1 and 2, and one
 Akita opening of all eleven groups (spec Section 10.1). There are no Flock parts, no span,
 no bridge seed and no `Y_sigma`. The Keccak-side profile bound at event 0 is
-`FlockProfile::FpKeccak` (id 6). The aggregator runs `Aggregator::aggregate_44_fp`, which
-calls `agg_piop::prover::prove_with_tables_using` with `FpKeccakSide`. The verifier runs
-`AggregateVerifier::verify_fp`, which calls `agg_piop::verifier::verify_timed` with
-`FpKeccakVerifier`.
+`FlockProfile::FpKeccak` (id 6). For ML-DSA-44 the aggregator runs
+`Aggregator::aggregate_44_fp`, which calls `agg_piop::prover::prove_with_tables_using` with
+`FpKeccakSide`; for ML-DSA-65 and ML-DSA-87 it runs `Aggregator::aggregate_lanes_fp`, which
+calls `prove_lanes_with_tables_using`. The verifier runs `AggregateVerifier::verify_fp`, which
+calls `agg_piop::verifier::verify_timed` (ML-DSA-44) or `verify_lanes_timed` (ML-DSA-65,
+ML-DSA-87) with `FpKeccakVerifier`.
 
-The `F_p` hash field is defined for ML-DSA-44 under both relations: H-FIPS (the default, so
-`--hash-field fp` alone proves H-FIPS) and H-exact (`--relation h-exact`). Under H-FIPS the hint
-slack `u_h` is the last polynomial of `G_k` (`docs/h-exact.md` Section 10.9). The aggregator
-refuses another set (`AggregateError::HashFieldSet`), and a verifier of another set rejects
-every aggregate (`ConfigurationError::FpKeccakSet`); a verifier of the other relation rejects
-it before event 0 (`VerifyError::Relation`). The test hooks (`AggregateHooks`) are not
+The `F_p` hash field is defined for all three sets under both relations: H-FIPS (the default,
+so `--hash-field fp` alone proves H-FIPS) and H-exact (`--relation h-exact`). Under H-FIPS the
+hint slack `u_h` is the last polynomial of `G_k` (`docs/h-exact.md` Section 10.9). As under
+`gf2`, an ML-DSA-65 or ML-DSA-87 batch holds at least 17 records (`AggregateError::Count`). A
+verifier of another set or of the other relation rejects the aggregate before event 0
+(`VerifyError::ParamSet`, `VerifyError::Relation`). The test hooks (`AggregateHooks`) are not
 available under `F_p`.
 
 `agg aggregate`, `agg verify` and `agg bench` take `--hash-field gf2|fp` (default `gf2`).
@@ -225,7 +227,7 @@ verified under another profile: `slim` and `slim8` are opt-in, since `slim`'s 15
 zero-check rounds reach only `2^-127.8` (`docs/soundness.md` Section 4.3). `--flock-span off` proves every
 segment on its own (K10 parts) instead of one span over all segments (K16).
 
-`--hash-field gf2|fp` on `aggregate`, `verify` and `bench` selects the hash field (Section 1.1; tests in `tests/all/hash_field.rs`).
+`--hash-field gf2|fp` on `aggregate`, `verify` and `bench` selects the hash field (Section 1.1; tests in `tests/all/hash_field.rs` and `tests/all/hash_field_sets.rs`).
 
 `verify` reads only `(pk, M)` from the record file and exits with status 0 on accept, 1 on
 reject, 2 on a usage or file error. `bench` generates the records in memory and follows
@@ -298,7 +300,8 @@ CPU 2 after `crypto_bench off`; the numbers below are not benchmarks.
   aggregate; every variant is rejected without a panic. The span path above one segment
   (8,193 records of ML-DSA-44 and 65: one tied part, accepted; a flipped proof byte
   rejected) is `#[ignore]` and runs with `--ignored span_path` on the benchmark machine;
-- the `F_p` hash field (`tests/all/hash_field.rs`, Section 1.1): round trips at 17, 100 and 1,024 records, the wire round trip, flipped bytes and cuts, cross-field rejection, refused sets and relations, the `agg` options, and byte identity across thread counts and ISA caps;
+- the `F_p` hash field (`tests/all/hash_field.rs`, Section 1.1): round trips at 17, 100 and 1,024 records, the wire round trip, flipped bytes and cuts, cross-field rejection, refused relations and short lane batches, the `agg` options, and byte identity across thread counts and ISA caps;
+- the `F_p` hash field for every set (`tests/all/hash_field_sets.rs`): ML-DSA-44, -65 and -87 under H-exact and H-FIPS at 32 records, ML-DSA-87 H-FIPS at 100, the weight-omega corner records under H-FIPS at each set's smallest batch, the header and the `c~` list, rejection by a verifier of another set, relation or hash field, and `agg --params 65 --hash-field fp`;
 - the SIMD tiers (`simd_backends.rs`, `docs/engineering.md` Section 9) and the `AGG_ISA` cap
   of every kernel family (`isa_cap.rs`, through `AGG_SIMD_REPORT=1`).
 
