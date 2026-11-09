@@ -855,7 +855,9 @@ fn corrupted_aggregates_are_rejected() {
         expect_rejected("PIOP work nonce", &verify(&p), psi_work);
         // The instance record binds the plan: a verifier whose plan names other tie
         // difficulties derives another transcript (the projection site's work nonce, then sd
-        // and the parity chain's matrices differ).
+        // and the parity chain's matrices differ). The projection site's one-bit predicate
+        // passes the honest nonce under the other transcript with probability 1/2, so the
+        // rejection may come at a later check.
         let gate = sponge_gate();
         let other_plan = verify_timed(
             &public,
@@ -866,12 +868,7 @@ fn corrupted_aggregates_are_rejected() {
             Relation::HFips,
             None,
         );
-        assert!(matches!(
-            other_plan.outcome,
-            Err(VerifyError::Transcript(TranscriptError::Work {
-                index: PSI_EVENT
-            }))
-        ));
+        assert!(other_plan.outcome.is_err(), "another plan is another transcript");
 
         // PIOP and opening.
         let mut p = honest.clone();
