@@ -962,6 +962,86 @@ pub struct Eval<'a> {
     pub full: bool,
 }
 
+/// The summand of an evaluation: a bilinear form (three components per slot) or a summand
+/// of higher degree `D` ([`crate::high`], `D + 1` components per slot).
+#[derive(Clone, Copy, Debug)]
+pub enum Summand<'a> {
+    Bilinear(Terms<'a>),
+    High(&'a crate::high::HighTerms),
+}
+
+impl Summand<'_> {
+    fn slots(&self) -> usize {
+        match self {
+            Self::Bilinear(terms) => terms.slots,
+            Self::High(terms) => terms.slots,
+        }
+    }
+
+    /// Components per slot.
+    pub fn components(&self) -> usize {
+        match self {
+            Self::Bilinear(_) => 3,
+            Self::High(terms) => terms.components(),
+        }
+    }
+}
+
+/// [`Eval`] of either summand. The pass returns the slot sums flat, slot-major:
+/// `components()` entries per slot.
+pub struct EvalAny<'a> {
+    pub summand: Summand<'a>,
+    pub first: Planes<'a>,
+    pub second: &'a [K],
+    pub full: bool,
+}
+
+impl<'a> From<Eval<'a>> for EvalAny<'a> {
+    fn from(e: Eval<'a>) -> Self {
+        Self { summand: Summand::Bilinear(e.terms), first: e.first, second: e.second, full: e.full }
+    }
+}
+
+/// Flat slot sums of a bilinear summand as `[q(0), q(1), q_2]` per slot.
+fn triples(flat: Vec<K>) -> Vec<[K; 3]> {
+    flat.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect()
+}
+
+/// The term order of a pass's summand, built once per pass.
+enum Order {
+    Bilinear(SlotOrder),
+    High(crate::high::Plan),
+}
+
+/// The evaluation scratch of one task of a pass.
+enum TaskScratch {
+    Bilinear(EvalScratch),
+    High(crate::high::Scratch),
+}
+
+/// The slot sums of `e`'s summand over the items `k0..k1`, added to the flat `out`.
+#[allow(clippy::too_many_arguments)]
+fn eval_call(
+    lanes: &[Planes<'_>],
+    e: &EvalAny<'_>,
+    order: &Order,
+    scratch: &mut TaskScratch,
+    weights: Option<Planes<'_>>,
+    k0: usize,
+    k1: usize,
+    out: &mut [K],
+) {
+    match (e.summand, order, scratch) {
+        (Summand::Bilinear(terms), Order::Bilinear(order), TaskScratch::Bilinear(scratch)) => {
+            eval_items_with(lanes, terms, order, scratch, weights, k0, k1, e.full, out.as_chunks_mut::<3>().0);
+        }
+        (Summand::High(_), Order::High(plan), TaskScratch::High(scratch)) => {
+            crate::high::eval_items_with(lanes, plan, scratch, weights, k0, k1, e.full, out);
+        }
+        _ => unreachable!("the order and the scratch follow the summand"),
+    }
+}
+
 /// Output rows per fused sub-block (the written rows stay in L1/L2 for the evaluation).
 const BLOCK_ROWS: usize = 512;
 /// Output rows per parallel task.
@@ -993,6 +1073,24 @@ pub fn fused_pass<L: Leaves>(
     });
     // SAFETY: every output word is initialized, which satisfies the precondition over
     // whatever `fill` writes.
+    triples(unsafe { fused_pass_uninit(out, input, fill, eval.map(EvalAny::from)) })
+}
+
+/// [`fused_pass`] of either summand, with the slot sums flat ([`EvalAny`]).
+///
+/// # Panics
+/// As [`fused_pass`].
+pub fn fused_pass_with<L: Leaves>(
+    out: Option<(&mut [u64], usize, usize)>,
+    input: &[Planes<'_>],
+    fill: Option<Fill<'_, L>>,
+    eval: Option<EvalAny<'_>>,
+) -> Vec<K> {
+    // SAFETY: as in `fused_pass`.
+    let out = out.map(|(buf, width, rows)| unsafe {
+        (std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<std::mem::MaybeUninit<u64>>(), buf.len()), width, rows)
+    });
+    // SAFETY: every output word is initialized.
     unsafe { fused_pass_uninit(out, input, fill, eval) }
 }
 
@@ -1005,9 +1103,9 @@ pub fn fold_new(r: K, input: &[Planes<'_>], rows: usize, eval: Option<Eval<'_>>)
     let mut out = crate::buf::AlignedVec::<u64>::uninit(2 * width * rows);
     // SAFETY: Fold writes both output planes for every lane and row before evaluation.
     let fill = Some(Fill::<crate::pattern::Columns>::Fold(r, input));
-    let total = unsafe { fused_pass_uninit(Some((&mut out, width, rows)), input, fill, eval) };
+    let total = unsafe { fused_pass_uninit(Some((&mut out, width, rows)), input, fill, eval.map(EvalAny::from)) };
     // SAFETY: Fold has written all 2 * width * rows words on successful return.
-    (unsafe { out.assume_init() }, total)
+    (unsafe { out.assume_init() }, triples(total))
 }
 
 /// Run a pass into a pooled buffer and return the buffer initialized.
@@ -1021,13 +1119,29 @@ pub fn fold_new(r: K, input: &[Planes<'_>], rows: usize, eval: Option<Eval<'_>>)
 /// ([`Fill::PatternCombined`] writes one lane, [`Fill::Computed`] with no challenge writes
 /// none).
 pub fn fused_pass_into<L: Leaves>(
-    mut out: AlignedVec<std::mem::MaybeUninit<u64>>,
+    out: AlignedVec<std::mem::MaybeUninit<u64>>,
     width: usize,
     rows: usize,
     input: &[Planes<'_>],
     fill: Fill<'_, L>,
     eval: Option<Eval<'_>>,
 ) -> (AlignedVec<u64>, Vec<[K; 3]>) {
+    let (table, total) = fused_pass_into_with(out, width, rows, input, fill, eval.map(EvalAny::from));
+    (table, triples(total))
+}
+
+/// [`fused_pass_into`] of either summand, with the slot sums flat ([`EvalAny`]).
+///
+/// # Panics
+/// As [`fused_pass_into`].
+pub fn fused_pass_into_with<L: Leaves>(
+    mut out: AlignedVec<std::mem::MaybeUninit<u64>>,
+    width: usize,
+    rows: usize,
+    input: &[Planes<'_>],
+    fill: Fill<'_, L>,
+    eval: Option<EvalAny<'_>>,
+) -> (AlignedVec<u64>, Vec<K>) {
     let words = 2 * width * rows;
     assert!(out.len() >= words, "table buffer");
     assert!(
@@ -1055,9 +1169,11 @@ unsafe fn fused_pass_uninit<L: Leaves>(
     mut out: Option<(&mut [std::mem::MaybeUninit<u64>], usize, usize)>,
     input: &[Planes<'_>],
     fill: Option<Fill<'_, L>>,
-    eval: Option<Eval<'_>>,
-) -> Vec<[K; 3]> {
-    let slots = eval.as_ref().map_or(0, |e| e.terms.slots);
+    eval: Option<EvalAny<'_>>,
+) -> Vec<K> {
+    let slots = eval.as_ref().map_or(0, |e| e.summand.slots());
+    // Entries per slot of the flat sums.
+    let comps = eval.as_ref().map_or(3, |e| e.summand.components());
     // The computed source of the pass and whether its rows are folded into the output.
     let computed = match &fill {
         Some(Fill::Computed(r, source)) => Some((*r, *source)),
@@ -1102,12 +1218,18 @@ unsafe fn fused_pass_uninit<L: Leaves>(
         (_, true) => addresses.len(),
         (_, false) => input.len(),
     };
-    let eval_order = eval.as_ref().map(|e| SlotOrder::new(e.terms));
-    let run = |row0: usize, row1: usize| -> Vec<[K; 3]> {
-        let mut sums = vec![[K::zero(); 3]; slots];
-        let mut partial = vec![[K::zero(); 3]; slots];
+    let eval_order = eval.as_ref().map(|e| match e.summand {
+        Summand::Bilinear(terms) => Order::Bilinear(SlotOrder::new(terms)),
+        Summand::High(terms) => Order::High(crate::high::Plan::new(terms, eval_width)),
+    });
+    let run = |row0: usize, row1: usize| -> Vec<K> {
+        let mut sums = vec![K::zero(); slots * comps];
+        let mut partial = vec![K::zero(); slots * comps];
         // The vector kernel's scratch, reused by every evaluation call of this task.
-        let mut eval_scratch = EvalScratch::new(eval_width, slots);
+        let mut eval_scratch = match &eval_order {
+            Some(Order::High(plan)) => TaskScratch::High(crate::high::Scratch::new(plan)),
+            _ => TaskScratch::Bilinear(EvalScratch::new(eval_width, slots)),
+        };
         // A computed source's rows of one block: lane-major planes of `scale * BLOCK_ROWS`
         // rows, written by the source and read back by the fold or the evaluation (L2).
         let block_in = scale * BLOCK_ROWS;
@@ -1196,6 +1318,7 @@ unsafe fn fused_pass_uninit<L: Leaves>(
                 Some(Fill::Computed(..)) | None => {}
             }
             if let Some(e) = &eval {
+                let order = eval_order.as_ref().expect("an evaluation has a term order");
                 // Item `k` reads rows `2 (k - base)` of `lanes`: the block-local scratch of an
                 // evaluate-only computed pass starts at the block's first row.
                 let (lanes, base): (&[Planes<'_>], usize) = match computed {
@@ -1222,24 +1345,10 @@ unsafe fn fused_pass_uninit<L: Leaves>(
                 let (k0, k1) = (block_start / 2, block_end / 2);
                 if e.first.0.is_empty() {
                     // No equality weights: one call over the whole block.
-                    for p in partial.iter_mut() {
-                        *p = [K::zero(); 3];
-                    }
-                    eval_items_with(
-                        lanes,
-                        e.terms,
-                        eval_order.as_ref().expect("an evaluation has a term order"),
-                        &mut eval_scratch,
-                        None,
-                        k0 - base,
-                        k1 - base,
-                        e.full,
-                        &mut partial,
-                    );
+                    partial.fill(K::zero());
+                    eval_call(lanes, e, order, &mut eval_scratch, None, k0 - base, k1 - base, &mut partial);
                     for (acc, p) in sums.iter_mut().zip(&partial) {
-                        for c in 0..3 {
-                            acc[c] += p[c];
-                        }
+                        *acc += *p;
                     }
                 } else if weight_plane {
                     // One weight per item and one vector call per block. The short table
@@ -1266,24 +1375,10 @@ unsafe fn fused_pass_uninit<L: Leaves>(
                         );
                         (&weight_lo[..count], &weight_hi[..count])
                     };
-                    for p in partial.iter_mut() {
-                        *p = [K::zero(); 3];
-                    }
-                    eval_items_with(
-                        lanes,
-                        e.terms,
-                        eval_order.as_ref().expect("an evaluation has a term order"),
-                        &mut eval_scratch,
-                        Some(weights),
-                        k0 - base,
-                        k1 - base,
-                        e.full,
-                        &mut partial,
-                    );
+                    partial.fill(K::zero());
+                    eval_call(lanes, e, order, &mut eval_scratch, Some(weights), k0 - base, k1 - base, &mut partial);
                     for (acc, p) in sums.iter_mut().zip(&partial) {
-                        for c in 0..3 {
-                            acc[c] += p[c];
-                        }
+                        *acc += *p;
                     }
                 } else {
                     // The short table has at least 64 entries: each block covers a vector
@@ -1293,27 +1388,22 @@ unsafe fn fused_pass_uninit<L: Leaves>(
                         let block = k >> first_bits;
                         let end = ((block + 1) << first_bits).min(k1);
                         let offset = k & first_mask;
-                        for p in partial.iter_mut() {
-                            *p = [K::zero(); 3];
-                        }
-                        eval_items_with(
+                        partial.fill(K::zero());
+                        eval_call(
                             lanes,
-                            e.terms,
-                            eval_order.as_ref().expect("an evaluation has a term order"),
+                            e,
+                            order,
                             &mut eval_scratch,
                             Some((&e.first.0[offset..], &e.first.1[offset..])),
                             k - base,
                             end - base,
-                            e.full,
                             &mut partial,
                         );
                         let s = e.second.get(block).copied().unwrap_or_else(|| K::from_u64(1));
                         // Slots and components without terms have zero sums.
                         for (acc, p) in sums.iter_mut().zip(&partial) {
-                            for c in 0..3 {
-                                if !p[c].is_zero() {
-                                    acc[c] += s * p[c];
-                                }
+                            if !p.is_zero() {
+                                *acc += s * *p;
                             }
                         }
                         k = end;
@@ -1325,11 +1415,9 @@ unsafe fn fused_pass_uninit<L: Leaves>(
         drop(scratch);
         sums
     };
-    let add = |mut left: Vec<[K; 3]>, right: Vec<[K; 3]>| {
+    let add = |mut left: Vec<K>, right: Vec<K>| {
         for (l, r) in left.iter_mut().zip(right) {
-            for c in 0..3 {
-                l[c] += r[c];
-            }
+            *l += r;
         }
         left
     };
@@ -1338,7 +1426,7 @@ unsafe fn fused_pass_uninit<L: Leaves>(
         (0..tasks)
             .into_par_iter()
             .map(|t| run(t * TASK_ROWS, ((t + 1) * TASK_ROWS).min(rows_out)))
-            .reduce(|| vec![[K::zero(); 3]; slots], add)
+            .reduce(|| vec![K::zero(); slots * comps], add)
     } else {
         run(0, rows_out)
     }

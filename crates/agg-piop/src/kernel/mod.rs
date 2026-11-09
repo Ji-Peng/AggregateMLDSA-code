@@ -575,6 +575,9 @@ struct Policy {
     taylor: bool,
     /// Recover the constant coefficient of the dense rounds from the running claim.
     recover: bool,
+    /// Run the dense rounds on the plane tail when the layout and the summand allow it
+    /// (else on the row-major table).
+    plane_tail: bool,
 }
 
 const AUTO: Policy = Policy {
@@ -584,6 +587,7 @@ const AUTO: Policy = Policy {
     quartet_lut: Choice::Auto,
     taylor: true,
     recover: true,
+    plane_tail: true,
 };
 
 /// A bucketed segment: the pieces on one coded column, or on the columns of a joint term.
@@ -1096,15 +1100,13 @@ impl<'a> Group<'a> {
             ..direct_source.clone()
         };
         let lane_count = lanes.len();
-        // The tail on planes needs an equality factor (so a cell's constant enters once),
-        // a degree at least three, and lanes without a shift.
-        let tail_terms = (layout() == Layout::Plane
-            && eq.is_some()
-            && degree >= 3
-            && local_vars >= 4
-            && plan.shifts.iter().all(Zero::is_zero))
-        .then(|| TailTerms::compile(&plan.dense, lane_count))
-        .flatten();
+        // The tail on planes needs an equality factor (so a cell's constant enters once) and
+        // a degree at least three. It reads the folded pieces: its tables hold the lanes
+        // untranslated (the translations of the depressed quartics serve the row-major dense
+        // table only).
+        let tail_terms = (policy.plane_tail && layout() == Layout::Plane && eq.is_some() && degree >= 3 && local_vars >= 4)
+            .then(|| TailTerms::compile(&plan.folded, lane_count))
+            .flatten();
         let mut group = Self {
             eq,
             tau: eq_point.map(<[E]>::to_vec).unwrap_or_default(),
@@ -1283,7 +1285,7 @@ impl<'a> Group<'a> {
     fn plane_round(&mut self) -> Vec<E> {
         let eq = self.eq.as_ref().expect("plane groups have an equality factor");
         let full = !eq.can_recover_linear_q_term_from_claim();
-        let [q0, at_one, q2] = if let Some(tail) = self.tail.as_mut() {
+        let values = if let Some(tail) = self.tail.as_mut() {
             tail.message(eq, full, self.plan.constant)
         } else {
             // Levels 2 and 3: the lanes' compact states are read block by block (and folded
@@ -1295,16 +1297,18 @@ impl<'a> Group<'a> {
                 None => terms.rows_message(&source, eq, full, self.plan.constant),
             }
         };
-        let q1 = if full {
-            at_one - q0 - q2
+        // `values`: `q` at `0..D` and its coefficient of `X^D`.
+        let at_one = if full {
+            values[1]
         } else {
             // claim / lift = l(0) q(0) + l(1) q(1).
             let (l0, l1) = eq.linear_factor_evals();
             let unscaled = self.claim * self.scale.inverse().expect("nonzero lift");
-            (unscaled - l0 * q0) * l1.inverse().expect("recoverable round") - q0 - q2
+            (unscaled - l0 * values[0]) * l1.inverse().expect("recoverable round")
         };
+        let coefficients = tail::coefficients(&values, at_one);
         let mut q = vec![E::zero(); self.coefficient_count()];
-        q[..3].copy_from_slice(&[q0, q1, q2]);
+        q[..coefficients.len()].copy_from_slice(&coefficients);
         q
     }
 

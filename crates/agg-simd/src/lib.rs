@@ -18,6 +18,7 @@ pub mod wide;
 pub mod negacyclic;
 pub mod lookup;
 pub mod fused;
+pub mod high;
 pub mod mask;
 pub mod pattern;
 pub mod eval;
