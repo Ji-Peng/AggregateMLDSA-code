@@ -517,7 +517,7 @@ closure's, so the two overlap in wall time), the bridge seed, the matrices
 (`BridgeDerivation::matrices(sd)`, a `Cow` so fixed matrices are not copied), round 2, the
 Flock seeds, the final vectors and the share items. Then the fork (deviation K22): the Flock
 proofs (`KeccakSide::prove`) run on their own rayon pool (`flock_pool_threads`,
-`AGG_FLOCK_THREADS`, default 3/8 of the global pool, rounded up) while the parity tables `y^(1)`, the
+`AGG_FLOCK_THREADS`, default 5/16 of the global pool, rounded up) while the parity tables `y^(1)`, the
 lookup, `tau`, the pre-stage claims and the three stages run on the global pool, with the
 weight tables built between the stages (`ProverTables::set_tau/set_r1/set_r2`, each dropping
 the previous weights); `AGG_FLOCK_THREADS=0` (also on a rayon worker or with a one-thread

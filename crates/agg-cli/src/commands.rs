@@ -68,9 +68,8 @@ commands:
 
 environment:
   AGG_FLOCK_THREADS=K   threads of the pool that proves the Flock parts beside the PIOP
-                        (aggregate, bench; default 3/8 of the rayon pool rounded up, or 7/16
-                        when Flock's GF(2^128) kernels run below AVX-512 — 12 or 14 on a
-                        32-thread host; 0: one after the other; at most the logical CPUs or
+                        (aggregate, bench; default 5/16 of the rayon pool rounded up, 10 on
+                        a 32-thread host; 0: one after the other; at most the logical CPUs or
                         the rayon pool; a value that is not a number warns and falls back to
                         the default).
   AGG_PIOP_S_THREADS=K  threads of the stage branch's own pool beside the Flock fork
