@@ -15,7 +15,8 @@ ML-DSA-44, -65 and -87 (public `c~` included).
   detected at run time and used when present.
 - rustup; the toolchain (1.99.1) is pinned by `rust-toolchain.toml` and installed on the
   first build.
-- 16 GiB RAM for batches up to 4K signatures; 32 GiB or more for 32K.
+- 16 GiB RAM for batches up to 4K signatures. At 32K the prover peaks at about 16 GiB
+  (ML-DSA-44, -65) and 20 GiB (ML-DSA-87), so a 32 GB machine runs every set.
 
 ## Build and quick check
 

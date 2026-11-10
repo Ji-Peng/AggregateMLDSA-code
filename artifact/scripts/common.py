@@ -103,6 +103,38 @@ PARAM_SETS = {
 }
 
 
+# Prover peak resident set (VmHWM, MiB) of the paper's measurements on an
+# EPYC 9355 (Zen 5): per set and batch size, the maximum over the three tiers,
+# the allocations and the relations measured there. It includes the
+# allocator's block cache.
+PROVER_PEAK_MIB = {
+    "44": {1024: 1978, 8192: 4635, 32768: 16678},
+    "65": {1024: 2075, 8192: 4559, 32768: 15486},
+    "87": {1024: 2254, 2048: 1872, 4096: 3285, 8192: 5837, 16384: 10802, 32768: 20483},
+}
+# Free memory kept beyond the recorded peak, for run-to-run variation of the
+# peak, the other ablation arms and the harness itself.
+MEMORY_HEADROOM_GIB = 4
+
+
+def memory_floor_gib(params, n):
+    """`MemAvailable` (whole GiB) a prover cell of set `params` at batch size `n` needs.
+
+    The floor is the recorded peak plus the headroom, rounded up. A size without
+    a record for the set uses the largest peak recorded at that size for any set
+    (ML-DSA-87 has the largest peak at every size it shares with the others),
+    and a size without any record uses the next larger recorded size. Above
+    the largest recorded size there is no floor (None).
+    """
+    peak = PROVER_PEAK_MIB.get(str(params), {}).get(n)
+    if peak is None:
+        sizes = sorted({m for peaks in PROVER_PEAK_MIB.values() for m in peaks if m >= n})
+        if not sizes:
+            return None
+        peak = max(peaks.get(sizes[0], 0) for peaks in PROVER_PEAK_MIB.values())
+    return -(-(peak + MEMORY_HEADROOM_GIB * 1024) // 1024)
+
+
 def cell_params(cell):
     """The ML-DSA parameter set of a result cell (cells written before the key are ML-DSA-44)."""
     return str(cell.get("params") or "44")

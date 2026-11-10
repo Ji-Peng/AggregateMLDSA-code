@@ -1066,7 +1066,24 @@ def baselines_table(cells, directory, commit, machine, skipped, alloul=()):
             return "one run, "
         return f"medians of {words.get(counts[0], str(counts[0]))} runs, "
 
-    aerie_runs = medians_of(len(c["times_ms"]) for c in aerie if c.get("n") == n and c.get("times_ms"))
+    # Aerie's protocol as the runner executed it: fixture (warm-up) invocations,
+    # then the measured invocations whose median the rows print.
+    aerie_at_n = [c for c in aerie if c.get("n") == n and c.get("times_ms")]
+    aerie_runs = medians_of(len(c["times_ms"]) for c in aerie_at_n)
+    aerie_warmups = sorted({int(c.get("warmup") or 0) for c in aerie_at_n})
+    if aerie_runs and len(aerie_warmups) == 1 and aerie_warmups[0] > 0:
+        w = aerie_warmups[0]
+        aerie_runs = aerie_runs.rstrip(", ") + f" after {words.get(w, str(w))} warm-up run{'s' if w > 1 else ''}, "
+
+    # Aerie's setup (outside its prove time) per degree on 16C32T: the AVX2 cell,
+    # else the AVX-512 one. Halves round up, as in the paper.
+    setups = []
+    for deg in (512, 1024):
+        cell = pick_aerie(deg, "avx2", "16C32T") or pick_aerie(deg, "avx512", "16C32T")
+        value = median_of(cell, "setup_ms")
+        if value is not None:
+            setups.append(f"{math.floor(value / 10 + 0.5) / 100:.2f}")
+    aerie_setup = f" ({series(setups)}\\,s on 16C32T)" if len(setups) == 2 else ""
     alloul_counts = {}
     for r in alloul:
         if r.get("family") == ALLOUL_FAMILY and int(r.get("N", 0)) == n:
@@ -1076,7 +1093,7 @@ def baselines_table(cells, directory, commit, machine, skipped, alloul=()):
     note = (
         "Cat.: NIST category. Uncached keys; keys and messages excluded. "
         "AVX-512: F, BW and VBMI, no IFMA. Compression: signature bytes over B/sig. "
-        f"Aerie: {aerie_runs}prove without setup, B/sig with 40\\,B salt. "
+        f"Aerie: {aerie_runs}prove without setup{aerie_setup}, B/sig with 40\\,B salt. "
         "Alloul26: Johnson family" + (f", {alloul_runs}." if alloul_runs else ".")
     )
     if any(v != "--" for v in native_par + native_1t):

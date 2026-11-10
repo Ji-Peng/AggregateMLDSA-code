@@ -42,7 +42,7 @@ Every default run (`gates`, `quick`, `full`, `tables`, `all`) proves and
 verifies **H-FIPS**: the aggregate certifies that every extracted
 $(\tilde c, z, h)$ is a FIPS 204 signature. **H-exact** proves the FIPS 204
 bounds on $z$ and on the UseHint residual but not the hint itself. It is a
-reference relation, slightly faster than H-FIPS (3--10% on 16C32T at 32K on the
+reference relation, slightly faster than H-FIPS (5--10% on 16C32T at 32K on the
 AVX2 tier in the reference measurements), and runs only on request:
 
 ```sh
@@ -66,13 +66,17 @@ results contain H-exact cells, and a comment otherwise.
 - 16 hardware threads are enough for `quick`; 16 cores with SMT are
   recommended for `full`. The 8C16T rows need eight cores.
 - RAM: 16 GiB for `quick` (up to 4K signatures) and 64 GiB recommended for
-  `full`. The script refuses a 32K cell when `MemAvailable` is below 28 GiB
-  and records the reason in `skipped.json`, so the 32K cells need a machine
-  with at least 32 GiB (not 32 GB) of RAM and little else running. On the
-  reference machine the 32K prover peaks at 16.4 GiB for ML-DSA-44, 16.2 GiB
-  for ML-DSA-65 and 21.7 GiB for ML-DSA-87 on the AVX2 tier, and at most
-  21.9 GiB over all tiers (measured: the prover's `VmHWM`, which includes the
-  allocator's block cache). The optional Alloul26 cells at 32K need 42 GiB.
+  `full`. Each prover cell has its own floor: the prover peak recorded on the
+  reference machine for that parameter set and batch size, plus 4 GiB of
+  headroom, rounded up to a whole GiB (`memory_floor_gib` in
+  `scripts/common.py`). The script skips a cell whose floor exceeds
+  `MemAvailable` and records the reason in `skipped.json`. At 32K the floors
+  are 21 GiB for ML-DSA-44, 20 GiB for ML-DSA-65 and 25 GiB for ML-DSA-87,
+  from peaks of 16.3, 15.1 and 20.0 GiB (the prover's `VmHWM`, which includes
+  the allocator's block cache; the maximum over the tiers, allocations and
+  relations). A 32 GB machine with little else running therefore runs the
+  ML-DSA-44 and -65 32K cells, and the ML-DSA-87 ones when at least 25 GiB
+  are available. The optional Alloul26 cells at 32K need 42 GiB.
 - Disk: about 20 GB during a full run (one cargo target directory for `agg`
   and `mode_b`, Aerie's target, the cloned sources and the results). `quick`
   needs about 10 GB.
@@ -190,31 +194,46 @@ registers and EVEX-only mnemonics are counted in `build.json`).
 
 ### Expected times
 
-The following medians were measured on an idle AMD EPYC 9355 node (Zen 5) at
-$N = 32{,}768$ under H-FIPS on 16C32T, 8C16T and 1T, one warm-up and five runs (`tab:baselines`,
-`tab:bytes`). Node-to-node spread is a few percent; `./run.sh full`
-reproduces every cell.
+The following medians were measured on idle AMD EPYC 9355 nodes (Zen 5) at
+$N = 32{,}768$ under H-FIPS on 16C32T, 8C16T and 1T, one warm-up and five runs
+per cell (`tab:baselines`, `tab:bytes`), with the binary built from the frozen
+revision recorded in `sources.lock`. Node-to-node spread is a few percent;
+`./run.sh full` reproduces every cell. Peak is the prover's `VmHWM` on 16C32T.
 
-| Set | Tier | 16C32T prove | 8C16T prove | 1T prove | 16C32T verify (unc. / cached) | Aggregate (B/sig) |
-| --- | --- | --- | --- | --- | --- | --- |
-| 44 | `ifma` | 2.34 s | 3.47 s | 24.69 s | 62 / 54 ms | 1,611,831 B (49.2) |
-| 44 | `avx512` | 2.40 s | 3.52 s | 24.79 s | 61 / -- ms | 1,611,831 B (49.2) |
-| 44 | `avx2` | 2.70 s | 4.27 s | 32.63 s | 74 / 57 ms | 1,611,831 B (49.2) |
-| 65 | `ifma` | 2.94 s | 4.07 s | 29.69 s | 82 / 70 ms | 2,143,007 B (65.4) |
-| 65 | `avx512` | 2.96 s | 4.13 s | 29.83 s | 84 / -- ms | 2,143,007 B (65.4) |
-| 65 | `avx2` | 3.33 s | 4.99 s | 39.08 s | 119 / 82 ms | 2,143,007 B (65.4) |
-| 87 | `ifma` | 3.72 s | 5.31 s | 38.92 s | 114 / 88 ms | 2,710,255 B (82.7) |
-| 87 | `avx512` | 3.74 s | 5.44 s | 38.92 s | 119 / -- ms | 2,710,255 B (82.7) |
-| 87 | `avx2` | 4.25 s | 6.64 s | 51.40 s | 179 / 110 ms | 2,710,255 B (82.7) |
+| Set | Tier | 16C32T prove | 8C16T prove | 1T prove | 16C32T verify (unc. / cached) | 16C32T peak | Aggregate (B/sig) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 44 | `ifma` | 2.35 s | 3.42 s | 24.48 s | 60.8 / 53.5 ms | 16,678 MiB | 1,611,831 B (49.2) |
+| 44 | `avx512` | 2.35 s | 3.45 s | 24.59 s | 60.5 / 55.9 ms | 16,523 MiB | 1,611,831 B (49.2) |
+| 44 | `avx2` | 2.68 s | 4.20 s | 32.49 s | 74.5 / 56.6 ms | 16,137 MiB | 1,611,831 B (49.2) |
+| 65 | `ifma` | 2.89 s | 4.04 s | 29.36 s | 81.2 / 70.7 ms | 15,389 MiB | 2,143,007 B (65.4) |
+| 65 | `avx512` | 2.90 s | 4.09 s | 29.48 s | 85.3 / 71.9 ms | 15,426 MiB | 2,143,007 B (65.4) |
+| 65 | `avx2` | 3.31 s | 4.95 s | 38.71 s | 120.1 / 82.1 ms | 15,486 MiB | 2,143,007 B (65.4) |
+| 87 | `ifma` | 3.61 s | 5.25 s | 38.31 s | 111.5 / 88.0 ms | 20,386 MiB | 2,710,255 B (82.7) |
+| 87 | `avx512` | 3.62 s | 5.33 s | 38.53 s | 117.4 / 91.1 ms | 20,483 MiB | 2,710,255 B (82.7) |
+| 87 | `avx2` | 4.13 s | 6.51 s | 50.95 s | 176.5 / 110.3 ms | 20,304 MiB | 2,710,255 B (82.7) |
 
-`--` marks a value the reference measurements did not record. On 16C32T with
-AVX2, the opt-in reference relation H-exact proves 3.2% (44), 9.7% (65) and
-6.9% (87) faster than H-FIPS. In `tab:ablation` (ML-DSA-44,
-32K, 16C32T, AVX2), running Flock after the PIOP (`AGG_FLOCK_THREADS=0`) costs
-0.43 s against the default, and the mode-B public-bits aggregate takes 2.08 s
-and 803.1 B/sig. Absolute times on another microarchitecture
-differ; the tier order and the byte identity are the portable parts of the
-result.
+On 16C32T with AVX2, the opt-in reference relation H-exact proves 5.3% (44),
+9.9% (65) and 5.9% (87) faster than H-FIPS. In `tab:ablation` (ML-DSA-44,
+32K, 16C32T, AVX2), running Flock after the PIOP (`AGG_FLOCK_THREADS=0`) takes
+3.09 s, 0.41 s more than the default, and the mode-B public-bits aggregate
+takes 1.88 s and 803.1 B/sig (prover peak 9,128 MiB). Absolute times on
+another microarchitecture differ; the tier order and the byte identity are
+the portable parts of the result.
+
+Aerie (`aerie*` groups) runs one fixture invocation and then five measured
+invocations per cell, each a fresh process; the table prints the medians of
+the five and the note gives Aerie's setup time, which its prove time
+excludes. Reference medians at $N = 32{,}768$ on the same CPU class:
+
+| Falcon | Tier | 16C32T setup | 16C32T prove | 8C16T prove | 1T prove | Verify 16C32T / 8C16T / 1T | Envelope |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 512 | AVX2 | 0.21 s | 0.99 s | 1.23 s | 7.64 s | 15.2 / 17.3 / 89.6 ms | 1,378,672 B |
+| 512 | AVX-512 | 0.21 s | 0.99 s | 1.24 s | 7.59 s | 12.6 / 13.2 / 51.2 ms | 1,378,672 B |
+| 1024 | AVX2 | 0.41 s | 1.67 s | 2.22 s | 14.58 s | 21.3 / 24.4 / 154.8 ms | 1,378,998 B |
+| 1024 | AVX-512 | 0.41 s | 1.72 s | 2.20 s | 14.48 s | 16.2 / 16.8 / 82.2 ms | 1,378,998 B |
+
+Aerie's verify column is its parallel verifier on 16C32T and 8C16T and its
+single-thread verifier on 1T.
 
 Warm cells follow the paper protocol: one process per cell with
 `--warmup 1 --reps N`, split into `processes` chunks so that the tiers
@@ -252,8 +271,8 @@ a `claims-measured.csv` with the values that were actually measured.
 
 The following figures of the evaluation have no command in `run.sh`:
 
-- Alloul26 against ours from $2^{10}$ to $2^{15}$ on 16C32T (18 to 42 times
-  slower, 1.8 to 2.4 times our B/sig, up to 3.9 times our memory). `full
+- Alloul26 against ours from $2^{10}$ to $2^{15}$ on 16C32T (18 to 43 times
+  slower, 1.8 to 2.4 times our B/sig, up to 4.1 times our memory). `full
   --alloul26` covers only $2^{15}$. Each other size takes two commands on the
   16C32T CPU set of `cpusets.json`: `./run.sh alloul26 --n N --family J --isa
   avx2 --threads 32 --cpus LIST --runs 3` and `AGG_ISA=avx2 taskset -c LIST
@@ -359,9 +378,10 @@ carry it):
   the final merge.
 - `16C32T` is `n/a`: the machine has fewer than 16 cores. `quick` uses
   `8C16T`; the table labels the fallback.
-- A 32K cell is skipped: `MemAvailable` is below 28 GiB. Close other
-  processes or run `quick`. A machine with 32 GB (29.8 GiB) of RAM usually
-  stays below that floor.
+- A 32K cell is skipped: `MemAvailable` is below the cell's floor (21 GiB
+  for ML-DSA-44, 20 GiB for ML-DSA-65, 25 GiB for ML-DSA-87). Close other
+  processes or run `quick`. On a machine with 32 GB (29.8 GiB) of RAM the
+  ML-DSA-87 32K cells need nearly all of it free.
 - THP is `never`: results resemble the `AGG_HUGEPAGE=0` ablation. The run is
   still valid; the note in the tables records it.
 - No IFMA: the `ifma` row is `n/a (CPU without AVX-512IFMA)`. No AVX-512F:

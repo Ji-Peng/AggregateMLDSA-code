@@ -28,6 +28,7 @@ from common import (  # noqa: E402
     load_configs,
     load_matrix,
     median,
+    memory_floor_gib,
     new_result_dir,
     parse_relations,
     read_json,
@@ -799,7 +800,7 @@ class Runner:
                 raise SystemExit(
                     f"Aerie fixture run failed: {(proc.stderr or '')[-2000:]}"
                 )
-        series = {"prove": [], "verify_parallel": [], "verify_single": [], "wire": None}
+        series = {"setup": [], "prove": [], "verify_parallel": [], "verify_single": [], "wire": None}
         logs = []
         for _ in range(reps):
             proc = sh(cmd, env)
@@ -809,6 +810,7 @@ class Runner:
             row = parse_aerie(proc.stdout or "", n)
             if row is None:
                 raise SystemExit("Aerie printed no result row:\n" + (proc.stdout or "")[-2000:])
+            series["setup"].append(row["setup_ms"])
             series["prove"].append(row["prove_ms"])
             series["verify_parallel"].append(row["verify_parallel_ms"])
             series["verify_single"].append(row["verify_single_ms"])
@@ -832,6 +834,8 @@ class Runner:
             "warmup": warmup,
             "reps": reps,
             "times_ms": series["prove"],
+            # Aerie's per-run setup (key and parameter preparation), outside its prove time.
+            "setup_ms": series["setup"],
             "verify_uncached_ms": series["verify_parallel"],
             "verify_cached_ms": [],
             "verify_single_ms": series["verify_single"],
@@ -1313,17 +1317,16 @@ class Runner:
         if self.skipped:
             write_json(self.result_dir / "skipped.json", self.skipped)
 
-    def memory_filter(self, tag, sizes):
-        """Drop batch sizes whose recorded prover peak does not fit with headroom."""
+    def memory_filter(self, tag, sizes, params):
+        """Drop batch sizes whose recorded prover peak for the set does not fit with headroom."""
         if self.dry_run:
             return sizes
         available = (self.machine.get("memory") or {}).get("available_bytes")
         if not available:
             return sizes
-        need = {1024: 2, 2048: 3, 4096: 5, 8192: 8, 16384: 14, 32768: 28}
         kept = []
         for n in sizes:
-            required = need.get(n)
+            required = memory_floor_gib(params, n)
             if required is None or available >= required * (1 << 30):
                 kept.append(n)
             else:
@@ -1331,13 +1334,14 @@ class Runner:
                     {
                         "kind": "batch-size",
                         "name": str(n),
+                        "params": params,
                         "tag": tag,
                         "reason": f"MemAvailable {available / (1 << 30):.1f} GiB, "
-                        f"{required} GiB needed",
+                        f"{required} GiB needed for ML-DSA-{params}",
                     }
                 )
                 print(
-                    f"skip N={n} in {tag}: MemAvailable "
+                    f"skip N={n} in {tag} (ML-DSA-{params}): MemAvailable "
                     f"{available / (1 << 30):.1f} GiB < {required} GiB"
                 )
         return kept
@@ -1373,12 +1377,7 @@ class Runner:
             group_sizes = sizes or group.get("sizes") or [1024]
             if self.args.smoke:
                 group_sizes = [s for s in group_sizes if s <= 1024] or [1024]
-            if kind in ("ours", "ablations", "fresh", "mode_b"):
-                group_sizes = self.memory_filter(tag, group_sizes)
-                if not group_sizes:
-                    print(f"skip {tag}: no batch size fits in memory")
-                    continue
-            reps = requested_reps or group.get("reps") or group.get("rounds") or 3
+            reps =requested_reps or group.get("reps") or group.get("rounds") or 3
             warmup = (
                 self.args.warmup
                 if self.args.warmup is not None
@@ -1397,19 +1396,25 @@ class Runner:
                 self.run_aerie_group(group, rows, group_sizes, reps, warmup)
                 continue
             for params in params_list:
+                set_sizes = group_sizes
+                if kind in ("ours", "ablations", "fresh", "mode_b"):
+                    set_sizes = self.memory_filter(tag, group_sizes, params)
+                    if not set_sizes:
+                        print(f"skip {tag} (ML-DSA-{params}): no batch size fits in memory")
+                        continue
                 print(
-                    f"== {tag} ({kind}, ML-DSA-{params}) sizes={group_sizes} reps={reps} "
+                    f"== {tag} ({kind}, ML-DSA-{params}) sizes={set_sizes} reps={reps} "
                     f"warmup={warmup} processes={processes}"
                 )
                 if kind == "ours":
                     self.run_ours_group(
-                        group, rows, group_sizes, relations, reps, warmup, params
+                        group, rows, set_sizes, relations, reps, warmup, params
                     )
                 elif kind == "ablations":
                     self.run_ablations(
                         group,
                         rows,
-                        group_sizes,
+                        set_sizes,
                         relations[0],
                         reps,
                         warmup,
@@ -1417,14 +1422,14 @@ class Runner:
                     )
                 elif kind == "mode_b":
                     self.run_mode_b_group(
-                        group, rows, group_sizes, reps, warmup, params
+                        group, rows, set_sizes, reps, warmup, params
                     )
                 elif kind == "native":
                     self.run_native_group(
-                        group, rows, group_sizes, reps, warmup, params
+                        group, rows, set_sizes, reps, warmup, params
                     )
                 elif kind == "fresh":
-                    self.run_fresh_group(group, rows, group_sizes, reps, params)
+                    self.run_fresh_group(group, rows, set_sizes, reps, params)
                 else:
                     raise SystemExit(f"unknown run kind {kind}")
         if self.dry_run:
@@ -1529,6 +1534,7 @@ def parse_aerie(stdout, n):
             if int(parts[0]) != n:
                 continue
             return {
+                "setup_ms": float(parts[1]),
                 "prove_ms": float(parts[2]),
                 "verify_parallel_ms": float(parts[18]),
                 "verify_single_ms": float(parts[24]),

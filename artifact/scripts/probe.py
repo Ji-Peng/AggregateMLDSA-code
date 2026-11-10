@@ -20,11 +20,13 @@ from common import (  # noqa: E402
     AERIE_TOOLCHAIN,
     ARTIFACT,
     BIN,
+    PARAM_SETS,
     RUST_TOOLCHAIN,
     VENDOR,
     cpu_flags,
     cpu_model,
     hostname,
+    memory_floor_gib,
     output,
     supported_tiers,
     utc_stamp,
@@ -175,10 +177,18 @@ def build_warnings(state):
     if "hypervisor" in state["flags"]:
         warnings.append("virtual machine (hypervisor CPU flag)")
     available = state["memory"]["available_bytes"]
-    if available is not None and available < 28 * (1 << 30):
-        warnings.append(
-            f"MemAvailable {available / (1 << 30):.1f} GiB: the 32K prover may not fit"
-        )
+    if available is not None:
+        short = [
+            f"ML-DSA-{params} ({memory_floor_gib(params, 32768)} GiB)"
+            for params in PARAM_SETS
+            if available < memory_floor_gib(params, 32768) * (1 << 30)
+        ]
+        if short:
+            warnings.append(
+                f"MemAvailable {available / (1 << 30):.1f} GiB: the 32K cells of "
+                + ", ".join(short)
+                + " will be skipped"
+            )
     load = state["loadavg"]
     nproc = state["nproc"]
     if load[0] > 0.5 * nproc:

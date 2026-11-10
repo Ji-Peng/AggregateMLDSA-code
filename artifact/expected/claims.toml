@@ -26,7 +26,7 @@ statement = "Prove and verify times on a 16-core Zen 5 machine match the paper's
 table = "tab-baselines.tex"
 cell = "ours rows: AVX2 / AVX-512 / IFMA prove times on 16C32T; tab-scaling.tex verify times"
 command = "./run.sh full"
-expected = "paper medians on 16C32T at 32K under H-FIPS (AVX2 / AVX-512F / IFMA: 2.70 / 2.40 / 2.34 s for 44, 3.33 / 2.96 / 2.94 s for 65, 4.25 / 3.74 / 3.72 s for 87)"
+expected = "paper medians on 16C32T at 32K under H-FIPS (AVX2 / AVX-512F / IFMA: prove 2.68 / 2.35 / 2.35 s for 44, 3.31 / 2.90 / 2.89 s for 65, 4.13 / 3.62 / 3.61 s for 87; AVX2 verify uncached / cached 74.5 / 56.6, 120.1 / 82.1 and 176.5 / 110.3 ms; AVX2 prover peak 16,137, 15,486 and 20,304 MiB)"
 tolerance = "+-10% on the same CPU class; other microarchitectures differ"
 
 [[claim]]
@@ -35,7 +35,7 @@ statement = "Both AVX-512 tiers prove faster than AVX2, IFMA and AVX-512F lie wi
 table = "tab-baselines.tex"
 cell = "ours tier rows in tab-baselines.tex and the three rows of tab-ablation.tex (AVX2, 16C32T, 32K)"
 command = "./run.sh full   (./run.sh quick --smoke checks only the tier order, at N=1,024 with one run per cell)"
-expected = "AVX2 slowest in every prove column; IFMA and AVX-512F within 3% (their order is noise); tab:ablation: full aggregate 2.70 s, Flock after the PIOP 3.12 s, public bits 2.08 s and 803.1 B/sig"
+expected = "AVX2 slowest in every prove column; IFMA and AVX-512F within 3% (their order is noise); tab:ablation: full aggregate 2.68 s, Flock after the PIOP 3.09 s, public bits 1.88 s and 803.1 B/sig"
 tolerance = "order exact for AVX2 against the AVX-512 tiers; +-15% for the ablation times on a Zen 5 CPU; B/sig exact"
 
 [[claim]]
@@ -44,5 +44,5 @@ statement = "Our prover and verifier compare with Aerie, Alloul26 and native ML-
 table = "tab-baselines.tex"
 cell = "Aerie and Alloul26 rows against ours; native verification times in the table note"
 command = "./run.sh full --alloul26   (./run.sh quick --alloul26 compares at N=1,024 on 8C16T and 1T only, so its ratios are not the paper's 32K ratios)"
-expected = "ratios of the paper's baselines at N=32,768"
+expected = "ratios of the paper's baselines at N=32,768: ours over Aerie prove on 16C32T, AVX2, 2.70 (44 over Falcon-512) and 2.47 (87 over Falcon-1024); Aerie medians of five runs after one warm-up run, Falcon-512 / Falcon-1024 prove 0.99 / 1.67 s, excluding setup 0.21 / 0.41 s (AVX2, 16C32T); Alloul26 (ML-DSA-87, family J, AVX2) over ours 43.4 on 16C32T, 47.4 on 8C16T and 51.8 on 1T"
 tolerance = "+-20% on the evaluator's machine"
