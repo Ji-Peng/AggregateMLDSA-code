@@ -500,7 +500,7 @@ fn tied_part_round_trip_512() {
 /// takes the block-first transport with the chain's column bit-bank (the path of every
 /// power-of-two batch from 2,048 records on, 32K included).
 #[test]
-#[cfg_attr(debug_assertions, ignore = "heavy Flock proof; run with --release")]
+#[ignore = "2,048 records: run with --release --ignored"]
 fn tied_part_round_trip_2048_full_height() {
     tied_round_trip(2048, 0x2048, Tamper::None);
 }

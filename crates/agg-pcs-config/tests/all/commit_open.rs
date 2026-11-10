@@ -72,6 +72,7 @@ fn on_large_stack(f: impl FnOnce() + Send + 'static) {
 }
 
 #[test]
+#[cfg_attr(debug_assertions, ignore = "Akita at 1,024: run with --release")]
 fn h_exact_commit_and_batched_opening_at_256_and_1024() {
     // G_main4 at 9 polynomials (H-exact), the p16x grouped rows.
     on_large_stack(|| {
@@ -81,6 +82,7 @@ fn h_exact_commit_and_batched_opening_at_256_and_1024() {
 }
 
 #[test]
+#[cfg_attr(debug_assertions, ignore = "Akita at 1,024: run with --release")]
 fn h_fips_commit_and_batched_opening_at_256_and_1024() {
     // G_main4 at 12 polynomials and G_2 at 13 (H-FIPS), the p16f grouped rows; 1000 live
     // records pad to N* = 1024, and the padded rows carry the digits of zero.

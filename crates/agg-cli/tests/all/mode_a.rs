@@ -70,6 +70,10 @@ fn signed(records: &[Record]) -> Vec<(&[u8], &[u8], &[u8])> {
 /// second prove reuses the allocator cache and the Flock scratch pools, so a missed write
 /// into a recycled buffer changes the proof or is caught by `AGG_ALLOC_POISON=1`.
 #[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Flock and Akita proofs: run with --release"
+)]
 fn aggregating_twice_reuses_pools_without_changing_the_bytes() {
     on_large_stack(|| {
         let records = records(0x2424, 24, 16);
