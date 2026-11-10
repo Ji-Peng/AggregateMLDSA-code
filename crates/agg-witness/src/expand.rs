@@ -5,8 +5,8 @@
 //! A = ctr_q(NTT^{-1}(A_hat)), tr = H(pk, 64), and the prover's NTT-domain matrices
 //! (`PreparedMatrices`: A_hat mod q and NTT(A) mod the 28-bit transform prime of
 //! `agg_mldsa_simd`, in the coefficient order of the SIMD backend). The FIPS-order u64 forms
-//! of A_hat, NTT(t1 2^d) and NTT(A) modulo the legacy CRT prime (`crate::crt`) are reference
-//! methods, recomputed on demand for the native verifier and the legacy derivation.
+//! of A_hat, NTT(t1 2^d) and NTT(A) modulo the reference CRT prime (`crate::crt`) are reference
+//! methods, recomputed on demand for the native verifier and the reference derivation.
 //! `ExpandedKey::many` expands keys in tiles of 8 (batched ExpandA and tr hashing).
 //! `public_t` computes T = 2^d (c * t1) over the integers from the sparse c.
 
@@ -335,7 +335,7 @@ impl ExpandedKey<Set44> {
         tiles.into_iter().flatten().collect()
     }
 
-    /// NTT(A) modulo the legacy CRT prime [`crt::CRT_P31`] (reference form for [`crate::crt`],
+    /// NTT(A) modulo the reference CRT prime [`crt::CRT_P31`] (reference form for [`crate::crt`],
     /// recomputed from A).
     #[must_use]
     pub fn a_hat_p2_reference(&self) -> Box<MatrixNtt> {

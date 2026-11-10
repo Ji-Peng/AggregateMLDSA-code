@@ -1121,7 +1121,7 @@ impl MainTables {
     }
 
     /// [`MainTables::build`] on `engine`: records in tiles of [`TILE`] through the batched
-    /// derivation of [`derive_tile_with`] (its errors are the legacy derivation's); the
+    /// derivation of [`derive_tile_with`] (its errors are the reference derivation's); the
     /// shift-form encoder (`encode_rows`) writes the columns straight into the record's
     /// final column views (falling back to the generic encoder on error). Identical to
     /// [`MainTables::build_reference`].
@@ -1170,7 +1170,7 @@ impl MainTables {
         })
     }
 
-    /// The record-by-record build on the legacy derivation (`derive_with_t`) and the generic
+    /// The record-by-record build on the reference derivation (`derive_with_t`) and the generic
     /// encoder: the test oracle of [`MainTables::build`].
     #[doc(hidden)]
     pub fn build_reference(
@@ -1194,7 +1194,7 @@ impl MainTables {
     /// The tables of any parameter set, records in tiles of [`TILE`] in parallel: ML-DSA-65
     /// and ML-DSA-87 derive each tile on the SIMD engine (`derive_lane_tile`) and encode
     /// with the shift forms (`encode_rows`, falling back to the generic encoder on error),
-    /// while ML-DSA-44 runs the legacy derivation (`derive_with_t_for`) and the generic
+    /// while ML-DSA-44 runs the reference derivation (`derive_with_t_for`) and the generic
     /// encoder to equal [`MainTables::build`].
     ///
     /// # Panics
@@ -1232,7 +1232,7 @@ impl MainTables {
             });
         }
         // The sets with polynomial lanes derive each tile on the SIMD engine
-        // (`agg_witness::fast_lanes`; its errors are the legacy derivation's).
+        // (`agg_witness::fast_lanes`; its errors are the reference derivation's).
         Self::encode_tiles(manifest, count, TILE, true, |encoder, first, views, trace| {
             let live = first.min(count)..(first + views.len()).min(count);
             let records: Vec<&PublicRecord<P>> = instance.records[live.clone()].iter().collect();
@@ -2149,7 +2149,7 @@ mod lane_tests {
         wide_w1[0].w1[0][0] = 16;
         assert_eq!(MainTables::from_values(&manifest, &wide_w1), Err(SourceTableError::Encode("w1' above four bits")));
         // `encode_rows` rejects out-of-range inputs with `None` so the caller falls back to
-        // `encode_values` for the exact legacy error.
+        // `encode_values` for the exact reference error.
         let signatures: Vec<&[u8]> = records.iter().map(|r| r.sig.as_slice()).collect();
         let encoder = Encoder::new(&manifest);
         let mut base_lane = LaneWitness::zero::<P>();
@@ -2241,7 +2241,7 @@ mod lane_tests {
         assert_eq!(bridge.parity1_cached(), general.parity1_cached());
         // Under H-FIPS, `encode_rows` matches `from_values`, `BridgeGroupTables::build`
         // (packed path with `u_h` in level-2 slot 4) matches `from_witness`, and an
-        // out-of-range `u_h` or hint weight above `omega` falls back to the legacy error.
+        // out-of-range `u_h` or hint weight above `omega` falls back to the reference error.
         let manifest_fips = CommitmentManifest::for_set(P::SET, 5, Relation::HFips).unwrap();
         let main_fips = MainTables::build_for::<P>(&manifest_fips, &instance, &signatures).unwrap();
         assert_eq!(MainTables::from_values(&manifest_fips, &values).unwrap(), main_fips);

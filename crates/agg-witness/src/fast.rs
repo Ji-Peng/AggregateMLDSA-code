@@ -13,8 +13,8 @@
 //!
 //! A record that fails any step (length, hint, norm, another c~ than the instance's, a
 //! finishing bound, a commitment mismatch) is derived again by
-//! [`crate::derive::derive_with_t`], so every error is exactly the legacy one, and so is the
-//! witness of a record the legacy path accepts.
+//! [`crate::derive::derive_with_t`], so every error is exactly the reference one, and so is the
+//! witness of a record the reference path accepts.
 //!
 //! [`PublicInstance`]: crate::instance::PublicInstance
 
@@ -50,19 +50,19 @@ impl FastWitness {
         }
     }
 
-    /// z widened to the legacy vector type.
+    /// z widened to the reference vector type.
     #[must_use]
     pub fn z_wide(&self) -> VecL {
         self.z.map(|p| p.0.map(i64::from))
     }
 
-    /// u widened to the legacy vector type.
+    /// u widened to the reference vector type.
     #[must_use]
     pub fn u_wide(&self) -> VecK {
         std::array::from_fn(|r| self.rows[r].u.0.map(i64::from))
     }
 
-    /// v widened to the legacy vector type.
+    /// v widened to the reference vector type.
     #[must_use]
     pub fn v_wide(&self) -> VecK {
         std::array::from_fn(|r| self.rows[r].v.0.map(i64::from))
@@ -74,7 +74,7 @@ impl FastWitness {
         std::array::from_fn(|r| self.rows[r].w1)
     }
 
-    /// The values of a legacy witness (every one fits `i32` after the strict checks).
+    /// The values of a reference witness (every one fits `i32` after the strict checks).
     fn fill_from(&mut self, w: &SigWitness) {
         let narrow = |x: i64| i32::try_from(x).expect("strict witness values fit i32");
         for (dest, src) in self.z.iter_mut().zip(&w.z) {
@@ -95,7 +95,7 @@ impl Default for FastWitness {
 }
 
 /// Everything up to the commitment hash for one record; `false` sends the record to the
-/// legacy derivation.
+/// reference derivation.
 fn derive_one(
     engine: &Engine,
     record: &PublicRecord,
@@ -161,7 +161,7 @@ fn derive_one(
 }
 
 /// Strict derivation of `records[i]` with signature `sigs[i]` into `out[i]`, in tiles of
-/// [`TILE`]. On failure: the lowest index whose signature the legacy derivation rejects,
+/// [`TILE`]. On failure: the lowest index whose signature the reference derivation rejects,
 /// with that derivation's error (the outputs of the other records are then unspecified).
 ///
 /// # Panics
@@ -211,7 +211,7 @@ pub fn derive_tile_with(
     Ok(())
 }
 
-/// Whether the engine path alone accepts the record (no legacy fallback), with its values.
+/// Whether the engine path alone accepts the record (no reference fallback), with its values.
 /// Tests use it to show that honest records never take the fallback.
 #[doc(hidden)]
 pub fn fast_path_only_with(

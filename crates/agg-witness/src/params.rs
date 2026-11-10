@@ -396,10 +396,10 @@ pub trait ParamSet: Copy + Send + Sync + 'static {
     }
     /// Strict witness derivation of a tile of records on the process-wide SIMD engine
     /// ([`crate::fast_lanes::derive_tile`]; ML-DSA-44, whose tables run [`crate::fast`],
-    /// takes the legacy derivation here).
+    /// takes the reference derivation here).
     ///
     /// # Errors
-    /// The lowest index whose signature the legacy derivation rejects, with its error.
+    /// The lowest index whose signature the reference derivation rejects, with its error.
     fn derive_lane_tile(
         records: &[&crate::instance::PublicRecord<Self>],
         sigs: &[&[u8]],

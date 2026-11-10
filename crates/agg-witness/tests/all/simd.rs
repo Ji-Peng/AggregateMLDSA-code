@@ -31,7 +31,7 @@ fn inputs(records: &[Record]) -> Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> {
         .collect()
 }
 
-/// Every field and reference form of `key` against the legacy expansion of `pk`.
+/// Every field and reference form of `key` against the reference expansion of `pk`.
 fn assert_key_matches_legacy(key: &ExpandedKey, pk: &[u8]) {
     let decoded = pk_decode(pk).expect("decodes");
     let (a_hat, blocks) = expand_a(&decoded.rho);
@@ -137,7 +137,7 @@ fn public_instance_matches_the_reference_build() {
     }
 }
 
-fn legacy(inst: &PublicInstance, sigs: &[&[u8]]) -> Vec<Result<FastWitness, DeriveError>> {
+fn reference_derivation(inst: &PublicInstance, sigs: &[&[u8]]) -> Vec<Result<FastWitness, DeriveError>> {
     inst.records
         .par_iter()
         .zip(sigs)
@@ -177,7 +177,7 @@ fn fast_derivation_matches_the_legacy_witness() {
     let sigs: Vec<&[u8]> = records.iter().map(|r| r.sig.as_slice()).collect();
     for engine in engines() {
         let inst = PublicInstance::new_with(&engine, &inputs(&records)).unwrap();
-        let expected: Vec<FastWitness> = legacy(&inst, &sigs)
+        let expected: Vec<FastWitness> = reference_derivation(&inst, &sigs)
             .into_iter()
             .map(Result::unwrap)
             .collect();
@@ -187,7 +187,7 @@ fn fast_derivation_matches_the_legacy_witness() {
             "{:?}",
             engine.backend()
         );
-        // Honest records never take the legacy fallback.
+        // Honest records never take the reference fallback.
         for ((p, sig), want) in inst.records.iter().zip(&sigs).zip(&expected) {
             assert_eq!(fast_path_only_with(&engine, p, sig).as_ref(), Some(want));
         }
@@ -275,7 +275,7 @@ fn a_bad_record_fails_with_the_legacy_error_and_index() {
                         mutate(&mut bad[k], &other);
                     }
                     let sigs: Vec<&[u8]> = bad.iter().map(|r| r.sig.as_slice()).collect();
-                    let reference = legacy(&inst, &sigs);
+                    let reference = reference_derivation(&inst, &sigs);
                     let first = reference
                         .iter()
                         .position(Result::is_err)

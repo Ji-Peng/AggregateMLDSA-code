@@ -3,7 +3,7 @@
 //! Pipeline: `instance::PublicInstance` (verifier precomputation) -> `derive::derive`
 //! (per-signature witness: z, u, v, w1' and the bits); `fast` is the batched derivation of the
 //! prover on the `agg_mldsa_simd` engine, falling back to `derive` for any record it does not
-//! accept, so its results and errors are the legacy ones. `native` is an independent FIPS 204
+//! accept, so its results and errors are the reference ones. `native` is an independent FIPS 204
 //! verifier, `keccak` the commitment-hash sponge, `bridge` the integer side of the parity
 //! bridge, `digits` the value forms the PIOP commits. `hfips` holds relation H-FIPS (relation
 //! byte 2): its per-coefficient witness, derivation, integer checker (failures reported

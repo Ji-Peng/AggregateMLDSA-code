@@ -13,7 +13,7 @@
 //! digests per tile recomputes c~' = H(mu || w1Encode(w1')).
 //!
 //! A record that fails any step is derived again by [`crate::derive::derive_with_t_for`], so
-//! every error is exactly the legacy one, and so is the witness of a record the legacy path
+//! every error is exactly the reference one, and so is the witness of a record the reference path
 //! accepts.
 
 use crate::derive::{derive_with_t_for, DeriveError};
@@ -45,7 +45,7 @@ impl LaneWitness {
         }
     }
 
-    /// The values of a legacy witness (every one fits `i32` after the strict checks).
+    /// The values of a reference witness (every one fits `i32` after the strict checks).
     fn fill_from<P: ParamSet>(&mut self, w: &crate::derive::SigWitness<P>) {
         let narrow = |x: i64| i32::try_from(x).expect("strict witness values fit i32");
         for (dest, src) in self.z.iter_mut().zip(w.z.as_ref()) {
@@ -68,7 +68,7 @@ fn transformed<P: agg_mldsa_simd::ParamSet>(engine: &Engine<P>, prime: Prime, p:
 }
 
 /// Everything up to the commitment hash for one record, with `L` the columns of `P`;
-/// `false` sends the record to the legacy derivation.
+/// `false` sends the record to the reference derivation.
 fn derive_one<P, const L: usize>(
     engine: &Engine<P>,
     record: &PublicRecord<P>,
@@ -141,7 +141,7 @@ where
 
 /// Strict derivation of `records[i]` with signature `sigs[i]` into `out[i]` (each
 /// [`LaneWitness::zero`] of `P`), in tiles of [`TILE`]. On failure: the lowest index whose
-/// signature the legacy derivation rejects, with that derivation's error.
+/// signature the reference derivation rejects, with that derivation's error.
 ///
 /// # Panics
 /// If the three slices differ in length, or `P` has another column count than 5 or 7.
@@ -198,7 +198,7 @@ where
     Ok(())
 }
 
-/// [`derive_tile`] on the legacy derivation alone (any parameter set).
+/// [`derive_tile`] on the reference derivation alone (any parameter set).
 ///
 /// # Errors
 /// As [`derive_tile`].
@@ -222,7 +222,7 @@ mod tests {
     use crate::instance::PublicInstance;
     use crate::params::{Set65, Set87};
 
-    /// The engine path gives the legacy witness for honest records, and the legacy error for
+    /// The engine path gives the reference witness for honest records, and the reference error for
     /// a corrupted signature (every backend the host supports), on the records of `seed`.
     fn matches_the_legacy_derivation<P>(seed: u64)
     where
@@ -255,7 +255,7 @@ mod tests {
                 want.fill_from(&legacy);
                 assert_eq!(*w, want, "{backend:?} record {i}");
             }
-            // A flipped z byte: the legacy derivation's verdict.
+            // A flipped z byte: the reference derivation's verdict.
             let mut bad = records[3].sig.clone();
             bad[<P as ParamSet>::C_TILDE_BYTES + 7] ^= 0x10;
             let mut sigs_bad = sigs.clone();
