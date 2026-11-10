@@ -42,6 +42,7 @@ agg-mldsa-simd = { path = "crates/agg-mldsa-simd" }
 agg-mldsa-cref = { path = "crates/agg-mldsa-cref" }
 agg-simd = { path = "crates/agg-simd" }
 keccak = "=0.1.6"
+bincode = "=1.3.3"
 cc = "=1.4.4"
 
 # Aerie (a16z/aerie) at rev 49b6c21. Path crates inside the git repo resolve

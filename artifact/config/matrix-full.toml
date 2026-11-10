@@ -180,7 +180,7 @@ allocations = ["16C32T"]
 sizes = [32768]
 relation = "h-fips"
 warmup = 1
-reps = 3
+reps = 5
 processes = 1
 arms = [
   { tag = "defaults", env = {} },
@@ -207,6 +207,24 @@ traced = true
 arms = [
   { tag = "defaults", env = {} },
   { tag = "flock-serial", env = { AGG_FLOCK_THREADS = "0" } },
+]
+
+# Traced default runs of ML-DSA-65 and -87 on AVX2: the per-set verifier steps
+# of the evaluation (Flock part, key decoding, ExpandA with w_A).
+[[runs]]
+kind = "ablations"
+tag = "timeline-sets"
+params = ["65", "87"]
+configs = ["avx2"]
+allocations = ["16C32T"]
+sizes = [32768]
+relation = "h-fips"
+warmup = 1
+reps = 1
+processes = 1
+traced = true
+arms = [
+  { tag = "defaults", env = {} },
 ]
 
 # Fresh-process peak RSS measurements.

@@ -1,6 +1,6 @@
 [package]
 name = "agg-witness"
-description = "ML-DSA-44 native verification, key expansion, witness derivation and table builders."
+description = "ML-DSA-44/65/87 native verification, key expansion, witness derivation and table builders."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

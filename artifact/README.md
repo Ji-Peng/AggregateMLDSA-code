@@ -42,8 +42,8 @@ Every default run (`gates`, `quick`, `full`, `tables`, `all`) proves and
 verifies **H-FIPS**: the aggregate certifies that every extracted
 $(\tilde c, z, h)$ is a FIPS 204 signature. **H-exact** proves the FIPS 204
 bounds on $z$ and on the UseHint residual but not the hint itself. It is a
-reference relation, slightly faster than H-FIPS (9--13% on 16C32T at 32K in the
-reference measurements), and runs only on request:
+reference relation, slightly faster than H-FIPS (3--10% on 16C32T at 32K on the
+AVX2 tier in the reference measurements), and runs only on request:
 
 ```sh
 ./run.sh gates --relations h-fips,h-exact   # 1K gates of both relations
@@ -65,18 +65,24 @@ results contain H-exact cells, and a comment otherwise.
   CPU cannot run is `n/a` in the tables and recorded in `skipped.json`.
 - 16 hardware threads are enough for `quick`; 16 cores with SMT are
   recommended for `full`. The 8C16T rows need eight cores.
-- RAM: 16 GiB for `quick` (up to 4K signatures), 32 GiB minimum for the 32K
-  cells and 64 GiB recommended. On the reference machine, the 32K prover peaks
-  at about 16 GiB for ML-DSA-44, 17 GiB for ML-DSA-65 and 24 GiB for
-  ML-DSA-87 (`VmHWM`, estimate). The script refuses a 32K cell when
-  `MemAvailable` is below 28 GiB and records the reason in `skipped.json`.
+- RAM: 16 GiB for `quick` (up to 4K signatures) and 64 GiB recommended for
+  `full`. The script refuses a 32K cell when `MemAvailable` is below 28 GiB
+  and records the reason in `skipped.json`, so the 32K cells need a machine
+  with at least 32 GiB (not 32 GB) of RAM and little else running. On the
+  reference machine the 32K prover peaks at 16.4 GiB for ML-DSA-44, 16.2 GiB
+  for ML-DSA-65 and 21.7 GiB for ML-DSA-87 on the AVX2 tier, and at most
+  21.9 GiB over all tiers (measured: the prover's `VmHWM`, which includes the
+  allocator's block cache). The optional Alloul26 cells at 32K need 42 GiB.
 - Disk: about 20 GB during a full run (one cargo target directory for `agg`
   and `mode_b`, Aerie's target, the cloned sources and the results). `quick`
   needs about 10 GB.
 - bash, python3 (standard library; `tomllib` on 3.11+, a bundled fallback on
   older versions), a C compiler, `make`, `objdump`, `taskset`, rustup with
   Rust 1.99.1, and Rust 1.95.0 for Aerie. `numactl`, `/usr/bin/time`,
-  `shellcheck`, Docker and Intel SDE are optional.
+  `shellcheck`, Docker and Intel SDE are optional. The optional Alloul26
+  comparison builds with Rust 1.96.0 (`./run.sh all --alloul26` installs it
+  through `fetch --alloul26`, and `scripts/alloul26.sh` installs it if
+  rustup lacks it).
 
 The repository's root `rust-toolchain.toml` is not modified. The scripts run
 cargo with `RUSTUP_TOOLCHAIN=1.99.1`; `artifact/rust-toolchain.toml` documents
@@ -91,7 +97,7 @@ the same pin for commands started inside this directory.
 | `build` | one release build of `agg` and `mode_b`, Aerie's bench, `natver{,65,87}` | 5--20 min; the first build is the long one |
 | `gates` | per parameter set (`--params 44,65,87`) and relation (`--relations`, default `h-fips`): 1K aggregates in every tier, verification, negative check; per set the aggregate on one thread and natver; self-reports | about 5--10 min per relation (estimate) |
 | `quick --smoke` | touches every run kind (`ours`, `mode_b`, `ablations`, `fresh`, `aerie`, `native`) and all three parameter sets at 1K, 1+1 runs | about 5 min after the build (estimate) |
-| `quick` | 1K and 4K (ML-DSA-44) plus 1K (ML-DSA-65, -87), three tiers, 8C16T and 1T, mode B, traced ablations, fresh memory, Aerie (Falcon-512/1024) and native (44/65/87) at 1K | 20--40 min after the build (estimate) |
+| `quick` | 1K and 4K (ML-DSA-44) plus 1K (ML-DSA-65, -87), three tiers, 8C16T and 1T, mode B, traced ablations, fresh memory, Aerie (Falcon-512/1024) and native (44/65/87) at 1K | 20--40 min after the build (estimate); `--alloul26` adds Alloul26 at 1K on 8C16T and 1T |
 | `full` | the complete evaluation matrix for ML-DSA-44, -65 and -87 under H-FIPS: 32K headline on 16C32T, 8C16T and 1T; scaling; mode-B public bits; ablations (`AGG_LATE_JOIN=0`, `AGG_FLOCK_THREADS=0`, etc.) and traced timeline; fresh memory; Aerie (16C32T, 8C16T, 1T) and native (44/65/87) baselines, 1+5 warm runs | about 1.7 h (~100 min, estimate) after the build; H-exact adds about 6 min (estimate); `--alloul26` adds about 5 h |
 
 ### Estimated full-run time breakdown
@@ -107,8 +113,9 @@ Derived from the paper's per-run times on one 16-core EPYC 9355 (Zen 5) node
 - **Scaling** (`scaling` at $2^{10}\text{--}2^{15}$ for 44; `scaling-65` and
   `scaling-87` at $2^{10}, 2^{13}, 2^{15}$): about **23 min** (estimate).
 - **Mode B, control ablations, traced timeline and fresh memory** (`mode-b`,
-  `ablation` with 7 arms including `AGG_LATE_JOIN=0`, `timeline` with traces,
-  `prover-memory`, `verifier-memory` at 32K for 44): about **11 min**
+  `ablation` with 7 arms including `AGG_LATE_JOIN=0`, 1+5 runs, `timeline`
+  with traces for 44, `timeline-sets` with traces for 65 and 87,
+  `prover-memory`, `verifier-memory` at 32K for 44): about **14 min**
   (estimate).
 - **Aerie and native baselines** (`aerie`, `aerie-avx2`, `aerie-1024`,
   `aerie-1024-avx2` at 8K and 32K; `native`, `native-65`, `native-87` at 32K):
@@ -129,7 +136,7 @@ repeated here.
 | --- | --- | --- |
 | `ifma` | unset (detect) | IFMA field and NTT kernels; AVX-512 Flock, ML-DSA and Aerie |
 | `avx512` | `avx512` | AVX-512 everywhere except the IFMA field and NTT kernels |
-| `avx2` | `avx2` | executes no AVX-512 instruction; the x86-64-v3 baseline |
+| `avx2` | `avx2` | executes no AVX-512 instruction: the x86-64-v3 baseline, plus 256-bit VPCLMULQDQ and GFNI in Flock when the CPU has them |
 
 ### Ablation and mode-B arms
 
@@ -141,13 +148,18 @@ repeated here.
   and `flock-serial` (`AGG_FLOCK_THREADS=0`, Flock after the PIOP) with
   `AGG_STAGE_TRACE=1`, `AGG_SCHED_TRACE=1`, `AGG_TIED_TRACE=1`, `PCS_TRACE=1`,
   `LINCHECK_TRACE=1`, `FLOCK_ZC_TIMING=1` and `AGG_PHASE_STAMPS=1`, feeding the
-  `Flock after the PIOP` row and traced note of `tab:ablation`.
+  traced note of `tab:ablation` (Flock alone, parity chain, verifier bridge and
+  matrices). `timeline-sets` traces the default run of ML-DSA-65 and -87 on
+  AVX2; with the 44 trace it gives the per-set verifier steps that
+  `numbers.tex` holds as `\TraceVerify...` macros.
 - **Control ablations (`tag = "ablation"`)**: alternates seven arms on 16C32T
-  at 32K: `defaults`, `no-hugepage` (`AGG_HUGEPAGE=0`), `no-alloc-cache`
+  at 32K, one warm-up and five runs each: `defaults`, `no-hugepage` (`AGG_HUGEPAGE=0`), `no-alloc-cache`
   (`AGG_ALLOC_CACHE=0`), `flock-serial` (`AGG_FLOCK_THREADS=0`), `late-join`
   (`AGG_LATE_JOIN=0`, running the Akita opening's finish after the Flock proofs
   join instead of beside them), `stage-branch-main-pool`
-  (`AGG_PIOP_S_THREADS=0`), and `piop-row` (`AGG_PIOP_LAYOUT=row`).
+  (`AGG_PIOP_S_THREADS=0`), and `piop-row` (`AGG_PIOP_LAYOUT=row`). The
+  untraced `flock-serial` arm gives the `Flock after the PIOP` row of
+  `tab:ablation`; the other arms go to `tab-ablation-controls.tex`.
 
 `AGG_PIOP_LAYOUT=plane|row` selects the sum-check table layout. Unset selects
 plane on every vector backend (avx512ifma, avx512, avx2) and row on the
@@ -166,9 +178,11 @@ nothing. The package uses two run-time checks instead:
    requires every AVX-512 and IFMA flag to be false under `AGG_ISA=avx2` (and
    under `scalar`), and every IFMA flag to be false under `AGG_ISA=avx512`.
    `quick` and `full` repeat the check before measuring a tier.
-2. If `sde64` is installed, `gates` runs the binary under Intel SDE at
-   N = 256: `-hsw` (Haswell: AVX2, no AVX-512) for `avx2` and `-skx`
-   (Skylake-X: AVX-512 without IFMA) for `avx512`. `--no-sde` skips it.
+2. If `sde64` is installed, `gates` runs `agg aggregate` under Intel SDE on
+   the 1K gate records: `-hsw` (Haswell: AVX2, no AVX-512) for `avx2` and
+   `-skx` (Skylake-X: AVX-512 without IFMA) for `avx512`. Each emulated CPU
+   runs once with the tier's `AGG_ISA` cap and once with no cap, and both
+   aggregates must equal the gate hash and verify. `--no-sde` skips it.
 
 The static `objdump` check remains for the C baselines (`natver`, `natver65`,
 `natver87`), which must contain no AVX-512 instruction (`zmm`, opmask, high
@@ -184,17 +198,18 @@ reproduces every cell.
 | Set | Tier | 16C32T prove | 8C16T prove | 1T prove | 16C32T verify (unc. / cached) | Aggregate (B/sig) |
 | --- | --- | --- | --- | --- | --- | --- |
 | 44 | `ifma` | 2.34 s | 3.47 s | 24.69 s | 62 / 54 ms | 1,611,831 B (49.2) |
-| 44 | `avx512` | 2.40 s | 3.52 s | 24.79 s | -- | 1,611,831 B (49.2) |
-| 44 | `avx2` | 2.70 s | 4.27 s | 32.63 s | -- | 1,611,831 B (49.2) |
+| 44 | `avx512` | 2.40 s | 3.52 s | 24.79 s | 61 / -- ms | 1,611,831 B (49.2) |
+| 44 | `avx2` | 2.70 s | 4.27 s | 32.63 s | 74 / 57 ms | 1,611,831 B (49.2) |
 | 65 | `ifma` | 2.94 s | 4.07 s | 29.69 s | 82 / 70 ms | 2,143,007 B (65.4) |
-| 65 | `avx512` | 2.96 s | 4.13 s | 29.83 s | -- | 2,143,007 B (65.4) |
-| 65 | `avx2` | 3.33 s | 4.99 s | 39.08 s | -- | 2,143,007 B (65.4) |
+| 65 | `avx512` | 2.96 s | 4.13 s | 29.83 s | 84 / -- ms | 2,143,007 B (65.4) |
+| 65 | `avx2` | 3.33 s | 4.99 s | 39.08 s | 119 / 82 ms | 2,143,007 B (65.4) |
 | 87 | `ifma` | 3.72 s | 5.31 s | 38.92 s | 114 / 88 ms | 2,710,255 B (82.7) |
-| 87 | `avx512` | 3.74 s | 5.44 s | 38.92 s | -- | 2,710,255 B (82.7) |
-| 87 | `avx2` | 4.25 s | 6.64 s | 51.40 s | -- | 2,710,255 B (82.7) |
+| 87 | `avx512` | 3.74 s | 5.44 s | 38.92 s | 119 / -- ms | 2,710,255 B (82.7) |
+| 87 | `avx2` | 4.25 s | 6.64 s | 51.40 s | 179 / 110 ms | 2,710,255 B (82.7) |
 
-On 16C32T with IFMA, the opt-in reference relation H-exact proves 3.4% (44),
-10.6% (65) and 6.6% (87) faster than H-FIPS. In `tab:ablation` (ML-DSA-44,
+`--` marks a value the reference measurements did not record. On 16C32T with
+AVX2, the opt-in reference relation H-exact proves 3.2% (44), 9.7% (65) and
+6.9% (87) faster than H-FIPS. In `tab:ablation` (ML-DSA-44,
 32K, 16C32T, AVX2), running Flock after the PIOP (`AGG_FLOCK_THREADS=0`) costs
 0.43 s against the default, and the mode-B public-bits aggregate takes 2.08 s
 and 803.1 B/sig. Absolute times on another microarchitecture
@@ -227,11 +242,28 @@ its actual core and thread count. Commands are pinned with `taskset` and with
 | C1: the aggregate takes 49.2, 65.4 and 82.7 B per signature at 32K for ML-DSA-44, -65 and -87 | `tab-bytes.tex`, row `total` | `./run.sh full` |
 | C2: every tier and the scalar gate give the same aggregate and verification accepts | `gates.json`, `all_configurations_identical` and `verify` | `./run.sh gates` |
 | C3: prove and verify times on a Zen 5 machine are within 10% of the paper across all three sets | `tab-baselines.tex`, `tab-scaling.tex` | `./run.sh full` |
-| C4: the tier ladder is ordered IFMA, AVX-512F, AVX2 and the GF(2) ablation matches | `tab-baselines.tex` (`ours` rows), `tab-ablation.tex` | `./run.sh quick --smoke` |
-| C5: ours against Aerie, Alloul26 and native verification for ML-DSA-44, -65 and -87 | `tab-baselines.tex` (native times in its note) | `./run.sh quick` |
+| C4: both AVX-512 tiers prove faster than AVX2, IFMA and AVX-512F lie within 3% of each other, and the GF(2) ablation matches | `tab-baselines.tex` (`ours` rows), `tab-ablation.tex` | `./run.sh full`; `./run.sh quick --smoke` checks only the tier order at 1K |
+| C5: ours against Aerie, Alloul26 and native verification for ML-DSA-44, -65 and -87 | `tab-baselines.tex` (native times in its note) | `./run.sh full --alloul26`; `./run.sh quick --alloul26` compares at 1K on 8C16T and 1T only |
 
 `expected/claims.toml` carries the same table, and each results directory gets
 a `claims-measured.csv` with the values that were actually measured.
+
+### Statements the package does not reproduce
+
+The following figures of the evaluation have no command in `run.sh`:
+
+- Alloul26 against ours from $2^{10}$ to $2^{15}$ on 16C32T (18 to 42 times
+  slower, 1.8 to 2.4 times our B/sig, up to 3.9 times our memory). `full
+  --alloul26` covers only $2^{15}$. Each other size takes two commands on the
+  16C32T CPU set of `cpusets.json`: `./run.sh alloul26 --n N --family J --isa
+  avx2 --threads 32 --cpus LIST --runs 3` and `AGG_ISA=avx2 taskset -c LIST
+  build/bin/agg bench --params 87 --count N --warmup 1 --reps 5 --json
+  FILE` (prover peak in `prove_peak_kib`).
+- Winterfell's Lamport+ STARK aggregator (87.6 s on 1T for 1,024 one-time
+  signatures). It is not part of this package.
+- The estimates marked as such in the paper (the cost of committing the AND
+  bits in $\mathbb{F}_p$, the size of a BLS aggregate), which are arithmetic,
+  not measurements.
 
 ## Reading the output
 
@@ -255,9 +287,12 @@ carry it):
   and flags.
 - `paper-tables/`: the generated LaTeX tables for the results directory (also
   copied to `artifact/paper-tables/`, which is ignored by git):
-  - `tab-ablation.tex` (`\label{tab:ablation}`): GF(2)-side ablation (`full
-    aggregate`, `Flock after the PIOP`, `public bits` mode B) and control
-    ablations (including `AGG_LATE_JOIN=0`).
+  - `tab-ablation.tex` (`\label{tab:ablation}`): GF(2)-side ablation on the
+    AVX2 tier with the paper's three rows (`full aggregate` from the headline
+    cell, `Flock after the PIOP` from the untraced `flock-serial` arm,
+    `public bits` mode B) and the traced values in the note.
+  - `tab-ablation-controls.tex` (`\label{tab:ablation-controls}`): the control
+    arms (including `AGG_LATE_JOIN=0`), which the paper does not print.
   - `tab-scaling.tex` (`\label{tab:scaling}`): batch-size scaling ($2^{10}$,
     $2^{13}$, $2^{15}$) on the AVX2 tier with B/sig, the compression factor (signature
     bytes over B/sig), prove (s), uncached/cached verify (ms) and the prover's
@@ -269,11 +304,21 @@ carry it):
     AVX-512 and IFMA rows) and Alloul26 (ML-DSA-87, family J; AVX2 and AVX-512
     rows), with prove and verify time on 16C32T, 8C16T and 1T, B/sig and the compression factor, signature bytes (FIPS 204: 2,420 /
     3,309 / 4,627 B; Falcon: 666 / 1,280 B) over B/sig. Native AVX2 verification times
-    go into the table note. Cells without data read `--`.
+    go into the table note. Cells without data read `--`. The table uses the
+    largest N that has a baseline cell (1K in `quick`, 32K in `full`).
+    `natver` signs 64-byte messages, while `agg bench` draws message lengths
+    uniformly from 0 to 159 bytes. About 56% of our records therefore need a
+    second SHAKE256 block for $\mu$. This adds about half a Keccak-f
+    permutation per record to our verifier, not to the baseline.
   - `tab-relations.tex` (`\label{tab:relations}`): with the opt-in H-exact
     runs, H-FIPS and H-exact prover times, the change of H-exact against
     H-FIPS, verify times and aggregate bytes for 44, 65 and 87.
-  - `numbers.tex`: `\newcommand` macros for in-text figures.
+  - `numbers.tex`: `\newcommand` macros for in-text figures, including the
+    traced values (`\TraceFlockAlone`, `\TraceParityChain`,
+    `\TraceVerifyBridge`, `\TraceVerifyMatrices`) and the per-set verifier
+    steps of the last uncached run (`\TraceVerifyFlock<Set>`,
+    `\TraceVerifyKeys<Set>`, `\TraceVerifyExpandA<Set>`, and
+    `\TraceVerifyExpandACached<Set>` for the cached run).
 
 ## Known variance sources
 
@@ -315,7 +360,8 @@ carry it):
 - `16C32T` is `n/a`: the machine has fewer than 16 cores. `quick` uses
   `8C16T`; the table labels the fallback.
 - A 32K cell is skipped: `MemAvailable` is below 28 GiB. Close other
-  processes or run `quick`.
+  processes or run `quick`. A machine with 32 GB (29.8 GiB) of RAM usually
+  stays below that floor.
 - THP is `never`: results resemble the `AGG_HUGEPAGE=0` ablation. The run is
   still valid; the note in the tables records it.
 - No IFMA: the `ifma` row is `n/a (CPU without AVX-512IFMA)`. No AVX-512F:
@@ -329,6 +375,22 @@ from inside; the probe reports them. Do not pass `--cpus`, because the cgroup
 quota throttles CPU-bound loops. Expect native-like timings, but measure one
 cell both ways if timing claims matter. Use native runs for the `Reproduced`
 badge and Docker for `Functional`.
+
+`code/.dockerignore` keeps the host's `target/`, `artifact/build/`,
+`artifact/results/` and `artifact/vendor/` out of the build context; the image
+fetches the sources and builds the binaries itself, so building it needs the
+network. The finished image runs offline. The entry point is `run.sh`, so the
+mode follows the image name:
+
+```sh
+docker run --rm --network none --memory=48g --cpuset-cpus=0-15 --cpuset-mems=0 \
+  -v "$PWD/artifact/results:/work/artifact/results" aggmldsa-ae gates
+docker run --rm --network none --memory=48g --cpuset-cpus=0-15 --cpuset-mems=0 \
+  -v "$PWD/artifact/results:/work/artifact/results" aggmldsa-ae quick --smoke
+```
+
+`check`, `gates`, `quick`, `full` and `tables` need no network. `fetch`,
+`all` (which starts with `fetch`) and `--alloul26` (which clones Geode) do.
 
 Nix packaging (a flake with both Rust toolchains) is future work.
 
@@ -355,8 +417,9 @@ J has a 2^-188 classical bound; family U has a QROM bound); an approximately
 128-bit profile is not configurable.
 
 The optional `--alloul26` flag is off by default and appends JSON lines to
-`results/<timestamp>/alloul26.jsonl`. With `quick` it runs the 128-signature
-smoke comparison after the usual work. With `full` (or `all --full`) it runs
+`results/<timestamp>/alloul26.jsonl`. With `quick` it runs N = 1024, family
+J, the AVX2 build, one process each on the 8C16T (16 threads) and 1T CPU sets,
+after the usual work. With `full` (or `all --full`) it runs
 the Alloul26 cells of `tab:baselines`: N = 32768, family J, the AVX2 and
 AVX-512 builds (AVX-512 only on a CPU that has it), on the CPU sets of the
 16C32T, 8C16T and 1T allocations recorded in `cpusets.json`, with 32, 16 and
@@ -364,6 +427,10 @@ AVX-512 builds (AVX-512 only on a CPU that has it), on the CPU sets of the
 count). An allocation this machine cannot provide in full is skipped. On a
 Zen 5 node one run takes about 3 min on 16C32T, 5 min on 8C16T and 45 min on
 1T, so the eighteen runs add about 5 h, and each needs 42 GiB of memory.
+Before each cell `run.sh` checks `MemAvailable` (44 GiB at 32K, 8 GiB at 1K)
+and records a skipped cell in `skipped.json`. A failed cell stops the run
+with a non-zero status before the tables are written; `./run.sh tables`
+writes them from what was measured.
 `gen_tables.py` reads `alloul26*.jsonl` in the results directory (and any
 file passed with `--alloul26 FILE`) and fills the Alloul26 rows from the
 family J runs at the table's N, placing a run by its thread count (32:

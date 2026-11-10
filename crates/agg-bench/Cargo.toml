@@ -10,7 +10,6 @@ publish.workspace = true
 [dependencies]
 agg-witness = { workspace = true }
 agg-piop = { workspace = true }
-agg-mldsa-simd = { workspace = true }
 agg-simd = { workspace = true }
 
 # Mode-B prove/verify benchmark (criterion-free): see benches/mode_b.rs.

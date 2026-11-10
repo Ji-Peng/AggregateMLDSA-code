@@ -37,6 +37,11 @@ use agg_piop::public_data::KeyCache;
 use agg_piop::verifier::VerifyTimings;
 use agg_witness::instance::PublicInstance;
 
+/// The allocator of the `agg` binary: large tables on transparent huge pages, freed blocks
+/// reused, so mode-B and mode-A timings share the default allocation behaviour.
+#[global_allocator]
+static ALLOC: agg_piop::alloc::HugePageAlloc = agg_piop::alloc::HugePageAlloc;
+
 const SEED: u64 = 0x00b0_0b0b;
 
 struct Options {
@@ -340,6 +345,8 @@ fn field<'a>(line: &'a str, key: &str) -> &'a str {
 }
 
 fn main() {
+    // As in `agg`: an `AGG_ISA` cap also lowers Aerie's kernels (children inherit it).
+    agg_piop::apply_isa_cap_to_aerie();
     let options = parse_options();
     match options.role {
         Role::Prover(n) => return run_prover(&options, n),

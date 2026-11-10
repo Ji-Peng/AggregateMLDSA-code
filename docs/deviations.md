@@ -560,10 +560,13 @@ and its error names are as above.
 
 Rule: dependencies are pinned git revisions (Flock `83f963e`, recorded in `README.md`).
 
-Code: `vendor/flock-core` is a verbatim copy of `crates/flock-core` at that revision with
-one change in `pcs/jagged.rs::build_merged_weight_and_prime` (`vendor/flock-core/PATCH.md`),
+Code: `vendor/flock-core` is a copy of `crates/flock-core` at that revision with the patches
+listed in `vendor/flock-core/PATCH.md` (prover-only ones plus the verifier-visible list-aware
+work of K19, the canonical nonce width, the multilinear skip basis and the joint out-of-domain
+draw); this deviation is the first, in `pcs/jagged.rs::build_merged_weight_and_prime`,
 wired in by `[patch."https://github.com/succinctlabs/flock"]` in the root `Cargo.toml`; the
-other Flock crates stay the pinned git dependencies. The change: the merged opening bakes a
+other Flock crates stay the pinned git dependencies, except `flock-field`
+(`vendor/flock-field/PATCH.md`). The change: the merged opening bakes a
 16 x 256-entry fold table (64 KB, 4,096 fold evaluations) per used word column for every
 ring-switched claim, whatever the column's height; the patch evaluates the claim per slot
 (`phi(eq_col[c] r)`, one multiply and one lookup) when the stack averages fewer than 64 live
@@ -835,7 +838,7 @@ parts already fails to parse (`ItemError::Truncated`, before one buffer per part
 allocated); the verifier still reports such an aggregate as `VerifyError::Plan`.
 
 Exhausted tie search: if Flock's smallest passing tie nonce is `2^(g + 7)` or more
-(probability below `2^-184.6` per part), `TieChallenges::derive` returns
+(probability below `2^-184.6` per part), the tie nonce check (`nonce_within` in `agg-keccak/src/tied.rs`) returns
 `KeccakError::Work` instead of panicking; `TiedPart::{tie, prove, prove_with_blocks,
 prove_with_final_vectors}` return it and mode A's Keccak side maps it to
 `ProveError::Keccak` (`agg_piop::prover::KeccakSide::prove` returns a `Result`).

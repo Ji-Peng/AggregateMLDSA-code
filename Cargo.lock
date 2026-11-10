@@ -115,7 +115,6 @@ source = "git+https://github.com/a16z/aerie?rev=49b6c212c209286c536196f53618823f
 name = "agg-bench"
 version = "0.1.0"
 dependencies = [
- "agg-mldsa-simd",
  "agg-piop",
  "agg-simd",
  "agg-witness",

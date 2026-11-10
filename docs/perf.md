@@ -4,6 +4,7 @@
 | --- | --- |
 | Status | informative; a local profile, **direction only**. No number here is a benchmark result: the development box was shared with other agents' builds (load average 2 to 10), and figures marked "est." are estimates. |
 | Profiled code | the code before the proof-of-work schedule and the speed levers of Section 0 |
+| Source citations | `file.rs:N` line numbers refer to the profiled code and have since moved; search by the function named next to them (for example `mode_a::sponge_records`, `TiedPart::reattach`, `pcs::overlap`) |
 | Relation | numbers labelled H-u were measured under the relaxed relation H-u, the default at the time; H-u has since been removed, and H-FIPS is the default; every number is ML-DSA-44's (the default set; no run passes `--params`) |
 
 ## 0. What happened since the profile
@@ -41,7 +42,7 @@ Builds (all `RUSTUP_TOOLCHAIN=stable`, `CARGO_BUILD_JOBS=4`):
 
 | Dir | RUSTFLAGS | Used for |
 | --- | --- | --- |
-| `target/clmul` | `-C target-feature=+pclmulqdq` | the baseline (as `scripts/bench.sh CLMUL=1`) |
+| `target/clmul` | `-C target-feature=+pclmulqdq` | the baseline at the time (now every build: `.cargo/config.toml` sets x86-64-v3 + PCLMULQDQ, and an exported RUSTFLAGS replaces it) |
 | `target/prof-gfni` | `+pclmulqdq,+gfni` | A/B of Flock's GFNI (SSE) zerocheck kernel in full mode A |
 | scratch `gfbench` | soft / `+pclmulqdq` / `+pclmulqdq,+avx512f,+vpclmulqdq` | GF(2^128) multiply microbench on `flock-field` 83f963e |
 
@@ -182,13 +183,13 @@ serial witness work and the bridge union most of the rest.
   the PIOP reads none of the Flock proof. The profiled transcript absorbed the Flock proofs
   (`FLOCK_PROOFS_SITE`) before the lookup's `X`, so every later challenge depended on them;
   the fork-join transcript (deviation K22, lever P1) absorbs them after stage 3.
-- **Event-2 Flock commit vs `G_main` commit: already concurrent** (`prover.rs:568-577`,
-  `crate::pcs::overlap`, a scoped OS thread, `pcs.rs:238-261`); in the 32K cloud breakdown the
+- **Event-2 Flock commit vs `G_main` commit: already concurrent** (the prover's call of
+  `crate::pcs::overlap`, a scoped OS thread); in the 32K cloud breakdown the
   step times sum to ~570 ms more than the total, i.e. the 603 ms `G_main` commit is hidden.
 - **Event-2 Flock commit vs witness work: not as written.** The Flock records are built
-  from the main tables (`crates/agg-cli/src/mode_a.rs:1210-1232`; `sponge_records` reads
-  `main.bit_lanes` at `:1095`), and the witness is rebuilt at event 6 (`mode_a.rs:388`,
-  `self.build` then `reattach`, which recomputes `statement`, `tied.rs:878`). A prover-only
+  from the main tables (`crates/agg-cli/src/mode_a.rs`, `sponge_records`, which reads
+  `main.bit_lanes`), and the witness is rebuilt at event 6 (mode A's prove path,
+  `self.build` then `reattach`, which recomputes `statement`, `crates/agg-keccak/src/tied.rs`). A prover-only
   restructuring could compute `w1'` first and run the Flock build/commit beside the rest of
   `MainTables::build`.
 - Challenge-independent PIOP work that could run during the Flock prove (prover-only):

@@ -1,4 +1,4 @@
-//! End-to-end multi-backend equality and verification test across all supported SIMD tiers.
+//! End-to-end byte identity and verification across the `AGG_ISA` tiers this CPU supports.
 //!
 //! Evaluates `keygen-batch`, `sign-batch`, `aggregate`, and `verify` across:
 //! - 1024 records over 64 keys (H-FIPS)
@@ -6,10 +6,15 @@
 //! - 256 records over 64 keys (H-exact)
 //! - 256 records over 64 keys (H-FIPS)
 //!
-//! For each supported SIMD backend (scalar, avx2, avx512) and thread configurations (1 and 16):
-//! - Asserts bit-identical aggregate files across all backends and thread counts
+//! For each supported `AGG_ISA` cap (scalar, avx2, avx512, avx512ifma), which every kernel
+//! family follows (the ML-DSA kernels, the field kernels, the PIOP layout, Flock and Akita),
+//! and thread configurations (1 and 16):
+//! - Asserts bit-identical aggregate files across all tiers and thread counts
 //! - Asserts verification passes uncached
 //! - Asserts verification passes with cache creation and subsequent cache hit
+//!
+//! All scenarios use ML-DSA-44. The artifact's gate (`./run.sh gates`) checks the same
+//! cross-tier identity for every parameter set and relation.
 //!
 //! Run with:
 //! ```sh
@@ -58,12 +63,16 @@ fn test_simd_backends_e2e_equality_and_verification() {
         std::env::temp_dir().join(format!("agg_simd_backends_{}_{nonce}", std::process::id()));
     std::fs::create_dir_all(&base_dir).unwrap();
 
+    // A cap above the hardware runs at the hardware's level, so only distinct tiers are listed.
     let mut backends = vec!["scalar"];
-    if agg_mldsa_simd::available(agg_mldsa_simd::Backend::Avx2) {
+    if agg_simd::detect::avx2_available() {
         backends.push("avx2");
     }
-    if agg_mldsa_simd::available(agg_mldsa_simd::Backend::Avx512) {
+    if agg_simd::detect::avx512f_available() {
         backends.push("avx512");
+    }
+    if agg_simd::detect::available() {
+        backends.push("avx512ifma");
     }
 
     let thread_counts = ["1", "16"];
@@ -143,7 +152,11 @@ fn test_simd_backends_e2e_equality_and_verification() {
             for &threads in &thread_counts {
                 let cache_file = sc_dir.join(format!("cache_{backend}_{threads}.bin"));
                 let agg_file = sc_dir.join(format!("agg_{backend}_{threads}.bin"));
-                let envs = [("AGG_MLDSA_SIMD", backend), ("RAYON_NUM_THREADS", threads)];
+                let envs = [
+                    ("AGG_ISA", backend),
+                    ("AGG_MLDSA_SIMD", "auto"),
+                    ("RAYON_NUM_THREADS", threads),
+                ];
 
                 // 3. aggregate
                 let (code, out) = run_agg(

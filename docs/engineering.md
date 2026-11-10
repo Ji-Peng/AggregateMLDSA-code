@@ -137,8 +137,9 @@ reduction) implement the kernels; `fused.rs` provides the fold-and-evaluate form
 the sum-check groups. `detect.rs` selects the backend once per process from the CPU,
 under the process-wide `AGG_ISA` cap: `avx512ifma` (or unset on an IFMA CPU) takes the
 IFMA kernels, `avx512` the AVX-512F kernels without IFMA, `avx2` the AVX2 kernels, and
-`scalar` the portable kernels. `AGG_SIMD=portable` turns every vector kernel of this crate
-off (the A/B switch for the non-IFMA kernels); `AGG_SIMD=avx512` names the IFMA backend,
+`scalar` the portable kernels. `AGG_SIMD=portable` turns the field kernels of this crate
+off (the A/B switch for the non-IFMA kernels); the integer kernels `masked_row_sums` and
+`pack_six_bits` (`avx512_int`, `avx2` in `detect.rs`) still follow the CPU and the `AGG_ISA` cap; `AGG_SIMD=avx512` names the IFMA backend,
 requires IFMA hardware and runs at the cap. The other run-time kernels of
 the unified build follow the same cap: `crates/agg-mldsa-simd` (scalar/AVX2/AVX-512),
 `crates/agg-keccak/src/simd` (8-way Keccak-f), `vendor/flock-field/src/f128_slice/rounds.rs`,
@@ -368,8 +369,10 @@ introduced. The backend equality gate is described in Section 9.
 
 ## 9. Byte-identity gates and cold-start benchmarking
 
-Byte identity is the acceptance test for every prover change. Two gates cover the tiers
-and the dispatch:
+Byte identity is the acceptance test for every prover change. Two in-tree gates compare the
+ML-DSA kernel backends (`AGG_MLDSA_SIMD`) and the thread counts, for ML-DSA-44; the cross-tier
+gate over `AGG_ISA` for each set is the artifact's `./run.sh gates` (`artifact/scripts/gates.py`
+with `artifact/config/configs.toml`, against `artifact/expected/hashes.json`):
 
 - `crates/agg-cli/tests/all/simd_backends.rs` runs `keygen-batch`, `sign-batch`,
   `aggregate` and `verify` for scalar, AVX2 and AVX-512 and for one and sixteen threads. It
@@ -381,6 +384,27 @@ and the dispatch:
   then benches 1K records over 1,024 and 16 keys on CPUs 0,1,3-15.
   Cross-tier equality at 32K (`AGG_ISA=avx2` against `avx512ifma`) is checked the same way, and the
   32K gates run with `AGG_ALLOC_POISON=1` so a reader of a reused block is caught.
+
+The C comparison gates of `agg-mldsa-simd` and the harness of `agg-mldsa-cref` build only when
+`AGG_CREF_SRC` points at a directory holding `dilithium/` and `Hybrid-SHA-3/`;
+`scripts/cref-fetch.sh` fetches the pinned sources and prints the value to export
+(`AGG_CREF_LOCAL=<dir>` reuses checkouts under `<dir>`).
+
+Developer knobs read only by tests and benches (none reaches the prover or verifier path):
+
+| Variables | Read by |
+| --- | --- |
+| `AGG_AKITA_REPS` | `agg-pcs-config/benches/commit_open.rs` |
+| `AGG_CATALOG_D_SIG`, `AGG_CATALOG_RELATION`, `AGG_CATALOG_SET`, `AGG_CATALOG_REPLACE` | `agg-pcs-config/tests/all/schedule_catalog_regen.rs` (`docs/pcs-config.md`) |
+| `AGG_CHAIN_SHAPES`, `AGG_CHAIN_REPS` | timing test in `agg-bridge/src/parity_chain.rs` |
+| `AGG_LOOKUP_SIGS`, `AGG_LOOKUP_CHALLENGES` | timing test in `agg-piop/src/lookup.rs` (`docs/lookup.md`) |
+| `AGG_GRIND_BITS`, `AGG_TIED_PROFILES`, `AGG_TIED_SIZES`, `AGG_TIED_REPS`, `AGG_TIED_BREAKDOWN` | `agg-keccak/tests/all/tied.rs` |
+| `AGG_WITNESS_N`, `AGG_WITNESS_REPS` | `agg-keccak/tests/all/witness.rs`, `tied_sets.rs` |
+| `AGG_TAIL_TIMING_VARS` | `agg-piop/src/kernel/tests.rs` |
+| `AGG_TRACE_N` | `agg-piop/tests/all/h_fips.rs` |
+| `AGG_RELATION` (`h-fips` default, `h-exact`), `AGG_PROOF_OUT=<dir>` (keep the aggregate) | `agg-bench/benches/mode_b.rs` |
+| `EXPANDA_STEPS` | `agg-mldsa-simd/benches/sample.rs` |
+| `KECCAK_BOOKKEEPING`, `KECCAK_DIAG`, `KECCAK_QUICK`, `KECCAK_ROUNDS` | `agg-mldsa-simd/benches/keccak.rs` |
 
 `agg bench` measures cold runs. `cold_start` in `crates/agg-cli/src/commands.rs` waits for
 detached drops (`agg_pcs_config::sched::wait_background_drops`), empties the allocator cache

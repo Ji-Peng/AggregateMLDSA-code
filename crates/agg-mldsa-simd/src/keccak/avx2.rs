@@ -274,7 +274,7 @@ fn fence(state: &mut State<4>) {
 // load/store schedule bounds the live vector set to sixteen YMM registers.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-#[allow(dead_code)]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub(crate) fn permute_intrinsics(state: &mut State<4>) {
     let rho8 = _mm256_set_epi64x(
         0x0e0d0c0b0a09080f,

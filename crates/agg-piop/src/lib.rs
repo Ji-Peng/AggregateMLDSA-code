@@ -71,6 +71,30 @@ pub fn aerie_simd_backend() -> &'static str {
     aerie_simd::Backend::selected().name()
 }
 
+/// Lowers Aerie's runtime-dispatched kernels to the `AGG_ISA` cap by setting
+/// `AERIE_SIMD_BACKEND`, unless that variable is already set or `AGG_ISA` is unset.
+///
+/// Aerie reads `AERIE_SIMD_BACKEND` once per process (its `backend-override` feature,
+/// enabled by this workspace) and the value can only lower the ceiling, so a binary calls
+/// this first thing in `main`, before any thread starts and before any Aerie kernel runs.
+/// Child processes inherit the variable.
+pub fn apply_isa_cap_to_aerie() {
+    use agg_mldsa_simd::isa::{cap, IsaLevel};
+    if std::env::var_os("AERIE_SIMD_BACKEND").is_some() {
+        return;
+    }
+    let cap = cap();
+    if cap.requested().is_none() {
+        return;
+    }
+    let backend = match cap.limit() {
+        IsaLevel::Scalar => "scalar",
+        IsaLevel::Avx2 => "avx2",
+        IsaLevel::Avx512 | IsaLevel::Avx512Ifma => "avx512",
+    };
+    std::env::set_var("AERIE_SIMD_BACKEND", backend);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

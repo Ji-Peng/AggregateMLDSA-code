@@ -268,7 +268,8 @@ feature off, off CPU 2:
 ```sh
 # plan only missing rows of one or more batch sizes (keeps the others, of both relations;
 # saves after each row); AGG_CATALOG_RELATION = h-exact, h-fips or all (default),
-# AGG_CATALOG_SET = 44, 65, 87 or all (default)
+# AGG_CATALOG_SET = 44, 65, 87 or all (default); AGG_CATALOG_REPLACE=1 (or true) re-plans the
+# requested rows instead of keeping the ones on disk
 AGG_CATALOG_D_SIG=15 AGG_CATALOG_RELATION=h-exact taskset -c 0,1,3-15 cargo test \
     -p agg-pcs-config --release --no-default-features --test all \
     -- --ignored --exact schedule_catalog_regen::update_catalog_rows --nocapture

@@ -120,8 +120,10 @@ About `1.0 x 10^7` additions and `1.3 x 10^6` multiplications per part (derived)
 
 ## 6. Transcript (tie challenger, version 5)
 
-`TieChallenges` (domain `agg-mldsa/v3/tie`) absorbs `fs`, `d`, `nu_s`, `log2 blocks`,
-`span_log`, the final-vector digest and the framed sponge cap, then:
+`TiedPart::tie_start` (domain `agg-mldsa/v3/tie`) absorbs `fs`, the geometry digest
+(`TiedPart::tie_digest`: SHA3-256 under `agg-keccak/v5/tie-geometry` of `d`, the part index, the
+segments, `span_log`, `n`, `nu`, the word variables, the chain rounds and the `zeta`, mid and
+lane variables), the final-vector digest and the framed sponge cap, then:
 
 1. tie work (`g_tie` bits), then `rho_r` (`nu_s`), `rho_c` (3): the public claim's point;
 2. `eq_Y` work (`g_eq` bits), then `r_o` (12) and `r_Y` (`span_log`);

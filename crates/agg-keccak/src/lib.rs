@@ -28,7 +28,6 @@ pub mod sponge;
 pub mod tied;
 pub mod witness;
 
-pub use aerie_keccak;
 pub use flock_core;
 pub use flock_field;
 pub use flock_prover;
@@ -47,10 +46,5 @@ mod tests {
             h.finalize_xof().read(&mut want);
             assert_eq!(got, &want);
         }
-    }
-
-    #[test]
-    fn flock_crates_link() {
-        assert!(std::any::type_name::<flock_field::F128>().contains("F128"));
     }
 }

@@ -203,6 +203,8 @@ struct Site {
     rejection: Option<usize>,
     bits: f64,
     at_least_128: bool,
+    /// Fold coordinates the draw produces (live blocks times claims).
+    coordinates: usize,
 }
 
 /// The rejection policy `draw_group_fold_challenges` selects (its code, restated).
@@ -310,6 +312,7 @@ fn sites(schedule: &FoldSchedule, root_claims: &[usize]) -> Vec<Site> {
                 rejection,
                 bits,
                 at_least_128,
+                coordinates,
             });
         }
     }
@@ -357,6 +360,7 @@ fn sites(schedule: &FoldSchedule, root_claims: &[usize]) -> Vec<Site> {
         rejection,
         bits,
         at_least_128,
+        coordinates: t.blocks.live_blocks,
     });
     out
 }
@@ -717,4 +721,47 @@ fn rows_of_one(
         .map(|g| layout.group_layout(g).expect("group").num_polynomials())
         .collect();
     (claims, schedule.clone())
+}
+
+/// The fold coordinates of the H-FIPS grouped rows at `N* = 2^15` for the three sets: the
+/// coordinates of the root level (live blocks times root claims, summed over its groups), of
+/// each recursive fold and of the terminal, and their total `R_coord`, each coordinate one
+/// transcript site of the soundness count. The opening-tree size of the extractor is bounded
+/// by `2` per nonterminal level times `(coordinates + 1)` per level, terminal included, and
+/// stays at most `2^40.8`.
+#[test]
+fn h_fips_fold_coordinates_at_two_pow_15() {
+    use agg_pcs_config::catalogs::Relation;
+    use agg_pcs_config::work_plan::WorkPlan;
+    // (set, root, recursive folds, terminal, R_coord, opening-tree product).
+    let expected: [(Set, usize, &[usize], usize, usize, u128); 3] = [
+        (Set::S44, 690, &[164, 30, 15, 8, 8], 5, 920, 1_758_975_989_760),
+        (Set::S65, 818, &[95, 31, 15, 8, 8], 5, 980, 1_252_106_698_752),
+        (Set::S87, 754, &[107, 31, 15, 8, 8], 5, 928, 1_298_544_721_920),
+    ];
+    let catalog = AggFp64SignedWidth4::catalog().expect("catalog");
+    for (set, root, recursive, terminal, total, tree) in expected {
+        let plan = WorkPlan::for_set(set, 1 << 15, Relation::HFips).expect("work plan");
+        let row = catalog.resolve_key(&plan.schedule_key()).expect("grouped row");
+        let (claims, schedule) = rows_of_one(row.profiles(), row.schedule());
+        let row_sites = sites(&schedule, &claims);
+        let levels = schedule.recursive_folds.len() + 2;
+        let mut per_level = vec![0usize; levels];
+        for s in &row_sites {
+            per_level[s.level] += s.coordinates;
+        }
+        let got_tree: u128 = (1u128 << (levels - 1))
+            * per_level.iter().map(|&c| c as u128 + 1).product::<u128>();
+        eprintln!(
+            "{set:?} H-FIPS 2^15: coordinates per level {per_level:?}, R_coord {}, tree {got_tree} = 2^{:.2}",
+            per_level.iter().sum::<usize>(),
+            (got_tree as f64).log2()
+        );
+        assert_eq!(per_level[0], root, "{set:?} root");
+        assert_eq!(&per_level[1..levels - 1], recursive, "{set:?} recursive folds");
+        assert_eq!(per_level[levels - 1], terminal, "{set:?} terminal");
+        assert_eq!(per_level.iter().sum::<usize>(), total, "{set:?} R_coord");
+        assert_eq!(got_tree, tree, "{set:?} opening-tree product");
+        assert!((got_tree as f64).log2() <= 40.8, "{set:?} tree bound");
+    }
 }

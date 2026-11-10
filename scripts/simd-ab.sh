@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Local A/B of the release build against main. Logs and detached baseline stay under target/.
+# The equality gate varies only the ML-DSA kernel backend (AGG_MLDSA_SIMD) and the thread
+# count on ML-DSA-44; the cross-tier AGG_ISA identity of every set and relation is the
+# artifact's `./run.sh gates` and the ignored `simd_backends` test of agg-cli.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"

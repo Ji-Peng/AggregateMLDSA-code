@@ -22,6 +22,13 @@ use crate::mode_a::{
 use crate::record::{self, KeyEntry, RecordEntry};
 use crate::{cache, rss};
 
+/// `println!` that ignores a closed standard output (see [`crate::write_stdout_line`]).
+macro_rules! outln {
+    ($($arg:tt)*) => {
+        crate::write_stdout_line(format_args!($($arg)*))
+    };
+}
+
 /// Usage text.
 pub const USAGE: &str = "\
 usage: agg <command> [options]
@@ -376,12 +383,12 @@ fn keygen_batch(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>>
     let start = Instant::now();
     let keys = generate_keys_for(set, count, seed);
     std::fs::write(&out, record::keys_to_bytes(&keys))?;
-    println!(
+    outln!(
         "wrote {count} ML-DSA-{} key pairs to {} in {:.1} ms",
         set.name(),
         out.display(),
         ms(start.elapsed())
-    );
+    )?;
     Ok(0)
 }
 
@@ -403,12 +410,12 @@ fn sign_batch(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let start = Instant::now();
     let records = sign_records_for(set, &keys, count, seed, msg_len);
     std::fs::write(&out, record::records_to_bytes(&records))?;
-    println!(
+    outln!(
         "wrote {count} signed records ({} keys) to {} in {:.1} ms",
         keys.len(),
         out.display(),
         ms(start.elapsed())
-    );
+    )?;
     Ok(0)
 }
 
@@ -445,14 +452,14 @@ fn aggregate(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     });
     let aggregate = run_large(move || aggregator.aggregate(&signed(&records)))?;
     std::fs::write(&out, &aggregate.bytes)?;
-    println!("{}", aggregate.report);
-    println!("wrote {} B to {}", aggregate.bytes.len(), out.display());
+    outln!("{}", aggregate.report)?;
+    outln!("wrote {} B to {}", aggregate.bytes.len(), out.display())?;
     Ok(0)
 }
 
 fn verify(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let records = record::read_records(&opts.path("records")?)?;
-    let bytes = std::fs::read(opts.path("aggregate")?)?;
+    let bytes = crate::read_input(&opts.path("aggregate")?, Some(crate::MAX_AGGREGATE_BYTES))?;
     let cache_path = opts.take("cache").map(PathBuf::from);
     let require = opts.flock_profile("flock-profile")?;
     let relation = opts.relation("relation")?;
@@ -474,16 +481,16 @@ fn verify(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
         let report = verifier.verify_with(&statements(&records), &bytes, cache);
         (report, key_cache)
     });
-    println!("{report}");
+    outln!("{report}")?;
     if let (Some(p), Some(c)) = (&cache_path, &key_cache) {
         if c.len() != before {
             cache::save(p, c)?;
-            println!(
+            outln!(
                 "key cache {}: {} keys ({} new)",
                 p.display(),
                 c.len(),
                 c.len() - before
-            );
+            )?;
         }
     }
     Ok(if report.accepted() { 0 } else { 1 })
@@ -909,7 +916,7 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     };
     let protocol = format!("median of {reps}, {warmup} warmup");
     let mldsa_backend = mldsa_backend_name();
-    println!(
+    outln!(
         "agg bench: ML-DSA-{}, N = {count}, {} keys, part_log2 {part_log2}, Flock profile {profile:?}, span {span}, relation {relation}, warmup {warmup}, reps {reps}, revision {}, agg-simd backend {}, piop layout {}, aerie backend {}, mldsa backend {}",
         set.name(),
         n_keys.min(count),
@@ -918,29 +925,29 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
         piop_layout_name(),
         agg_piop::aerie_simd_backend(),
         mldsa_backend
-    );
-    println!(
+    )?;
+    outln!(
         "record generation {:.1} ms (not part of the measurements)",
         ms(generated)
-    );
-    println!("median prover run ({protocol}):");
-    println!("{}", result.prove);
-    println!("last uncached verifier run:");
-    println!("{}", result.uncached_report);
-    println!("last cached verifier run:");
-    println!("{}", result.cached_report);
+    )?;
+    outln!("median prover run ({protocol}):")?;
+    outln!("{}", result.prove)?;
+    outln!("last uncached verifier run:")?;
+    outln!("{}", result.uncached_report)?;
+    outln!("last cached verifier run:")?;
+    outln!("{}", result.cached_report)?;
     let flock = result.prove.timings.keccak;
-    println!("summary:");
-    println!(
+    outln!("summary:")?;
+    outln!(
         "  prove                    {:>10.1} ms ({protocol}; min {:.1} ms)",
         ms(median(&result.prove_times)),
         ms(*result.prove_times.iter().min().expect("reps >= 1"))
-    );
+    )?;
     let t = &result.prove.timings;
-    println!("    opening pool: {} threads", t.opening_threads);
+    outln!("    opening pool: {} threads", t.opening_threads)?;
     if t.flock_threads > 0 {
         // Fork-join: the Flock proofs overlap the PIOP steps.
-        println!(
+        outln!(
             "    median run: Flock parts {:.1} ms (proofs {:.1} ms on {} threads beside the PIOP), \
              fork-join wall {:.1} ms, outside the fork {:.1} ms",
             ms(flock),
@@ -948,36 +955,36 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
             t.flock_threads,
             ms(t.fork_join),
             ms(result.prove.total.saturating_sub(t.fork_join))
-        );
+        )?;
     } else {
-        println!(
+        outln!(
             "    median run: Flock parts {:.1} ms, everything else {:.1} ms",
             ms(flock),
             ms(result.prove.total.saturating_sub(flock))
-        );
+        )?;
     }
-    println!(
+    outln!(
         "  verify, uncached keys    {:>10.1} ms ({protocol})",
         ms(median(&result.verify_uncached))
-    );
-    println!(
+    )?;
+    outln!(
         "  verify, cached keys      {:>10.1} ms ({protocol})",
         ms(median(&result.verify_cached))
-    );
-    println!(
+    )?;
+    outln!(
         "  prover peak RSS          {:>13} (max over all runs)",
         mib(result.prove_peak_kib)
-    );
-    println!(
+    )?;
+    outln!(
         "  verifier peak RSS        {:>13} (max over all runs)",
         mib(result.verify_peak_kib)
-    );
-    println!(
+    )?;
+    outln!(
         "  aggregate                {:>10} B, {:.1} B per signature",
         result.prove.bytes(),
         result.prove.bytes_per_signature()
-    );
-    println!("{}", size_lines(&result.prove.size, count));
+    )?;
+    outln!("{}", size_lines(&result.prove.size, count))?;
     if let Some(path) = json_path {
         write_bench_json(
             &path,

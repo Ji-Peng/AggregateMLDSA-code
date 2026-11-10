@@ -251,8 +251,9 @@ pub(crate) fn finish_row_2p<P: ParamSet>(
         // The three-prime finish checks every k before any other bound.
         return Err(FinishError::VBound);
     }
-    // SAFETY: the loop above initialized all 256 entries of `xq` and `k`.
+    // SAFETY: the loop above initialized all 256 entries of `xq`.
     let xq = unsafe { &*(xq.as_ptr().cast::<[i32; 256]>()) };
+    // SAFETY: the loop above initialized all 256 entries of `k`.
     let k = unsafe { &*(k.as_ptr().cast::<[i32; 256]>()) };
     if !finish_from_k::<P>(xq, k, row.t, row.h, out) {
         let k_coeffs = k.map(i64::from);

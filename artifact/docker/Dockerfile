@@ -5,7 +5,11 @@
 #   docker run --rm --network none --memory=48g \
 #     --cpuset-cpus=0-15 --cpuset-mems=0 \
 #     -v "$PWD/artifact/results:/work/artifact/results" \
-#     aggmldsa-ae ./artifact/run.sh check
+#     aggmldsa-ae check
+#   The same `docker run` prefix with `gates`, `quick --smoke`, `quick`, `full`
+#   or `tables` in place of `check` runs offline: the image holds the fetched
+#   sources and the built binaries. `fetch`, `all` and `--alloul26` need the
+#   network (rustup, cargo, git clone of Geode).
 #
 # Timing caveat: the container shares the host kernel, so THP, the frequency
 # governor, boost and co-tenancy are host properties. The probe records them
@@ -29,8 +33,9 @@ RUN apt-get update \
         python3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Aerie pins its own toolchain.
-RUN rustup toolchain install 1.95.0 --profile minimal
+# Aerie and the optional Alloul26 comparison (Geode) pin their own toolchains.
+RUN rustup toolchain install 1.95.0 --profile minimal \
+    && rustup toolchain install 1.96.0 --profile minimal
 
 WORKDIR /work
 COPY . /work

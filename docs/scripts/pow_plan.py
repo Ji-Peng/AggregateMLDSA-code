@@ -391,7 +391,7 @@ def print_summary(args) -> None:
             e = theta * mult
             print(f"       {label:<31} 2^{math.log2(e):.2f}, g = {grind_bits(e.numerator, e.denominator)}")
     print()
-    print("== Sites of one tied part, version 5 (GF(2^128), docs/parity-chain.md 8), full parts n = 2^d S ==")
+    print("== Sites of one tied part, version 5 (GF(2^128), docs/parity-chain.md), full parts n = 2^d S ==")
     print("profile  d   S  nu_s  list  tie=L(nu_s+c)   g   eq=L(12+s)  g_eq  round=2L  g_rd  rounds  nonce bytes  work(sum 2^g)")
     for prof in ("fast", "slim", "slim8"):
         for d in range(3, 14):
@@ -404,7 +404,7 @@ def print_summary(args) -> None:
                     f"{prof:<7} {d:>2}  {S:>2}  {t['nu_s']:>4}  {t['list']:>4}  {t['tie']:>13}  {t['g']:>2}  {t['eq']:>10}  {t['g_eq']:>4}  {t['round']:>8}  {t['g_round']:>4}  {t['rounds']:>6}  {t['nonce_bytes']:>11}  {t['work']:>13}"
                 )
     print()
-    print("== Flock outer sites before the level-0 two-point binding (audit, Section 4.3) ==")
+    print("== Flock outer sites before the level-0 two-point binding (audit) ==")
     print("Under the Flock paper's accounting (Appendix A 'Security', Remark 11) each outer challenge")
     print("carries the list factor L_max; the vendored per_challenge_128 numerators do not (except the")
     print("transport claim batch). Work-normalized bits = 128 + bits - log2(nu * L_max).")
@@ -444,7 +444,7 @@ def print_summary(args) -> None:
                     f"{d_sig:>5}  {prof:<7}  {'on ' if span else 'off'}   {len(ties):>5}  {','.join(str(t['g']) for t in ties):<8}  {s['bytes']:>10}  {tie_bytes:>10}  {tot:>11}  {tot / (1 << d_sig):>6.3f}  {s['work']:>9}  {tie_work:>9}"
                 )
     print()
-    print("== Plan digests (SHA3-256, Section 6.4 encoding; N = N*, default part size) ==")
+    print("== Plan digests (SHA3-256 plan encoding; N = N*, default part size) ==")
     for d_sig in range(3, 16):
         geo = geometry(d_sig)
         sites = piop_sites(geo)

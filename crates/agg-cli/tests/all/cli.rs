@@ -321,3 +321,45 @@ fn ml_dsa_65_and_87_through_the_binary() {
     // library tests; an unknown set name is a usage error.
     assert_eq!(agg(&["keygen-batch", "--count", "1", "--params", "66", "--out", s(&file("x.bin"))]).0, 2);
 }
+
+/// `AGG_W1_SPLIT=0` builds the level-1 weight table instead of its two factors. It changes
+/// memory use only: the aggregate of 1,024 records is byte-identical to the default one, for
+/// ML-DSA-44 (one weight) and ML-DSA-65 (one weight per polynomial lane).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Flock and Akita proofs: run with --release"
+)]
+fn w1_split_off_gives_the_same_aggregate() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("agg-cli-w1-split");
+    std::fs::create_dir_all(&dir).unwrap();
+    for params in ["44", "65"] {
+        let file = |name: &str| dir.join(format!("{name}{params}.bin"));
+        let (keys, recs) = (file("keys"), file("records"));
+        let (code, out) = agg(&["keygen-batch", "--count", "64", "--seed", "11", "--out", s(&keys), "--params", params]);
+        assert_eq!(code, 0, "{out}");
+        let (code, out) = agg(&[
+            "sign-batch", "--keys", s(&keys), "--count", "1024", "--seed", "11", "--out", s(&recs), "--params", params,
+        ]);
+        assert_eq!(code, 0, "{out}");
+        let aggregate = |split: Option<&str>, out_file: &Path| {
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_agg"));
+            cmd.args(["aggregate", "--records", s(&recs), "--out", s(out_file), "--params", params]);
+            match split {
+                Some(v) => cmd.env("AGG_W1_SPLIT", v),
+                None => cmd.env_remove("AGG_W1_SPLIT"),
+            };
+            let out = cmd.output().expect("run agg");
+            assert!(
+                out.status.success(),
+                "ML-DSA-{params} AGG_W1_SPLIT={split:?}: {}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            std::fs::read(out_file).unwrap()
+        };
+        let default = aggregate(None, &file("split"));
+        let table = aggregate(Some("0"), &file("table"));
+        assert!(default == table, "ML-DSA-{params}: AGG_W1_SPLIT=0 changed the aggregate");
+    }
+}

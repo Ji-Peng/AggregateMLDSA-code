@@ -180,7 +180,8 @@ pub fn records_from_bytes(bytes: &[u8]) -> Result<Vec<RecordEntry>, FileError> {
 /// # Errors
 /// On an unreadable or malformed file.
 pub fn read_records(path: &Path) -> Result<Vec<RecordEntry>, Box<dyn std::error::Error>> {
-    Ok(records_from_bytes(&std::fs::read(path)?)?)
+    let bytes = crate::read_input(path, None)?;
+    records_from_bytes(&bytes).map_err(|e| format!("{}: {e}", path.display()).into())
 }
 
 /// Read and parse a key file.
@@ -188,7 +189,8 @@ pub fn read_records(path: &Path) -> Result<Vec<RecordEntry>, Box<dyn std::error:
 /// # Errors
 /// On an unreadable or malformed file.
 pub fn read_keys(path: &Path) -> Result<Vec<KeyEntry>, Box<dyn std::error::Error>> {
-    Ok(keys_from_bytes(&std::fs::read(path)?)?)
+    let bytes = crate::read_input(path, None)?;
+    keys_from_bytes(&bytes).map_err(|e| format!("{}: {e}", path.display()).into())
 }
 
 #[cfg(test)]

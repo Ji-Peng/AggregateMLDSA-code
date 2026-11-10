@@ -307,8 +307,13 @@ def negative_check(configs, rows, prefix, allocation, records, out_dir, params, 
     return proc.returncode == 1, name
 
 
-def sde_check(configs, rows, timeout=1800):
-    """Emulate an AVX2-only and an AVX-512-without-IFMA CPU, if SDE is installed."""
+def sde_check(configs, rows, records, params, relation, want_sha, out_dir, timeout=3600):
+    """Emulate an AVX2-only and an AVX-512-without-IFMA CPU, if SDE is installed.
+
+    Per emulated CPU, `agg aggregate` runs twice on the 1K gate records, once with the
+    tier's AGG_ISA cap and once without any cap (feature detection alone picks the
+    kernels); each aggregate must equal the gate's aggregate (`want_sha`) and verify.
+    """
     exe = shutil.which("sde64") or shutil.which("sde")
     if exe is None:
         return {"available": False, "reason": "sde64 is not installed"}
@@ -327,47 +332,55 @@ def sde_check(configs, rows, timeout=1800):
         }
     runs = {}
     for tier, chip in chips.items():
-        if not rows[tier]["available"]:
-            runs[tier] = {"ok": True, "skipped": "CPU lacks the tier"}
-            continue
-        spec = configs["rows"][tier]
-        env = os.environ.copy()
-        env.update({k: str(v) for k, v in spec.get("env", {}).items()})
-        env["RAYON_NUM_THREADS"] = "1"
-        env["OMP_NUM_THREADS"] = "1"
-        cmd = [
-            exe,
-            chip,
-            "--",
-            str(BIN / spec["binary"]),
-            "bench",
-            "--count",
-            "256",
-            "--warmup",
-            "1",
-            "--reps",
-            "1",
-        ]
-        try:
-            proc = subprocess.run(
-                cmd,
-                env=env,
-                text=True,
-                capture_output=True,
-                timeout=timeout,
-            )
-            runs[tier] = {
-                "chip": chip,
-                "returncode": proc.returncode,
-                "ok": proc.returncode == 0,
-                "stderr_tail": (proc.stderr or "")[-2000:],
-            }
-        except subprocess.TimeoutExpired:
-            runs[tier] = {"chip": chip, "ok": False, "error": "timed out"}
+        for capped in (True, False):
+            key = tier if capped else f"{tier}-uncapped"
+            if not rows[tier]["available"]:
+                runs[key] = {"ok": True, "skipped": "CPU lacks the tier"}
+                continue
+            spec = configs["rows"][tier]
+            env = os.environ.copy()
+            for name in ("AGG_ISA", "AGG_SIMD", "AERIE_SIMD_BACKEND"):
+                env.pop(name, None)
+            if capped:
+                env.update({k: str(v) for k, v in spec.get("env", {}).items()})
+            env["RAYON_NUM_THREADS"] = "1"
+            env["OMP_NUM_THREADS"] = "1"
+            binary = str(BIN / spec["binary"])
+            out = out_dir / f"sde-{params}-{relation}-{key}.bin"
+            common = ["--params", params, "--records", str(records), "--relation", relation]
+            result = {"chip": chip, "capped": capped, "ok": False}
+            try:
+                proc = subprocess.run(
+                    [exe, chip, "--", binary, "aggregate", "--out", str(out)] + common,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    timeout=timeout,
+                )
+                result["returncode"] = proc.returncode
+                result["stderr_tail"] = (proc.stderr or "")[-2000:]
+                if proc.returncode == 0 and out.exists():
+                    result["sha256"] = sha256_file(out)
+                    result["matches"] = result["sha256"] == want_sha
+                    check = subprocess.run(
+                        [exe, chip, "--", binary, "verify", "--aggregate", str(out)] + common,
+                        env=env,
+                        text=True,
+                        capture_output=True,
+                        timeout=timeout,
+                    )
+                    result["verify_returncode"] = check.returncode
+                    result["ok"] = result["matches"] and check.returncode == 0
+            except subprocess.TimeoutExpired:
+                result["error"] = "timed out"
+            runs[key] = result
     return {
         "available": True,
         "executable": exe,
         "chips": chips,
+        "params": params,
+        "relation": relation,
+        "want_sha256": want_sha,
         "runs": runs,
     }
 
@@ -459,10 +472,6 @@ def main():
     reports = check_reports(configs, rows)
     out_dir = result_dir / "gates"
     out_dir.mkdir(exist_ok=True)
-    sde = sde_check(configs, rows) if args.sde else {
-        "available": False,
-        "reason": "disabled with --no-sde",
-    }
     expected_path = EXPECTED / "hashes.json"
     expected = read_json(expected_path) if expected_path.exists() else {}
 
@@ -529,6 +538,25 @@ def main():
             "threads": threads,
             "native": native,
         }
+
+    sde = {"available": False, "reason": "disabled with --no-sde"}
+    if args.sde:
+        # The first set and relation: compare against the bytes every tier produced.
+        sde_params, sde_relation = args.params[0], args.relations[0]
+        sde_hashes = {
+            entry["sha256"]
+            for entry in per_set[sde_params]["relations"][sde_relation]["aggregates"].values()
+            if entry.get("available")
+        }
+        sde = sde_check(
+            configs,
+            rows,
+            result_dir / "data" / f"gates-records-{sde_params}-1024.bin",
+            sde_params,
+            sde_relation,
+            next(iter(sde_hashes)) if len(sde_hashes) == 1 else None,
+            out_dir,
+        )
 
     aerie = None
     aerie_bin = BIN / "aerie-falcon-bench"

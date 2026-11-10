@@ -144,7 +144,7 @@ sub-proofs and therefore no tied-part site):
 | fork | PIOP (K23) | none; the sponge is cloned into branch L (event 7) and branch S (events 8 to 11), each absorbing its own label |
 | 7 | PIOP, branch L | `X` (vector of 2); `mu_1`; per session `s = 2..D`: `gamma_s` (vector), `s - 1` rounds, `mu_s` |
 | 8, 9 | PIOP, branch S | `tau` (vector of `d_main`) |
-| 10, 11 | PIOP, branch S | `gamma^(1)` (26), 25 stage-1 rounds; `gamma^(2)` (10; 9 under H-exact and H-FIPS), stage-2 rounds (each stage `d_main` rounds); then the absorbed projection claim `c` |
+| 10, 11 | PIOP, branch S | `gamma^(1)` (19; 13 for 65/87), 25 stage-1 rounds; `gamma^(2)` (10; 9 under H-exact and H-FIPS), stage-2 rounds (each stage `d_main` rounds); then the absorbed projection claim `c` |
 | branch join | PIOP (K23) | none; the trunk absorbs the 32-byte digests of L and S, in this order |
 | 12 | PIOP | `gamma^(3)` (49; 50 under H-exact, 56 under H-FIPS), `d_main` stage-3 rounds |
 | join | no PIOP absorption (K25); inside each tied part (own oracles, seeded by the part or span seed, which binds `fs_sigma` and the event-6 record digest `rec`; the prover runs them concurrently with events 7 to 13): on the tie challenger the **tie site**, the **`eq_Y` site** and the **chain rounds** (version 5), then the sponge instance's Flock sites (zerocheck, lincheck, opening with the bit claim) |
@@ -391,16 +391,16 @@ batch (loss = claims, 59 under H-FIPS, 54 under H-exact), extension-opening poin
 merge and virtual batches, compression and stage-2 batches. Sparse fold challenges carry
 no nonce: each coordinate stream has weight `1/C_{j,g}`, and Akita refuses any fold
 family below its 128-bit entropy floor (`SparseChallengeConfig::validate_for_ring_dim`,
-`MIN_FOLD_CHALLENGE_ENTROPY_BITS`). Dumped for our catalogs (Section 4.1; the rows of the
-removed H-u, whose summaries equal H-exact's; H-FIPS below the table):
+`MIN_FOLD_CHALLENGE_ENTROPY_BITS`). Dumped for our catalogs (Section 4.1; the H-exact rows, pinned as `H_EXACT_TABLE` in
+`agg-pcs-config/tests/all/akita_grinding.rs`; H-FIPS below the table):
 
 | `d_sig` | PoW sites | `sum g` | max `g` | expected work `sum 2^g` | nonce bits |
 | ---: | ---: | ---: | ---: | ---: | ---: |
 | 3 to 5 | 401 | 984 | 9 | 3,888 | 3,863 |
 | 6 | 401 | 985 | 10 | 4,400 | 3,864 |
 | 7, 8 | 406 | 980 | 10 | 5,120 | 3,894 |
-| 9 | 388 | 966 | 10 | 5,132 | 3,754 |
-| 10 | 388 | 966 | 12 | 7,436 | 3,754 |
+| 9 | 388 | 965 | 10 | 4,620 | 3,753 |
+| 10 | 430 | 1,053 | 12 | 7,868 | 4,135 |
 | 11 | 452 | 1,121 | 12 | 8,304 | 4,369 |
 | 12 | 452 | 1,120 | 12 | 8,048 | 4,368 |
 | 13 | 457 | 1,133 | 12 | 8,332 | 4,416 |
@@ -418,7 +418,8 @@ The 13 H-exact grouped rows (`mldsa-44-p16x-batch-<N*>-mult-final`, `G_main4` at
 polynomials) have the same plan summaries as the pruned H-u rows at every size; their digests are
 pinned in `agg-pcs-config/tests/all/akita_grinding.rs`
 (`akita_plans_of_the_h_exact_rows_are_pinned`). The H-FIPS rows reach each step one size
-earlier (`PINNED_H_FIPS`; at `2^15`: 461 sites, `sum g` 1,141, work 8,860, 4,452 nonce bits).
+earlier (`PINNED_H_FIPS`; at `2^15`: 461 sites, `sum g` 1,139, work 8,092, 4,450 nonce bits for ML-DSA-44,
+as printed by `akita_plans_of_the_h_fips_rows_are_well_formed`).
 
 ### 3.8 Flock internal sites (inherited; audit in 4.2 to 4.4)
 
@@ -466,7 +467,9 @@ fix of Section 4.3 only widens existing ones.
 
 ### 4.2 Flock: what the documented 128-bit level covers
 
-Read from `vendor/flock-core` (identical to `83f963e` except K12/K18) and Flock's
+Read from `vendor/flock-core` (`83f963e` with the patches of `vendor/flock-core/PATCH.md`:
+prover-only ones plus the verifier-visible K18, K19, canonical nonce width, multilinear skip
+basis and joint out-of-domain draw) and Flock's
 `docs/128-bit-grinding-audit.md` at that upstream revision: under `Fast`, `Slim` and `Slim8` the policies
 `zerocheck_grinding`, `lincheck_grinding`, `opening_grinding`
 (`OpeningGrinding::per_challenge_128`) are enabled, and `flock_union::UnionGeometry::
@@ -550,7 +553,8 @@ bits (`m*_slim8.toml`). The transport batch is short by 0.14 bits. Fix: 7 bits f
 
 ### 4.5 The tied part: points not bound into the instance challengers (finding)
 
-`TieChallenges::derive` absorbs `fs`, `d`, `nu_s`, `log2 blocks`, `span_log`, the
+In tied-part version 4 the tie challenger (`TieChallenges::derive`, since replaced by
+`TiedPart::tie_start`, `docs/parity-chain.md` 6) absorbed `fs`, `d`, `nu_s`, `log2 blocks`, `span_log`, the
 final-vector digest, the sponge cap and the union cap. The sponge instance's challenger
 (`TiedPart::sponge_challenger`) absorbs `fs`, its label, the gate digest, the public
 digest and the tie-geometry digest, then Flock binds its own cap; it never sees the
@@ -2090,5 +2094,5 @@ The `A z` parts of the `k` instances are `l` summands `w_A^(s) z^(s)` outside th
 `sum_rho gamma_rho T~_rho(r^(2))` itself from the replayed `gamma^(3)` (`stage3::verify_streamed`, `lane_public`).
 
 Site classes and `nu_t` are those of 3.1 with the lane sets' geometry (`d_main = 8 + d_sig`) and stage degrees
-`(3, 5, 3)`. `stage.gamma` has `(37, 18, 105)` coefficients for 65 and `(45, 22, 132)` for 87, assigned `l/|K|`,
-difficulties `(6, 5, 7)` and `(6, 5, 8)`. The plan digests of the lane sets are pinned in `agg_piop::pow`.
+`(3, 5, 3)`. `stage.gamma` has `(13, 18, 105)` coefficients for 65 and `(13, 22, 132)` for 87 under H-exact, assigned `l/|K|`,
+difficulties `(4, 5, 7)` and `(4, 5, 8)`; under H-FIPS `(13, 18, 136)` and `(13, 22, 173)`, difficulties `(4, 5, 8)`. The plan digests of the lane sets are pinned in `agg_piop::pow`.

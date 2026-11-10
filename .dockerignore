@@ -1,0 +1,9 @@
+# Build context of artifact/docker/Dockerfile. The image fetches the external
+# sources and builds every binary itself, so host build trees and results stay out.
+target/
+target-*/
+artifact/build/
+artifact/results/
+artifact/vendor/
+artifact/paper-tables/
+**/__pycache__/

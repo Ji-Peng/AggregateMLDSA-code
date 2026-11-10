@@ -16,6 +16,9 @@ use crate::keccak::{lane, N_LANES, RHO_OFFSETS, ROUND_CONSTANTS};
 pub type State8 = [__m512i; N_LANES];
 
 /// The all-zero state.
+///
+/// # Safety
+/// Requires target feature `avx512f`.
 #[inline]
 #[target_feature(enable = "avx512f")]
 #[must_use]
@@ -39,6 +42,9 @@ fn xor3(a: __m512i, b: __m512i, c: __m512i) -> __m512i {
 
 /// `phi = pi o rho o theta` on eight states: the vector `B` that chi reads,
 /// `B[x, y] = rol(A'[(x + 3 y) mod 5, x], r[(x + 3 y) mod 5][x])` with `A' = theta(A)`.
+///
+/// # Safety
+/// Requires target feature `avx512f`.
 #[inline]
 #[target_feature(enable = "avx512f")]
 #[must_use]
@@ -62,6 +68,9 @@ pub fn phi8(s: &State8) -> State8 {
 }
 
 /// The chi AND output of lane `(x, y)` of a phi output: `!b[x + 1, y] & b[x + 2, y]`.
+///
+/// # Safety
+/// Requires target feature `avx512f`.
 #[inline]
 #[target_feature(enable = "avx512f")]
 #[must_use]
@@ -71,6 +80,9 @@ pub fn chi_and_lane(b: &State8, x: usize, y: usize) -> __m512i {
 
 /// One round with round index `r` on eight states: updates `s` and returns the chi AND
 /// outputs `t` (the committed chi lanes), as [`crate::keccak::round`] per qword.
+///
+/// # Safety
+/// Requires target feature `avx512f`.
 #[inline]
 #[target_feature(enable = "avx512f")]
 pub fn round8(s: &mut State8, r: usize) -> State8 {
@@ -88,6 +100,9 @@ pub fn round8(s: &mut State8, r: usize) -> State8 {
 }
 
 /// XOR the first `planes.len()` lanes of eight absorbed blocks into the states.
+///
+/// # Safety
+/// Requires target feature `avx512f`.
 #[inline]
 #[target_feature(enable = "avx512f")]
 pub fn absorb8(s: &mut State8, planes: &[__m512i]) {

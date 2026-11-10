@@ -1867,6 +1867,59 @@ mod tests {
         }
     }
 
+    /// The all-zero valid batch at `N = 2^15`: every record equals the padding witness (`z = 0`,
+    /// `w' = 0`, `h = 0`, accepted for a key with `t_1 = 0`), so each looked-up main-domain
+    /// column holds one value in every cell, the low digit of `z = 0` for `Z_lo`, of `u = 0`
+    /// for `U_lo` (H-exact) and of `L = gamma_2 - 1` for `L_lo` (H-FIPS). The `z` and the
+    /// `u` or `L` families land on different `T_16` entries, so the fullest entry holds at most
+    /// the larger family plus every other looked-up cell (padding slots, the bridge-domain and
+    /// projection stacks), which stays below the multiplicity capacity for every set and
+    /// relation. No bound is claimed for arbitrary batches: the prover aborts on overflow.
+    #[test]
+    fn multiplicity_digits_hold_the_all_zero_batch() {
+        use crate::lookup::MULTIPLICITY_CAPACITY;
+        let records = 1 << 15;
+        for set in [Set::S44, Set::S65, Set::S87] {
+            for relation in Relation::ALL {
+                if !relation.is_available(set) {
+                    continue;
+                }
+                let manifest = CommitmentManifest::for_set(set, records, relation).unwrap();
+                assert_eq!(manifest.padded_records(), records);
+                let shape = manifest.lookup_shape();
+                // Main-domain cells per low-digit value, and every other looked-up cell.
+                let mut families = std::collections::BTreeMap::<i64, usize>::new();
+                let mut rest = 0_usize;
+                for (stack, (shape, domain)) in shape.stacks.iter().zip(manifest.stack_domains()).enumerate() {
+                    let cells = 1_usize << shape.vars;
+                    rest += (shape.slots() - shape.columns) * cells;
+                    if domain != Group::Main {
+                        rest += shape.columns * cells;
+                        continue;
+                    }
+                    for column in manifest.stack_columns(stack) {
+                        let Column::Digit { value, digit: 0, .. } = column else {
+                            panic!("ML-DSA-{set} {relation}: {column:?} is not a low digit");
+                        };
+                        let zero = match value {
+                            DigitValue::Zx | DigitValue::Zdx(_) | DigitValue::U | DigitValue::Ud => 0,
+                            DigitValue::L | DigitValue::Ld => manifest.gamma2() - 1,
+                            other => panic!("ML-DSA-{set} {relation}: {other:?} on the main domain"),
+                        };
+                        *families.entry(value.layout().decompose(zero)[0]).or_default() += cells;
+                    }
+                }
+                eprintln!("ML-DSA-{set} {relation}: main-domain cells per entry {families:?}, other cells {rest}");
+                assert_eq!(families.len(), 2, "ML-DSA-{set} {relation}: the two families share an entry");
+                let fullest = families.values().max().unwrap() + rest;
+                assert!(
+                    i64::try_from(fullest).unwrap() < MULTIPLICITY_CAPACITY,
+                    "ML-DSA-{set} {relation}: {fullest} cells may share one entry"
+                );
+            }
+        }
+    }
+
     #[test]
     fn lane_set_forms_cover_their_ranges() {
         // z of ML-DSA-65: exactly [-B_z, B_z] with B_z = 524,091, slack weight 523,895.

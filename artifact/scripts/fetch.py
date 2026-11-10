@@ -75,6 +75,11 @@ def check_cargo_lock(sources):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-cargo", action="store_true", help="skip cargo fetch")
+    parser.add_argument(
+        "--alloul26",
+        action="store_true",
+        help="also install the toolchain of the optional Alloul26 comparison",
+    )
     args = parser.parse_args()
     lock = load_toml(ARTIFACT / "sources.lock")
     sources = lock["source"]
@@ -132,7 +137,10 @@ def main():
 
     if not args.no_cargo:
         # Install the pinned toolchains if rustup lacks them (a no-op when present).
-        for toolchain in (RUST_TOOLCHAIN, AERIE_TOOLCHAIN):
+        toolchains = [RUST_TOOLCHAIN, AERIE_TOOLCHAIN]
+        if args.alloul26:
+            toolchains += [s["toolchain"] for s in sources if s["name"] == "alloul26" and s.get("toolchain")]
+        for toolchain in toolchains:
             run(["rustup", "toolchain", "install", "--profile", "minimal", toolchain])
         run(
             ["cargo", "fetch", "--locked"],

@@ -236,6 +236,10 @@ are false and the batched sessions must accept a false claim: the GKR term (the 
 `3 D (D - 1)/2 + 2 (D - 1) + 1` over `|K|`, because the second tree set adds claims to the
 same batched sessions, not sessions). Union bound: `eps_X^2 + eps_GKR`.
 
+The error and byte figures of this comparison predate the projection stack (deviation K24), except
+the adopted row's `2^-203.5`; with the projection stack one `X` gives `2^-101.8` (table above) and
+the adopted layout takes 1,891 elements, 30,256 B (Proof size above).
+
 | Remedy | Identity error at `N = 2^15` | Extra prover cost (one challenge = 1) | Proof bytes at `2^15` | Status |
 | --- | ---: | --- | ---: | --- |
 | one `X` | `(L + M - 1)/|K| = 2^-101.0` | 1 | 22,896 | below the 128-bit ledger |
@@ -427,8 +431,9 @@ The construction, driven by the PIOP transcript:
   `OutOfTable` on an honest out-of-range cell; `multiplicity_digits` /
   `compose_multiplicity`: the seven balanced base-16 digits of `G_m` (capacity
   `7 (16^7 - 1)/15 = 125,269,879`). No count can exceed it for ML-DSA-44 and ML-DSA-65,
-  whose `L` at `2^15` (79,970,304 and 105,005,056) is below the capacity. ML-DSA-87 has
-  `L = 146,948,096` at `2^15`, so the bound is per value: the largest honest count is that
+  whose `L` at `2^15` under H-FIPS (79,970,304 and 105,136,128; 105,005,056 for 65 under
+  H-exact) is below the capacity. ML-DSA-87 has `L = 147,079,168` at `2^15` under H-FIPS
+  (146,948,096 under H-exact), so the bound is per value: the largest honest count is that
   of the entry 0, which receives at most the padded cells (fewer than half of the records,
   since `N* = next_pow2(N)`), the public stack slots and the live cells of value zero; the
   worst case, `N = 2^14 + 1`, gives about 88.2 million (estimate), 1.42x below the capacity.
@@ -437,7 +442,14 @@ The construction, driven by the PIOP transcript:
   case: it counts the public padding slots, every bridge-domain and projection cell and the
   main-domain cells of the padding records, and leaves out the live main-domain cells,
   assuming that honest signatures spread the low 16-bit digits of `z` and `u` over the `2^16`
-  entries. `multiplicity_digits` returns `LookupError::Shape` for a count above
+  entries. One degenerate valid batch is covered explicitly: for a public key with `t1 = 0`,
+  FIPS 204 verification accepts `z = 0`, `h = 0`, so every live record can equal the padding
+  witness. The zero coefficient lands on different entries in the two looked-up main families
+  (for ML-DSA-87: `z_lo` on 65,415, `L_lo` on 65,535, H-exact's `u_lo` on 65,025; derived from
+  `agg_witness::digits`), so the fullest entry holds at most one family (`8 * 2^23 = 67,108,864`
+  cells) plus every non-main and padding cell (about 21.3 million), at most about 88.4 million
+  (estimate), 1.4x below the capacity. No bound is claimed for arbitrary adversarially chosen
+  valid batches. `multiplicity_digits` returns `LookupError::Shape` for a count above
   `MULTIPLICITY_CAPACITY` (no panic), and `BridgeGroupTables::recount` turns that into an
   honest abort of the prover.
 - `LookupShape` (public layout, `challenges` 1 to 4, `validate`, `max_depth`,

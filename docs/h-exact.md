@@ -81,13 +81,14 @@ number names the relation everywhere.
 ### 1.2 Runtime parameter, not a cargo feature
 
 The relation MUST be a runtime parameter of `agg_piop::manifest::CommitmentManifest`
-(`Relation::{Hu, HExact, HFips}`), so one binary proves and benchmarks every relation and the
+(`Relation::{HExact, HFips}`), so one binary proves and benchmarks every relation and the
 checked-in catalogs hold the rows of every relation.
 
 ### 1.3 Where it is bound
 
-1. **Proof header** (`wire::AggregateProof`): the flags byte after the version is the relation
-   id. `from_bytes` accepts `1` and `2` and rejects any other value, `0` included since H-u was
+1. **Proof header** (`wire::AggregateProof`): the low nibble of the flags byte after the version
+   is the relation id; the high nibble is the parameter set (0 for ML-DSA-44, Section 11.1).
+   `from_bytes` accepts `1` and `2` and rejects any other value, `0` included since H-u was
    removed (`WireError::Flags`).
 2. **Event 0** (`CommitmentManifest::binding_bytes`, absorbed through
    `binding::instance_record` before any commitment):
@@ -1072,9 +1073,10 @@ tuples). The canonical decomposition is H-u's rule (`a_z = [z + B_z >= 2^19]`).
   layout of `DigitValue::Zd`, so the 26 batch layouts (13 per set) equal H-u's and resolve to
   H-u's checked-in rows (the catalog is keyed by layout; no new rows). The row name in event 0
   is `mldsa-<set>-p16x-batch-<N*>-mult-final`, byte 3 is 1, and the proof header's flags byte is
-  `0x11` (65) or `0x21` (87). Stage instances, degrees, batching lengths (37, 18, 105 and
-  45, 22, 132) and the proof-of-work plan and digest are H-u's
-  (`pow::tests::lane_h_exact_plans_equal_lane_h_u_plans`); only the constants of the affine `z`
+  `0x11` (65) or `0x21` (87). Stage instances, degrees, batching lengths (13, 18, 105 and
+  13, 22, 132 since the stage reshuffle, `docs/deviations.md` K26) and the proof-of-work plan and
+  digest are H-u's (`pow::tests::ml_dsa_65_and_87_plans_reproduce_the_script` pins the H-exact
+  plan); only the constants of the affine `z`
   in the ring identity differ. Proof bytes equal H-u's up to the Akita opening
   (1K, measured: 448,712 B against 448,765 B for 65; 489,195 B for both relations for 87).
 * **Verifier policy.** As for ML-DSA-44 (1.3): the relation is the caller's, and a proof of

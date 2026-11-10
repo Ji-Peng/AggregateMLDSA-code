@@ -74,7 +74,8 @@ run time (`src/simd.rs`: `is_x86_feature_detected!`, cached in an atomic) and ca
 The AVX-512 GF(2^128) helpers those kernels use (`ghash_mul_x4`, `f128x4_loadu`,
 `f128x4_set`, `WideGhashX4`) are copied from `flock-field` 83f963e
 (`gf2_128/x86_64.rs`) into `simd::x86` without their `cfg(target_feature)` gates;
-`flock-field` itself is unchanged and stays the pinned git dependency. Kernel bodies are
+`flock-field` is vendored separately (`vendor/flock-field`, patched in the workspace
+`Cargo.toml`); its own changes are listed in `vendor/flock-field/PATCH.md`. Kernel bodies are
 upstream's; the dispatchers add bounds asserts the upstream callers relied on implicitly
 (the fused shift-reduce reads 8 bytes per K-row offset; the fold + message kernel needs
 `a_in = 2 a_out = 4 eq_lo` and an even `eq_lo` length).

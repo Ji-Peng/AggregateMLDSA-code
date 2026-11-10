@@ -28,19 +28,23 @@ fn oracle_rej_uniform(block: &Block, st: &mut RejState) -> bool {
     st.count == 256
 }
 
-/// Returns test engines for backends that have hardware support on the host.
+/// Returns test engines for backends that have hardware support on the host and that the
+/// `AGG_ISA` cap admits. Without a cap at least AVX2 must be present; under
+/// `AGG_ISA=scalar` the list is empty and the vector checks have nothing to run.
 fn test_engines() -> Vec<Engine> {
-    [Backend::Avx2, Backend::Avx512]
+    let engines: Vec<Engine> = [Backend::Avx2, Backend::Avx512]
         .into_iter()
         .filter_map(Engine::new)
-        .collect()
+        .collect();
+    let capped = agg_mldsa_simd::isa::cap().limit() == agg_mldsa_simd::isa::IsaLevel::Scalar;
+    assert!(capped || !engines.is_empty(), "At least AVX2 engine must be supported");
+    engines
 }
 
 #[test]
 fn test_rej_uniform_random_blocks() {
     let mut rng = common::SplitMix64::new(0x1234_5678_9ABC_DEF0);
     let engines = test_engines();
-    assert!(!engines.is_empty(), "At least AVX2 engine must be supported");
 
     for engine in &engines {
         for trial in 0..50 {
@@ -82,7 +86,6 @@ fn test_rej_uniform_random_blocks() {
 #[test]
 fn test_rej_uniform_crafted_rejections() {
     let engines = test_engines();
-    assert!(!engines.is_empty());
 
     // Q = 8,380,417 = 0x7FE001
     let q_bytes = [0x01, 0xE0, 0x7F];
@@ -151,7 +154,6 @@ fn test_rej_uniform_crafted_rejections() {
 #[test]
 fn test_rej_uniform_mid_block_at_every_offset() {
     let engines = test_engines();
-    assert!(!engines.is_empty());
 
     // Construct a block with 56 valid candidates (Q - 1).
     let q_minus_1_bytes = [0x00, 0xE0, 0x7F];
@@ -195,7 +197,6 @@ fn test_rej_uniform_mid_block_at_every_offset() {
 #[test]
 fn test_rej_uniform_exact_block_end() {
     let engines = test_engines();
-    assert!(!engines.is_empty());
 
     let q_minus_1_bytes = [0x00, 0xE0, 0x7F];
     let mut block = Block::zero();
@@ -224,7 +225,6 @@ fn test_rej_uniform_exact_block_end() {
 fn test_unpack_z_against_native_sig_decode() {
     let mut rng = common::SplitMix64::new(0xCAFE_BABE_0123_4567);
     let engines = test_engines();
-    assert!(!engines.is_empty());
 
     for engine in &engines {
         for trial in 0..20 {
@@ -269,7 +269,6 @@ fn test_unpack_z_against_native_sig_decode() {
 #[test]
 fn test_unpack_z_extreme_values() {
     let engines = test_engines();
-    assert!(!engines.is_empty());
 
     for engine in &engines {
         // Value 1: raw bits = 1 -> z = GAMMA1 - 1
@@ -323,7 +322,6 @@ fn test_unpack_z_extreme_values() {
 fn test_pack_w1_against_native() {
     let mut rng = common::SplitMix64::new(0x9876_5432_10FE_DCBA);
     let engines = test_engines();
-    assert!(!engines.is_empty());
 
     for engine in &engines {
         // 1. Random w1 in [0, 43]

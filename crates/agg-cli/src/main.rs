@@ -12,29 +12,8 @@ use std::process::ExitCode;
 #[global_allocator]
 static ALLOC: agg_piop::alloc::HugePageAlloc = agg_piop::alloc::HugePageAlloc;
 
-/// Lowers Aerie's runtime-dispatched kernels to the `AGG_ISA` cap.
-///
-/// Aerie reads `AERIE_SIMD_BACKEND` once per process (its `backend-override`
-/// feature, enabled by this workspace); the value can only lower the ceiling.
-fn apply_isa_to_aerie() {
-    if std::env::var_os("AERIE_SIMD_BACKEND").is_some() {
-        return;
-    }
-    let cap = agg_mldsa_simd::isa::cap();
-    if cap.requested().is_none() {
-        return;
-    }
-    let backend = match cap.limit() {
-        agg_mldsa_simd::isa::IsaLevel::Scalar => "scalar",
-        agg_mldsa_simd::isa::IsaLevel::Avx2 => "avx2",
-        agg_mldsa_simd::isa::IsaLevel::Avx512
-        | agg_mldsa_simd::isa::IsaLevel::Avx512Ifma => "avx512",
-    };
-    std::env::set_var("AERIE_SIMD_BACKEND", backend);
-}
-
 fn main() -> ExitCode {
-    apply_isa_to_aerie();
+    agg_piop::apply_isa_cap_to_aerie();
     if std::env::var_os("AGG_HUGEPAGE").is_some_and(|v| v == "0") {
         agg_piop::alloc::set_enabled(false);
     }

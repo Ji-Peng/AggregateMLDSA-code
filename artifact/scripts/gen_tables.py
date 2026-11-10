@@ -43,7 +43,7 @@ ABLATION_LABELS = {
     "no-alloc-cache": "no allocator cache (\\texttt{AGG\\_ALLOC\\_CACHE=0})",
     "stage-branch-main-pool": "stage branch on main pool (\\texttt{AGG\\_PIOP\\_S\\_THREADS=0})",
     "piop-row": "row layout (\\texttt{AGG\\_PIOP\\_LAYOUT=row})",
-    "flock-serial": "Flock after the PIOP, untraced (\\texttt{AGG\\_FLOCK\\_THREADS=0})",
+    "flock-serial": "Flock after the PIOP (\\texttt{AGG\\_FLOCK\\_THREADS=0})",
 }
 
 
@@ -383,19 +383,96 @@ def relations_table(cells, directory, commit, machine, skipped):
     return out
 
 
+def cell_logs(cell, directory):
+    """Text of the run logs of `cell` (looked up in `<results>/logs` when the recorded path moved)."""
+    texts = []
+    for proc_entry in cell.get("processes", []) if cell else []:
+        log = proc_entry.get("log")
+        if not log:
+            continue
+        for path in (Path(log), directory / "logs" / Path(log).name):
+            if path.exists():
+                try:
+                    texts.append(path.read_text(encoding="utf-8"))
+                except OSError:
+                    continue
+                break
+    return texts
+
+
+def trace_values(text, pattern):
+    return [float(m) for m in re.findall(pattern, text, re.MULTILINE)]
+
+
+def timed_values(values, warmup):
+    """Drop the warm-up runs' values when the timed runs also printed one."""
+    return values[warmup:] if len(values) > warmup else values
+
+
+def serial_trace(cell, directory):
+    """Values of the traced Flock-after-the-PIOP run that the `tab:ablation` note quotes, in ms.
+
+    `flock` is the Flock proofs alone on all threads (median run), `chain` the prover's
+    parity chain (its trace stamp is cumulative and includes the chain input), `matrices` the verifier's bridge matrices and
+    `vchain` the verifier's parity chain; the verifier bridge is `matrices + vchain`.
+    """
+    flock, chain, matrices, vchain = [], [], [], []
+    warmup = int(cell.get("warmup") or 0) if cell else 0
+    for text in cell_logs(cell, directory):
+        flock += trace_values(text, r"median run: Flock parts ([\d.]+) ms")
+        parity = timed_values(trace_values(text, r"^\s*\[tied\] parity chain\s+([\d.]+) ms"), warmup)
+        chain += parity
+        matrices += trace_values(text, r"^\s*matrices\s+bridge matrices from sd\s+([\d.]+) ms")
+        vchain += trace_values(text, r"^\s*\[tied\] verify: parity chain\s+([\d.]+) ms")
+    result = {}
+    for key, values in (("flock", flock), ("chain", chain), ("matrices", matrices), ("vchain", vchain)):
+        if values:
+            result[key] = median(values)
+    return result
+
+
+# Verifier steps that the paper quotes per set.
+VERIFY_STEPS = ("public_data", "public_t", "keccak", "matrices", "public_a")
+
+
+def verifier_steps(cell, directory):
+    """Step times (ms) of the last uncached and the last cached verifier run of a traced cell."""
+    steps = {}
+    for text in cell_logs(cell, directory):
+        for block, label in (("uncached", "last uncached verifier run:"), ("cached", "last cached verifier run:")):
+            start = text.rfind(label)
+            if start < 0:
+                continue
+            end = text.find("total", start)
+            body = text[start : end if end > 0 else len(text)]
+            for key in VERIFY_STEPS:
+                match = re.search(rf"^\s*{key}\s+.*?([\d.]+) ms\s*$", body, re.MULTILINE)
+                if match:
+                    steps[(block, key)] = float(match.group(1))
+    return steps
+
+
 def ablation_table(cells, directory, commit, machine, skipped):
-    """Generate `tab-ablation.tex` (`\\label{tab:ablation}`): GF(2)-side and control ablations."""
+    """Generate `tab-ablation.tex` (`\\label{tab:ablation}`): the GF(2)-side ablation.
+
+    The rows are those of the paper on the AVX2 tier when the results have it: the
+    untraced full aggregate, Flock after the PIOP (`AGG_FLOCK_THREADS=0`) and the
+    mode-B public-bits aggregate. The traced run feeds the note only.
+    """
     ours_44 = [c for c in cells if c.get("system") == "ours" and cell_params(c) == "44"]
     mode_b = [c for c in cells if c.get("system") == "mode_b" and cell_params(c) == "44"]
     if not ours_44 and not mode_b:
         return "% no ablation data\n"
     all_44 = ours_44 + mode_b
-    n = max(c["n"] for c in all_44)
+    # The batch size of the ablation and mode-B runs, not of the largest scaling cell.
+    arm_cells = [c for c in all_44 if c.get("arm") or c.get("system") == "mode_b"]
+    n = max(c["n"] for c in (arm_cells or all_44))
     at_n = [c for c in all_44 if c["n"] == n]
     alloc = preferred_allocation(at_n)
-    tier = preferred_tier(at_n)
+    # The paper reports the ablation on the AVX2 tier, as tab:scaling.
+    tier = "avx2" if any(c.get("config") == "avx2" for c in at_n) else preferred_tier(at_n)
 
-    # 1. Full aggregate (untraced default): prefer ablation defaults arm, then headline.
+    # 1. Full aggregate: the untraced headline cell, else the ablation defaults arm.
     abl_defaults = [
         c
         for c in ours_44
@@ -406,13 +483,9 @@ def ablation_table(cells, directory, commit, machine, skipped):
         and c.get("arm") == "defaults"
         and c.get("times_ms")
     ]
-    full_cell = (
-        abl_defaults[0]
-        if abl_defaults
-        else pick_ours_cell(
-            ours_44, params="44", config=tier, allocation=alloc, n=n, relation=DEFAULT_RELATION, prefer_tag="headline"
-        )
-    )
+    full_cell = pick_ours_cell(
+        ours_44, params="44", config=tier, allocation=alloc, n=n, relation=DEFAULT_RELATION, prefer_tag="headline"
+    ) or (abl_defaults[0] if abl_defaults else None)
 
     # 2. Traced default and traced Flock-after-the-PIOP (`timeline`).
     traced_defaults = [
@@ -445,7 +518,9 @@ def ablation_table(cells, directory, commit, machine, skipped):
         and c.get("arm") == "flock-serial"
         and c.get("times_ms")
     ]
-    serial_cell = traced_serial[0] if traced_serial else (untraced_serial[0] if untraced_serial else None)
+    # The untraced arm gives the row; a traced run stands in only when it is all there is.
+    serial_cell = untraced_serial[0] if untraced_serial else (traced_serial[0] if traced_serial else None)
+    serial_is_traced = not untraced_serial and bool(traced_serial)
 
     # 3. Public bits (mode B).
     mode_b_matches = [
@@ -457,40 +532,34 @@ def ablation_table(cells, directory, commit, machine, skipped):
         mode_b_matches = [c for c in mode_b if c["n"] == n and c.get("times_ms")]
     mode_b_cell = mode_b_matches[0] if mode_b_matches else None
 
-    # Additional control ablation arms (untraced).
-    extra_arms = []
-    for arm_key, arm_label in ABLATION_LABELS.items():
-        if arm_key == "flock-serial" and not traced_serial:
-            continue
-        matches = [
-            c
-            for c in ours_44
-            if c["n"] == n
-            and c.get("config") == tier
-            and c.get("allocation") == alloc
-            and not c.get("traced")
-            and c.get("arm") == arm_key
-            and c.get("times_ms")
-        ]
-        if matches:
-            extra_arms.append((arm_label, matches[0]))
+    # Note: the traced Flock-after-the-PIOP run, as in the paper.
+    trace = serial_trace(traced_serial[0], directory) if traced_serial else {}
+    parts = []
+    if "flock" in trace:
+        part = f"Traced $\\GFt$ side alone: {fmt_seconds(trace['flock'])}\\,s"
+        if "chain" in trace:
+            part += f" (parity chain {fmt_ms(trace['chain'])}\\,ms)"
+        parts.append(part)
+    if "matrices" in trace and "vchain" in trace:
+        parts.append(
+            f"verifier bridge: {fmt_ms(trace['matrices'] + trace['vchain'])}\\,ms "
+            f"(matrices {trace['matrices']:.1f}\\,ms)"
+        )
+    note = [f"$N={fmt_n_tex(n)}$, {LABEL[tier]}, {alloc}, uncached keys."]
+    if parts:
+        note.append("; ".join(parts) + ".")
+    if serial_is_traced:
+        note.append("Flock after the PIOP: traced run.")
+    if traced_defaults and not parts:
+        note.append(f"Full aggregate traced: {fmt_seconds(median(traced_defaults[0]['times_ms']))}\\,s.")
 
-    traced_note = "Flock after the PIOP: traced run"
-    if traced_defaults:
-        traced_s = fmt_seconds(median(traced_defaults[0]["times_ms"]))
-        traced_note += f" (full aggregate traced: {traced_s}\\,s)"
-    traced_note += "."
-
-    extra_hlines = [5] if extra_arms else None
     out = header(directory, commit, machine)
     out += table_begin(
         "tab:ablation",
         "Ablation of the $\\GFt$ side for ML-DSA-44.",
-        f"$N={fmt_n_tex(n)}$, {LABEL[tier]}, {alloc}, one job, uncached keys. "
-        f"{traced_note} Public bits: with the public instance.",
+        " ".join(note),
         "X[l] Q[r] Q[r] Q[r]",
         header_rows=1,
-        extra_hlines=extra_hlines,
         colsep="6pt",
     )
     out += "Variant & Prove (s) & Verify (ms) & B/sig \\\\\n"
@@ -525,13 +594,49 @@ def ablation_table(cells, directory, commit, machine, skipped):
     else:
         out += "public bits & -- & -- & -- \\\\\n"
 
-    for arm_label, cell in extra_arms:
+    out += "\\end{talltblr}\n\\end{table}\n"
+    return out
+
+
+def ablation_controls_table(cells, directory, commit, machine):
+    """Generate `tab-ablation-controls.tex`: the control arms of the ablation group (not in the paper)."""
+    arms = [
+        c
+        for c in cells
+        if c.get("system") == "ours"
+        and cell_params(c) == "44"
+        and c.get("arm")
+        and not c.get("traced")
+        and c.get("times_ms")
+    ]
+    if not arms:
+        return "% no control ablation data\n"
+    n = max(c["n"] for c in arms)
+    at_n = [c for c in arms if c["n"] == n]
+    alloc = preferred_allocation(at_n)
+    tier = "avx2" if any(c.get("config") == "avx2" for c in at_n) else preferred_tier(at_n)
+    chosen = [c for c in at_n if c.get("config") == tier and c.get("allocation") == alloc]
+    by_arm = {c["arm"]: c for c in chosen}
+    out = header(directory, commit, machine)
+    out += table_begin(
+        "tab:ablation-controls",
+        "Control ablations for ML-DSA-44.",
+        f"$N={fmt_n_tex(n)}$, {LABEL[tier]}, {alloc}, uncached keys, untraced.",
+        "X[l] Q[r] Q[r] Q[r]",
+        header_rows=1,
+        colsep="6pt",
+    )
+    out += "Variant & Prove (s) & Verify (ms) & B/sig \\\\\n"
+    labels = {"defaults": "defaults", **ABLATION_LABELS}
+    for arm_key, arm_label in labels.items():
+        cell = by_arm.get(arm_key)
+        if not cell:
+            continue
         ver = fmt_ms(median(cell["verify_uncached_ms"])) if cell.get("verify_uncached_ms") else "--"
         out += (
             f"{arm_label} & {fmt_seconds(median(cell['times_ms']))} & "
             f"{ver} & {fmt_bytes_per_sig(cell)} \\\\\n"
         )
-
     out += "\\end{talltblr}\n\\end{table}\n"
     return out
 
@@ -653,8 +758,10 @@ def bytes_table(cells, directory, commit, machine):
     ]
     if not standard:
         return "% no byte data\n"
-    n = max(c["n"] for c in standard)
     sets = [p for p in PARAM_SETS if any(cell_params(c) == p for c in standard)] or list(PARAM_SETS)
+    # The largest N that every set has, so that the caption holds for each column.
+    common = set.intersection(*({c["n"] for c in standard if cell_params(c) == p} for p in sets))
+    n = max(common) if common else max(c["n"] for c in standard)
     chosen = {}
     breakdowns = {}
     for params in sets:
@@ -806,8 +913,14 @@ def baselines_table(cells, directory, commit, machine, skipped, alloul=()):
     if not standard and not aerie and not native and not alloul:
         return "% no baseline data\n"
 
+    # Compare at the largest N that has a baseline cell, so that a run whose own
+    # cells go further (quick: ML-DSA-44 at 4K, baselines at 1K) still fills the rows.
+    baseline_sizes = [c["n"] for c in aerie + native] + [int(r["N"]) for r in alloul]
     all_cells = standard + aerie + native
-    n = max(c["n"] for c in all_cells) if all_cells else max(int(r["N"]) for r in alloul)
+    if baseline_sizes:
+        n = max(baseline_sizes)
+    else:
+        n = max(c["n"] for c in all_cells)
     sets = [p for p in PARAM_SETS if any(cell_params(c) == p for c in standard)] or list(PARAM_SETS)
     prove_allocs = ["16C32T", "8C16T", "1T"]
     verify_allocs = ["16C32T", "8C16T", "1T"]
@@ -1083,12 +1196,46 @@ def numbers(cells, directory, commit, machine):
     if mode_b:
         mb_n = max(c["n"] for c in mode_b)
         mb_cells = [c for c in mode_b if c["n"] == mb_n]
-        mb_cell = next((c for c in mb_cells if c.get("config") == "ifma"), mb_cells[0])
+        # The AVX2 tier, as in tab:ablation.
+        mb_cell = next((c for c in mb_cells if c.get("config") == "avx2"), mb_cells[0])
         values["ProveModeB"] = fmt_seconds(median(mb_cell["times_ms"]))
         if mb_cell.get("verify_uncached_ms"):
             values["VerifyModeBUncached"] = fmt_ms(median(mb_cell["verify_uncached_ms"]))
         if mb_cell.get("aggregate_bytes"):
             values["BytesPerSigModeB"] = fmt_bytes_per_sig(mb_cell)
+
+    # Traced runs: the tab:ablation note and the per-set verifier steps. AVX2 when present.
+    traced = [c for c in cells if c.get("system") == "ours" and c.get("traced") and c.get("times_ms")]
+    if traced:
+        tr_n = max(c["n"] for c in traced)
+        tr_cells = [c for c in traced if c["n"] == tr_n]
+        tr_alloc = preferred_allocation(tr_cells)
+        tr_tier = "avx2" if any(c.get("config") == "avx2" for c in tr_cells) else preferred_tier(tr_cells)
+        tr_cells = [c for c in tr_cells if c.get("config") == tr_tier and c.get("allocation") == tr_alloc]
+        serial = next((c for c in tr_cells if cell_params(c) == "44" and c.get("arm") == "flock-serial"), None)
+        trace = serial_trace(serial, directory) if serial else {}
+        if "flock" in trace:
+            values["TraceFlockAlone"] = fmt_seconds(trace["flock"])
+        if "chain" in trace:
+            values["TraceParityChain"] = fmt_ms(trace["chain"])
+        if "matrices" in trace and "vchain" in trace:
+            values["TraceVerifyMatrices"] = f"{trace['matrices']:.1f}"
+            values["TraceVerifyBridge"] = fmt_ms(trace["matrices"] + trace["vchain"])
+        for params, set_suffix in SET_MACRO.items():
+            cell = next(
+                (c for c in tr_cells if cell_params(c) == params and c.get("arm") in (None, "defaults")),
+                None,
+            )
+            steps = verifier_steps(cell, directory) if cell else {}
+            if ("uncached", "keccak") in steps:
+                values[f"TraceVerifyFlock{set_suffix}"] = fmt_ms(steps[("uncached", "keccak")])
+            if ("uncached", "public_data") in steps and ("uncached", "public_t") in steps:
+                keys = steps[("uncached", "public_data")] + steps[("uncached", "public_t")]
+                values[f"TraceVerifyKeys{set_suffix}"] = fmt_ms(keys)
+            if ("uncached", "public_a") in steps:
+                values[f"TraceVerifyExpandA{set_suffix}"] = fmt_ms(steps[("uncached", "public_a")])
+            if ("cached", "public_a") in steps:
+                values[f"TraceVerifyExpandACached{set_suffix}"] = fmt_ms(steps[("cached", "public_a")])
 
     for name, value in values.items():
         if value:
@@ -1153,6 +1300,7 @@ def main():
     machine = next((c.get("machine") for c in cells if c.get("machine")), "unknown")
     outputs = {
         "tab-ablation.tex": ablation_table(cells, directory, commit, machine, skipped),
+        "tab-ablation-controls.tex": ablation_controls_table(cells, directory, commit, machine),
         "tab-scaling.tex": scaling_table(cells, directory, commit, machine, skipped),
         "tab-bytes.tex": bytes_table(cells, directory, commit, machine),
         "tab-baselines.tex": baselines_table(cells, directory, commit, machine, skipped, alloul),

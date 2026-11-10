@@ -292,9 +292,9 @@ pub fn from_bytes(bytes: &[u8]) -> Result<KeyStore, CacheError> {
 /// # Errors
 /// On an unreadable or malformed file, or a file of another set.
 pub fn load(path: &Path, set: Set) -> Result<KeyStore, Box<dyn std::error::Error>> {
-    match std::fs::read(path) {
+    match crate::read_input(path, None) {
         Ok(bytes) => {
-            let store = from_bytes(&bytes)?;
+            let store = from_bytes(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
             if store.set() != set {
                 return Err(CacheError::Set {
                     expected: set,

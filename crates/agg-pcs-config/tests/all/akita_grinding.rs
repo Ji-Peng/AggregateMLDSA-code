@@ -96,9 +96,9 @@ fn akita_plans_of_the_h_exact_rows_are_pinned() {
 }
 
 /// The Akita plans of the 13 H-FIPS grouped rows (`mldsa-44-p16f-batch-<N*>-mult-final`,
-/// `G_main4` at 12 polynomials and `G_2` at 13), printed for the
-/// record: every row stays within Akita's transition cap with 7 bits of nonce slack, and
-/// every digest differs from the H-exact row's of the same size.
+/// `G_main4` at 12 polynomials and `G_2` at 13): every row stays within Akita's transition
+/// cap with 7 bits of nonce slack, every digest differs from the H-exact row's of the same
+/// size, and the summaries and digests are pinned.
 #[test]
 fn akita_plans_of_the_h_fips_rows_are_well_formed() {
     assert_eq!(
@@ -106,41 +106,100 @@ fn akita_plans_of_the_h_fips_rows_are_well_formed() {
         (3..=15).collect::<Vec<_>>().as_slice()
     );
     let mut digests = Vec::new();
+    let mut summaries = Vec::new();
     for d_sig in 3..=15 {
         let plan = row_plan(d_sig, Relation::HFips);
         let digest = hex(&plan.digest().expect("digest"));
-        eprintln!("H-FIPS d_sig {d_sig:>2}: {:?} digest {digest}", summary(&plan));
+        let got = summary(&plan);
+        eprintln!("H-FIPS d_sig {d_sig:>2}: {got:?} digest {digest}");
         assert!(plan.runs().iter().all(|r| r.grind_bits() <= 25
             && (r.grind_bits() == 0 || r.nonce_bits() == r.grind_bits() + 7)));
         assert_ne!(digest, PINNED_H_EXACT[d_sig - 3], "H-FIPS and H-exact rows differ");
+        summaries.push(got);
         digests.push(digest);
     }
+    assert_eq!(summaries, H_FIPS_TABLE);
     assert_eq!(PINNED_H_FIPS, digests.iter().map(String::as_str).collect::<Vec<_>>().as_slice());
 }
 
 /// The Akita plans of the 26 ML-DSA-65 and ML-DSA-87 H-FIPS grouped rows
 /// (`mldsa-<set>-p16f-batch-<N*>-mult-final`): well-formed with 7 bits of nonce slack, distinct
-/// from the H-exact rows of the same set, and pinned digests.
+/// from the H-exact rows of the same set, and pinned summaries and digests.
 #[test]
 fn akita_plans_of_the_lane_h_fips_rows_are_pinned() {
     let lanes = [
-        (Set::S65, PINNED_S65, PINNED_S65_H_FIPS),
-        (Set::S87, PINNED_S87, PINNED_S87_H_FIPS),
+        (Set::S65, PINNED_S65, PINNED_S65_H_FIPS, &S65_H_FIPS_TABLE),
+        (Set::S87, PINNED_S87, PINNED_S87_H_FIPS, &S87_H_FIPS_TABLE),
     ];
-    for (set, pinned_exact, pinned_fips) in lanes {
+    for (set, pinned_exact, pinned_fips, table) in lanes {
         let mut digests = Vec::new();
+        let mut summaries = Vec::new();
         for d_sig in 3..=15 {
             let plan = row_plan_for_set(set, d_sig, Relation::HFips);
             let digest = hex(&plan.digest().expect("digest"));
-            eprintln!("{set:?} H-FIPS d_sig {d_sig:>2}: {:?} digest {digest}", summary(&plan));
+            let got = summary(&plan);
+            eprintln!("{set:?} H-FIPS d_sig {d_sig:>2}: {got:?} digest {digest}");
             assert!(plan.runs().iter().all(|r| r.grind_bits() <= 25
                 && (r.grind_bits() == 0 || r.nonce_bits() == r.grind_bits() + 7)));
             assert_ne!(digest, pinned_exact[d_sig - 3], "{set:?} H-FIPS and H-exact rows differ");
+            summaries.push(got);
             digests.push(digest);
         }
+        assert_eq!(&summaries, table, "{set:?} H-FIPS summaries");
         assert_eq!(pinned_fips, digests.iter().map(String::as_str).collect::<Vec<_>>().as_slice());
     }
 }
+
+/// (PoW sites, sum g, max g, sum 2^g, nonce bits) of the ML-DSA-44 H-FIPS rows, `d_sig` 3 to 15.
+const H_FIPS_TABLE: [(u64, u64, u8, u64, u64); 13] = [
+    (401, 985, 10, 4_400, 3_864),
+    (401, 985, 10, 4_400, 3_864),
+    (401, 985, 10, 4_400, 3_864),
+    (401, 985, 10, 4_400, 3_864),
+    (406, 980, 10, 5_120, 3_894),
+    (388, 966, 10, 5_132, 3_754),
+    (388, 965, 10, 4_620, 3_753),
+    (430, 1_053, 12, 7_868, 4_135),
+    (452, 1_121, 12, 8_304, 4_369),
+    (455, 1_130, 12, 9_856, 4_399),
+    (457, 1_132, 12, 8_076, 4_415),
+    (459, 1_137, 12, 9_872, 4_434),
+    (461, 1_139, 12, 8_092, 4_450),
+];
+
+/// (PoW sites, sum g, max g, sum 2^g, nonce bits) of the ML-DSA-65 H-FIPS rows, `d_sig` 3 to 15.
+const S65_H_FIPS_TABLE: [(u64, u64, u8, u64, u64); 13] = [
+    (388, 967, 10, 5_196, 3_755),
+    (388, 967, 10, 5_196, 3_755),
+    (388, 967, 10, 5_196, 3_755),
+    (388, 967, 10, 5_196, 3_755),
+    (388, 966, 10, 4_684, 3_754),
+    (388, 966, 10, 4_684, 3_754),
+    (430, 1_051, 10, 4_604, 4_133),
+    (430, 1_052, 10, 4_860, 4_134),
+    (452, 1_120, 10, 5_296, 4_368),
+    (455, 1_130, 12, 8_896, 4_399),
+    (457, 1_133, 12, 8_140, 4_416),
+    (461, 1_143, 12, 9_948, 4_454),
+    (461, 1_141, 12, 8_412, 4_452),
+];
+
+/// (PoW sites, sum g, max g, sum 2^g, nonce bits) of the ML-DSA-87 H-FIPS rows, `d_sig` 3 to 15.
+const S87_H_FIPS_TABLE: [(u64, u64, u8, u64, u64); 13] = [
+    (388, 967, 10, 4_812, 3_755),
+    (388, 967, 10, 4_812, 3_755),
+    (388, 967, 10, 4_812, 3_755),
+    (388, 967, 10, 4_812, 3_755),
+    (388, 967, 10, 4_812, 3_755),
+    (388, 967, 10, 4_812, 3_755),
+    (430, 1_052, 10, 4_732, 4_134),
+    (452, 1_121, 10, 5_424, 4_369),
+    (452, 1_122, 12, 8_240, 4_370),
+    (457, 1_135, 12, 8_524, 4_418),
+    (459, 1_139, 12, 10_064, 4_436),
+    (461, 1_144, 12, 10_076, 4_455),
+    (461, 1_141, 12, 8_284, 4_452),
+];
 
 /// The plan digests of the 13 ML-DSA-65 H-FIPS grouped rows at the pinned Akita revision.
 const PINNED_S65_H_FIPS: &[&str] = &[

@@ -43,7 +43,7 @@ binary = "agg"
 label = "AVX2"
 requires = ["pclmulqdq", "avx2"]
 env = { AGG_ISA = "avx2" }
-note = "No AVX-512 instruction; the x86-64-v3 baseline."
+note = "No AVX-512 instruction; the x86-64-v3 baseline, plus 256-bit VPCLMULQDQ and GFNI in Flock where the CPU has them."
 
 [rows.scalar]
 binary = "agg"

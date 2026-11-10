@@ -38,7 +38,8 @@ $agg bench        --params 44 --count 1024 --warmup 1 --reps 5            # timi
 
 `--relation h-fips|h-exact` selects the proven relation. The default `h-fips` makes the
 extracted witness a FIPS 204 signature; `h-exact` proves the FIPS 204 bounds on `z` and `u`
-without the hint, a reference relation that is slightly faster. Running `agg` without arguments lists every
+without the hint, a reference relation that is slightly faster. `sign-batch --msg-len L` fixes
+the message length (default: pseudo-random in `[0, 160)`). Running `agg` without arguments lists every
 option; [`docs/cli.md`](docs/cli.md) describes the tool and the aggregate format.
 
 ## Reproducing the paper
@@ -82,7 +83,7 @@ their reference machine (AMD EPYC 9355, Zen 5).
 | `crates/agg-cli` | the `agg` binary: key generation, signing, aggregation, verification, benchmarks |
 | `crates/agg-simd`, `crates/agg-mldsa-simd` | run-time dispatched AVX-512IFMA, AVX-512F, AVX2 and portable kernels |
 | `crates/agg-bench`, `crates/agg-mldsa-cref` | benchmark harness and C reference harness |
-| `vendor/` | Akita and Flock with prover-side patches ([`PATCH.md`](PATCH.md)) |
+| `vendor/` | Akita (prover-side patches) and Flock (prover and verifier patches) ([`PATCH.md`](PATCH.md)) |
 | `docs/` | specification and proofs |
 | `artifact/` | reproduction package |
 

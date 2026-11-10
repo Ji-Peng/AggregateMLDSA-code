@@ -159,7 +159,7 @@ materializations: `w1_table`, `compose_table`, `u_table`, `residual_table` (diag
 
 Every stage is one batched ordinary sum-check of `d_main` rounds (Aerie 10.3): a round
 message is the degree-`d` round polynomial without its linear coefficient (`d` elements;
-`d = 4, 5, 3`), recovered by the verifier from `g(0) + g(1) = claim`. Instances on a smaller
+`d = 3, 5, 3`), recovered by the verifier from `g(0) + g(1) = claim`. Instances on a smaller
 domain `D_t` (always a suffix of the main variables, spec 7.1) are inactive in the
 leading `d_main - d_t` rounds, where their message is the constant `claim / 2`, and are
 lifted by `2^-(d_main - d_t)` at the terminal.
@@ -487,7 +487,7 @@ Grinding (`docs/soundness.md` Section 6): every protected event carries a diffic
 from Aerie's assigned bounds (`Registry::work_sites`: the byte site `proj.psi` 1 (K24),
 `X` 0, a merge 1, a GKR batching
 vector `bit_length(2 active)`, a GKR round 2, `tau` `bit_length(d_main)`, the stage batching
-vectors 5, 4, 6 in every relation, the stage rounds 3, 3, 2). With `g > 0` the
+vectors 5, 4, 6 in every relation, the stage rounds 2, 3, 2). With `g > 0` the
 transcript absorbs `LE32(nonce)` (`nonce < 2^(g + 7)`), squeezes a 32-byte predicate whose
 low `g` bits must be zero and then the challenge; the prover searches the smallest passing
 nonce and packs it into the work stream (`Transcript::new`, `work_stream`), the verifier reads
@@ -505,16 +505,16 @@ export carry no work. The plan (`pow::PowPlan`: the Keccak side's tied-part site
 (`LE32` length); event 2: `LE32 S` then `S` framed items; event 4: five framed items; event
 6: `512 S` bytes then `S` framed share items (deviation K22); the lookup (layer-1 values,
 then per session the rounds, the terminals and the leaves) and the 7 digit claims; events 9
-to 12 as raw atom encodings of 16 bytes per element (13 pre-stage claims; `4 d_main` stage-1
-round elements and 18 claims; 6 `kappa1` claims, `5 d_main` round elements and 10 claims;
-the shared claim `c`; `3 d_main` round elements and 35 claims); the join: `S` framed Flock
-proof items (K22); the packed PIOP work nonces (`transcript::work_bytes(manifest)` bytes, 228
-at `N* = 8` to 526 at
+to 12 as raw atom encodings of 16 bytes per element (13 pre-stage claims; `3 d_main` stage-1
+round elements and 12 claims; 6 `kappa1` claims, `5 d_main` round elements and 9 claims (10 under H-FIPS);
+the shared claim `c`; `3 d_main` round elements and 36 claims (40 under H-FIPS)); the join: `S` framed Flock
+proof items (K22); the packed PIOP work nonces (`transcript::work_bytes(manifest)` bytes, 226
+at `N* = 8` to 523 at
 `2^15`); the opening framed; no trailing bytes. `from_bytes` derives every count from `N` and
 the relation byte and rejects non-canonical limbs. PIOP bytes (events 9 to 12):
-`16 (83 + 12 d_main)` under H-exact (9 + 36 stage-2 and stage-3 claims,
-plus one element for `c`; also under the removed H-u, 10 + 35), `16 (88 + 12 d_main)` under
-H-FIPS; 6,128 B at `N = 2^15` under H-exact (6,208 B under H-FIPS). `AggregateProof::size()`
+`16 (77 + 11 d_main)` under H-exact (9 + 36 stage-2 and stage-3 claims,
+plus one element for `c`; also under the removed H-u, 10 + 35), `16 (82 + 11 d_main)` under
+H-FIPS; 5,632 B at `N = 2^15` under H-exact (5,712 B under H-FIPS). `AggregateProof::size()`
 (`ProofSize`) splits the serialized length into header, `c~`, Akita commitments, Keccak-side
 items (event 2), final vectors, Keccak-side shares and proofs (event 6 and the join), lookup,
 PIOP, work nonces and opening, framing included.
@@ -753,10 +753,11 @@ hold `(23, 46, 4, 8, 8, 5, 7)` polynomials for 65 and `(31, 62, 4, 8, 8, 5, 7)` 
 H-exact (as under the removed H-u); the lookup has seven stacks for 65 and eight for 87. Event 0 binds the set byte (`0x65`,
 `0x87`) and the catalog row `mldsa-<set>-p16{,x,f}-batch-<N*>-mult-final`; the proof header
 carries the set in the high nibble of its flags byte (`wire::set_nibble`). Stage batching
-vectors under H-exact: `(37, 18, 105)` for 65 and `(45, 22, 132)` for 87, stage degrees
-`(3, 5, 3)` (stage 1 has no six-bit range identity), gamma difficulties `(6, 5, 7)` and
-`(6, 5, 8)` (`pow.rs` test `ml_dsa_65_and_87_plans_reproduce_the_script`); H-exact has the
-counts of the removed H-u, H-FIPS has 136 and 173 stage-3 coefficients (`docs/h-exact.md` 11.2). A batch
+vectors under H-exact: `(13, 18, 105)` for 65 and `(13, 22, 132)` for 87, stage degrees
+`(3, 5, 3)` (stage 1 has no six-bit range identity), gamma difficulties `(4, 5, 7)` and
+`(4, 5, 8)` (`pow.rs` test `ml_dsa_65_and_87_plans_reproduce_the_script`); H-exact has the
+counts of the removed H-u, H-FIPS has 136 and 173 stage-3 coefficients, that is `(13, 18, 136)` and `(13, 22, 173)` with
+difficulties `(4, 5, 8)` for both sets (`docs/h-exact.md` 11.2). A batch
 holds 17 to `2^15` records (`prover::LANE_MIN_RECORDS`: the stages read the 13-variable
 level-1 and level-2 bridge domains as suffixes of the main domain, so `N* >= 32`); the
 parser refuses a header of these sets with `N < 17` (`WireError::Records`), and

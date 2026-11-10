@@ -103,17 +103,20 @@ over tampered round-1 bits).
 | --- | --- |
 | keys | `"AGGKEYS1" \|\| count LE32 \|\| (seed[32] \|\| LE32 len \|\| pk)*` (test keys: holds the `KeyGen` seeds) |
 | records | `"AGGRECS1" \|\| count LE32 \|\| (LE32 len \|\| pk, LE32 len \|\| M, LE32 len \|\| signature)*` |
-| aggregate | the wire bytes of `agg_piop::wire` (mode-A items of `agg_cli::wire`) |
+| aggregate | the wire bytes of `agg_piop::wire` (mode-A items of `agg_cli::wire`); `agg verify` refuses a file above 64 MiB (`MAX_AGGREGATE_BYTES`) with exit 2 |
 | key cache | `"AGGKCACH" \|\| 2 \|\| set id (0x44, 0x65, 0x87) \|\| count LE32 \|\| (SHA3-256(pk) \|\| pk \|\| tr \|\| A[k][l][256] as LE32)*`; on load an entry must have the hash `SHA3-256(pk)`, a decodable `pk`, `tr = H(pk, 64)` and every word of `A` in `[-(q-1)/2, (q-1)/2]` (else `CacheError::Entry`); `A` is not re-derived from `rho`, so the file is trusted local state; version 1 files (no set byte) hold ML-DSA-44 keys and still load |
 
 ```sh
 A=target/release/agg
 taskset -c 0,1,3-15 $A keygen-batch [--params 44|65|87] --count 16 --seed 1 --out keys.bin
-taskset -c 0,1,3-15 $A sign-batch [--params 44|65|87] --keys keys.bin --count 256 --seed 1 --out records.bin
+taskset -c 0,1,3-15 $A sign-batch [--params 44|65|87] --keys keys.bin --count 256 --seed 1 [--msg-len L] --out records.bin
 taskset -c 0,1,3-15 $A aggregate [--params 44|65|87] --records records.bin --out aggregate.bin [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-fips|h-exact]
 taskset -c 0,1,3-15 $A verify [--params 44|65|87] --records records.bin --aggregate aggregate.bin [--cache keys.cache] [--flock-profile fast|slim|slim8] [--relation h-fips|h-exact]
 AGG_GIT_REV=$(git rev-parse HEAD) taskset -c 0,1,3-15 $A bench [--params 44|65|87] --count 256 [--keys K] [--seed S] [--warmup 1] [--reps 5] [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-fips|h-exact] [--json PATH]
 ```
+
+`sign-batch --msg-len L` gives every message length `L`; by default each length is
+pseudo-random in `[0, 160)`, derived from the seed.
 
 Environment knobs (all optional; none changes the proof bytes):
 
@@ -138,6 +141,9 @@ Environment knobs (all optional; none changes the proof bytes):
 | `AGG_SIMD` | `portable`: turn the `agg-simd` field kernels off (A/B switch; the layout default becomes `row`); `avx512`: name the IFMA backend (requires IFMA hardware, runs at the `AGG_ISA` cap) |
 | `AGG_ISA` | `avx512ifma`, `avx512`, `avx2` or `scalar`: cap every run-time SIMD detector (`agg-simd`, Flock, Akita, ML-DSA kernels); unset detects (README "SIMD policy") |
 | `AGG_SIMD_REPORT` | `1`: print, before the command, the level each crate selected |
+| `AERIE_SIMD_BACKEND` | Aerie's own kernel level (`scalar`, `avx2`, `avx512`; can only lower it); `agg` sets it from `AGG_ISA` unless it is already set, so an explicit value overrides that mapping |
+| `AGG_TAIL_HIGH` | `0` or `off`: keep summands above degree two on the row-major dense rounds instead of the plane tail (A/B switch, same messages; `docs/piop.md` Section 6) |
+| `AGG_TAIL_MAX_LANES`, `AGG_TAIL_MAX_SLOTS` | lower the lane and slot caps of the plane tail; a group over a cap runs the row-major dense rounds (A/B switch, same messages; `docs/piop.md` Section 6) |
 
 The opening is split at the transcript session: `AGG_OPENING_THREADS` sizes only the
 transcript-bound finish, while the prepare part (registry, commitment admission,
@@ -254,22 +260,28 @@ CPU 2 after `crypto_bench off`; the numbers below are not benchmarks.
   aggregate; every variant is rejected without a panic. The span path above one segment
   (8,193 records of ML-DSA-44 and 65: one tied part, accepted; a flipped proof byte
   rejected) is `#[ignore]` and runs with `--ignored span_path` on the benchmark machine;
-- the SIMD tiers (`simd_backends.rs`, `docs/engineering.md` Section 9) and the `AGG_ISA` cap
+- the ML-DSA kernel backends and thread counts (`simd_backends.rs`, `docs/engineering.md` Section 9;
+  the cross-tier `AGG_ISA` gate is the artifact's `./run.sh gates`) and the `AGG_ISA` cap
   of every kernel family (`isa_cap.rs`, through `AGG_SIMD_REPORT=1`).
 
 ## 4. Local measurements
 
+Dated records, not current numbers: the shipped defaults are H-FIPS, `Fast` and the
+`.cargo/config.toml` baseline (x86-64-v3 + PCLMULQDQ), and `artifact/expected/hashes.json` pins
+the current 1K aggregate of every set and relation.
+
 Relation sanity runs (ML-DSA-44, revision `f526097`, CLMUL build `RUSTFLAGS="-C
-target-feature=+pclmulqdq"`, `agg bench --count 1024 --warmup 1 --reps 1 --flock-profile slim`,
+target-feature=+pclmulqdq"` as used then, `agg bench --count 1024 --warmup 1 --reps 1 --flock-profile slim`,
 span on, CPUs 0,1,3-15 with `RAYON_NUM_THREADS=3` while a catalog generation ran with 3
 workers: single noisy runs, not benchmarks):
 
 | Relation | Aggregate | PIOP rounds and claims | Work nonces | Akita opening | Prove | Stage 2 / stage 3 | Verify uncached / cached |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| H-u (removed) | 522,138 B (509.9 B/sig) | 4,736 B | 391 B | 60,994 B | 2,901 ms | 67.5 / 181.1 ms | 352 / 296 ms |
 | H-exact | 522,154 B (509.9 B/sig) | 4,736 B | 391 B | 61,010 B | 2,981 ms | 60.9 / 198.0 ms | 316 / 290 ms |
 
-Every other part is equal (lookup 21,344 B, Flock proofs 398,518 B). The PIOP bytes agree
+The removed relation H-u measured 522,138 B (509.9 B/sig), PIOP 4,736 B, nonces 391 B,
+opening 60,994 B, prove 2,901 ms, stages 67.5 / 181.1 ms and verify 352 / 296 ms in the same run;
+every other part was equal (lookup 21,344 B, Flock proofs 398,518 B). The PIOP bytes agree
 with `16 (81 + 11 d_main)` at `d_main = 20` for both relations (9 + 1 + 34 claims).
 
 ML-DSA-65 and ML-DSA-87 at 1K (revision `1c5516d`, all 16 CPUs of the WSL box with turbo

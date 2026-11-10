@@ -45,6 +45,8 @@ if [[ ! -d $source_dir/.git ]]; then
 fi
 [[ $(git -C "$source_dir" rev-parse HEAD) == "${pin[2]}" && $(git -C "$source_dir" rev-parse "${pin[1]}^{}") == "${pin[2]}" ]] || { echo 'Geode commit does not match sources.lock' >&2; exit 1; }
 [[ -z $(git -C "$source_dir" status --porcelain --untracked-files=no) ]] || { echo 'Geode source has local modifications' >&2; exit 1; }
+# Geode pins Rust 1.96.0 (sources.lock); install it when rustup lacks it.
+rustup which --toolchain 1.96.0 cargo >/dev/null 2>&1 || rustup toolchain install --profile minimal 1.96.0 >&2
 export RUSTUP_TOOLCHAIN=1.96.0
 export CARGO_TARGET_DIR="$here/build/geode-target-$isa"
 export RUSTFLAGS="-C target-cpu=$cpu"

@@ -8,7 +8,8 @@
 //! data from `(pk, M, c~)` only. The full mode-A driver (`Aggregator`, `AggregateVerifier`:
 //! the Akita opening and the wire format) runs at the end, with tampered witnesses and
 //! aggregates. Relation H-FIPS also runs on the synthetic records of hint weight exactly omega
-//! (`agg_witness::gen::hint_corner_record_for`). Run with `--release`.
+//! (`agg_witness::gen::hint_corner_record_for`) for all three sets, ML-DSA-44 included. Run
+//! with `--release`.
 
 use agg_bridge::seed::derive_matrices_for;
 use agg_bridge::Shape;
@@ -31,7 +32,7 @@ use agg_piop::verifier::{verify_piop_lanes, VerifyTimings};
 use agg_piop::wire::pack_final_vector;
 use agg_witness::instance::PublicInstance;
 use agg_witness::padding::Geometry;
-use agg_witness::params::{ParamSet, Set65, Set87};
+use agg_witness::params::{ParamSet, Set44, Set65, Set87};
 
 /// What the transcript prefix hands to the provers: `sd`, `Psi`, and after the final-vector
 /// step the transcript itself and the part's Flock seed.
@@ -330,7 +331,7 @@ fn ml_dsa_87_full_driver_with_the_opening() {
 }
 
 /// Mode A under relation H-FIPS on 15 honest records and the weight-omega records of seeds 1 and
-/// 2 (17 records, the smallest lane batch). Each corner record has the coefficient
+/// 2 (17 records, the smallest lane batch of ML-DSA-65 and -87). Each corner record has the coefficient
 /// `w' = q - gamma2, h = 0` and the `e = -1` wrap to `w1' = m - 1 = 15`. The integer checker
 /// accepts their H-FIPS witnesses, extraction returns the signatures byte for byte, the
 /// aggregate verifies, and a hint slack moved off zero is rejected by the weight identity.
@@ -386,6 +387,12 @@ fn h_fips_corner_records<P: ParamSet>(seed: u64) {
         matches!(report.report.outcome, Err(VerifyError::Stage(StageError::Terminal(3)))),
         "u_h = 1: {report}"
     );
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "Flock and Akita proofs; run with --release")]
+fn ml_dsa_44_h_fips_weight_omega_records_in_mode_a() {
+    on_large_stack(|| h_fips_corner_records::<Set44>(0x44f));
 }
 
 #[test]

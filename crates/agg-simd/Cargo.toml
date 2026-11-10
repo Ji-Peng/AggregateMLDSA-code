@@ -1,5 +1,6 @@
 [package]
 name = "agg-simd"
+description = "Runtime-dispatched arithmetic for the fixed Solinas field and its quadratic extension."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,3 +10,7 @@ publish.workspace = true
 [dependencies]
 jolt-field.workspace = true
 rayon.workspace = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
