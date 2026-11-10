@@ -32,7 +32,7 @@ fn inputs(records: &[Record]) -> Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> {
 }
 
 /// Every field and reference form of `key` against the reference expansion of `pk`.
-fn assert_key_matches_legacy(key: &ExpandedKey, pk: &[u8]) {
+fn assert_key_matches_reference(key: &ExpandedKey, pk: &[u8]) {
     let decoded = pk_decode(pk).expect("decodes");
     let (a_hat, blocks) = expand_a(&decoded.rho);
     let fips = NttPrime::fips();
@@ -57,7 +57,7 @@ fn assert_key_matches_legacy(key: &ExpandedKey, pk: &[u8]) {
 }
 
 #[test]
-fn expanded_keys_match_the_legacy_expansion() {
+fn expanded_keys_match_the_reference_expansion() {
     // 56 own keys, 8 keys sharing the matrix seed of key 0 (and of each other), one key of
     // the wrong length in the middle of a tile.
     let mut pks: Vec<Vec<u8>> = (0..56u64)
@@ -77,13 +77,13 @@ fn expanded_keys_match_the_legacy_expansion() {
                 None => assert_eq!(i, 13, "{:?}: only the short key fails", engine.backend()),
                 Some(key) => {
                     assert_eq!(key.prepared.backend, engine.backend());
-                    assert_key_matches_legacy(key, pk);
+                    assert_key_matches_reference(key, pk);
                 }
             }
         }
     }
     let one = ExpandedKey::from_bytes(views[0]).unwrap();
-    assert_key_matches_legacy(&one, views[0]);
+    assert_key_matches_reference(&one, views[0]);
     assert!(ExpandedKey::from_bytes(views[13]).is_none());
     // A 1,312-byte key lives in about 53 KiB (A, its two NTT-domain copies, t1, pk).
     let bytes = std::mem::size_of::<ExpandedKey>() + 3 * K * L * N * 4 + one.pk.capacity();
@@ -110,7 +110,7 @@ fn assert_instance_matches_reference(engine: &Engine, records: &[Record]) {
         let first = records.iter().position(|r| r.pk == records[i].pk).unwrap();
         assert!(std::sync::Arc::ptr_eq(&p.key, &inst.records[first].key));
     }
-    assert_key_matches_legacy(&inst.records[0].key, &records[0].pk);
+    assert_key_matches_reference(&inst.records[0].key, &records[0].pk);
 }
 
 #[test]
@@ -170,7 +170,7 @@ fn fast(
 }
 
 #[test]
-fn fast_derivation_matches_the_legacy_witness() {
+fn fast_derivation_matches_the_reference_witness() {
     let mut records = gen::records_shared_keys(0xE12, 40, 5);
     records.extend(gen::records(0xE13, 13));
     records.push(gen::hint_corner_record(0xE14));
@@ -217,7 +217,7 @@ fn z_at_gamma1(sig: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn a_bad_record_fails_with_the_legacy_error_and_index() {
+fn a_bad_record_fails_with_the_reference_error_and_index() {
     let records = gen::records_shared_keys(0xE15, 21, 4);
     let other = gen::record(0xE16, 0);
     type Mutation = (&'static str, fn(&mut Record, &Record), Option<DeriveError>);

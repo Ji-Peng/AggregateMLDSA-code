@@ -718,7 +718,7 @@ The engine covers public-instance expansion and hashes, challenge sampling, spar
 and witness transforms, CRT reconstruction, rounding, encoding and commitment hashes.
 The streamed verifier uses it for public data, public T and uncached matrix expansion.
 The Flock event-2 lane integration also uses these Keccak kernels. This setting is independent
-of the Aerie field backend and the compile-time `avx512` feature. Aggregate and key-cache
+of the Aerie field backend. Aggregate and key-cache
 bytes are unchanged across engines.
 
 Run `scripts/simd-ab.sh` for the local comparison against a detached `main` checkout under

@@ -202,15 +202,15 @@ where
 ///
 /// # Errors
 /// As [`derive_tile`].
-pub fn derive_tile_legacy<P: ParamSet>(
+pub fn derive_tile_reference<P: ParamSet>(
     records: &[&PublicRecord<P>],
     sigs: &[&[u8]],
     out: &mut [LaneWitness],
 ) -> Result<(), (usize, DeriveError)> {
     for (i, (record, w)) in records.iter().zip(out.iter_mut()).enumerate() {
         let t: Vec<[i32; N]> = (0..P::K).map(|row| record.t[row]).collect();
-        let legacy = derive_with_t_for::<P>(&record.key, &record.mu, sigs[i], &record.c_tilde, &t).map_err(|e| (i, e))?;
-        w.fill_from(&legacy);
+        let reference = derive_with_t_for::<P>(&record.key, &record.mu, sigs[i], &record.c_tilde, &t).map_err(|e| (i, e))?;
+        w.fill_from(&reference);
     }
     Ok(())
 }
@@ -224,7 +224,7 @@ mod tests {
 
     /// The engine path gives the reference witness for honest records, and the reference error for
     /// a corrupted signature (every backend the host supports), on the records of `seed`.
-    fn matches_the_legacy_derivation<P>(seed: u64)
+    fn matches_the_reference_derivation<P>(seed: u64)
     where
         P: ParamSet + agg_mldsa_simd::ParamSet,
     {
@@ -250,9 +250,9 @@ mod tests {
             derive_tile(&engine, &refs, &sigs, &mut out).unwrap();
             for (i, (record, w)) in refs.iter().zip(&out).enumerate() {
                 let t: Vec<[i32; N]> = (0..<P as ParamSet>::K).map(|row| record.t[row]).collect();
-                let legacy = derive_with_t_for::<P>(&record.key, &record.mu, sigs[i], &record.c_tilde, &t).unwrap();
+                let reference = derive_with_t_for::<P>(&record.key, &record.mu, sigs[i], &record.c_tilde, &t).unwrap();
                 let mut want = LaneWitness::zero::<P>();
-                want.fill_from(&legacy);
+                want.fill_from(&reference);
                 assert_eq!(*w, want, "{backend:?} record {i}");
             }
             // A flipped z byte: the reference derivation's verdict.
@@ -261,9 +261,9 @@ mod tests {
             let mut sigs_bad = sigs.clone();
             sigs_bad[3] = &bad;
             let t: Vec<[i32; N]> = (0..<P as ParamSet>::K).map(|row| refs[3].t[row]).collect();
-            let legacy = derive_with_t_for::<P>(&refs[3].key, &refs[3].mu, &bad, &refs[3].c_tilde, &t);
+            let reference = derive_with_t_for::<P>(&refs[3].key, &refs[3].mu, &bad, &refs[3].c_tilde, &t);
             let got = derive_tile(&engine, &refs, &sigs_bad, &mut out);
-            match legacy {
+            match reference {
                 Ok(_) => assert!(got.is_ok()),
                 Err(e) => assert_eq!(got, Err((3, e))),
             }
@@ -271,37 +271,37 @@ mod tests {
     }
 
     /// A seed that changes on every run, printed so that a failure can be replayed by
-    /// passing it to [`matches_the_legacy_derivation`].
+    /// passing it to [`matches_the_reference_derivation`].
     fn fresh_seed() -> u64 {
         let ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
         let seed = (ns as u64) ^ ((ns >> 64) as u64);
-        eprintln!("legacy-match seed: {seed:#x}");
+        eprintln!("reference-match seed: {seed:#x}");
         seed
     }
 
     #[test]
-    fn ml_dsa_65_engine_path_matches_the_legacy_derivation() {
-        matches_the_legacy_derivation::<Set65>(61);
+    fn ml_dsa_65_engine_path_matches_the_reference_derivation() {
+        matches_the_reference_derivation::<Set65>(61);
     }
 
     #[test]
-    fn ml_dsa_87_engine_path_matches_the_legacy_derivation() {
-        matches_the_legacy_derivation::<Set87>(61);
+    fn ml_dsa_87_engine_path_matches_the_reference_derivation() {
+        matches_the_reference_derivation::<Set87>(61);
     }
 
     #[test]
-    fn ml_dsa_65_engine_path_matches_the_legacy_derivation_on_fresh_seeds() {
+    fn ml_dsa_65_engine_path_matches_the_reference_derivation_on_fresh_seeds() {
         for _ in 0..2 {
-            matches_the_legacy_derivation::<Set65>(fresh_seed());
+            matches_the_reference_derivation::<Set65>(fresh_seed());
         }
     }
 
     #[test]
-    fn ml_dsa_87_engine_path_matches_the_legacy_derivation_on_fresh_seeds() {
+    fn ml_dsa_87_engine_path_matches_the_reference_derivation_on_fresh_seeds() {
         for _ in 0..2 {
-            matches_the_legacy_derivation::<Set87>(fresh_seed());
+            matches_the_reference_derivation::<Set87>(fresh_seed());
         }
     }
 }

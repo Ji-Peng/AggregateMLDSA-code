@@ -511,7 +511,7 @@ impl ParamSet for Set44 {
         sigs: &[&[u8]],
         out: &mut [crate::fast_lanes::LaneWitness],
     ) -> Result<(), (usize, crate::derive::DeriveError)> {
-        crate::fast_lanes::derive_tile_legacy(records, sigs, out)
+        crate::fast_lanes::derive_tile_reference(records, sigs, out)
     }
 
     fn get_ntt(m: &Self::MatrixNtt, r: usize, s: usize) -> &[u64; 256] { &m[r][s] }
