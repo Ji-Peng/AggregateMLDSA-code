@@ -799,8 +799,7 @@ def median_of(cell, key):
 
 def baselines_table(cells, directory, commit, machine, skipped, alloul=()):
     """Generate `tab-baselines.tex` (`\\label{tab:baselines}`): Aerie, ours for every set
-    and tier, and Alloul26, with prove times on 16C32T, 8C16T and 1T and verify times on
-    16C32T and 1T. Native verification times go into the table note."""
+    and tier, and Alloul26, with prove and verify times on 16C32T, 8C16T and 1T. Native verification times go into the table note."""
     standard = [c for c in cells if is_standard_ours(c) and c.get("relation") == DEFAULT_RELATION and c.get("times_ms")]
     aerie = [c for c in cells if c.get("system") == "aerie"]
     native = [c for c in cells if c.get("system") == "native"]
@@ -811,7 +810,7 @@ def baselines_table(cells, directory, commit, machine, skipped, alloul=()):
     n = max(c["n"] for c in all_cells) if all_cells else max(int(r["N"]) for r in alloul)
     sets = [p for p in PARAM_SETS if any(cell_params(c) == p for c in standard)] or list(PARAM_SETS)
     prove_allocs = ["16C32T", "8C16T", "1T"]
-    verify_allocs = ["16C32T", "1T"]
+    verify_allocs = ["16C32T", "8C16T", "1T"]
 
     def pick_native(params, alloc):
         matches = [
@@ -856,9 +855,10 @@ def baselines_table(cells, directory, commit, machine, skipped, alloul=()):
         for idx, (isa, label) in enumerate(BASELINE_ISA):
             picked = per_isa[isa]
             prove = [fmt_seconds(median_of(picked[a], "times_ms")) for a in prove_allocs]
-            v_par = median_of(picked["16C32T"], "verify_uncached_ms")
+            # Aerie reports a parallel and a single-thread verifier time in every run.
             v_1t = median_of(picked["1T"], "verify_single_ms") or median_of(picked["1T"], "verify_uncached_ms")
-            verify = [fmt_ms(v, allow_decimal=True) for v in (v_par, v_1t)]
+            v_all = [median_of(picked[a], "verify_uncached_ms") for a in verify_allocs if a != "1T"] + [v_1t]
+            verify = [fmt_ms(v, allow_decimal=True) for v in v_all]
             if idx == 0:
                 lead = [
                     f"\\SetCell[r={rows}]{{l}} Aerie-{deg}~\\cite{{CDBT26}}",
@@ -979,7 +979,7 @@ def baselines_table(cells, directory, commit, machine, skipped, alloul=()):
         "tab:baselines",
         f"Baselines at $N={fmt_n_tex(n)}$.",
         note,
-        "Q[l] Q[c] Q[l] X[r] X[r] X[r] X[r] X[r] X[r] Q[r]",
+        "Q[l] Q[c] Q[l] X[r] X[r] X[r] X[r] X[r] X[r] X[r] Q[r]",
         header_rows=2,
         extra_hlines=hlines,
         env="table*",
@@ -987,7 +987,7 @@ def baselines_table(cells, directory, commit, machine, skipped, alloul=()):
     )
     out += (
         "\\SetCell[r=2]{l} System & \\SetCell[r=2]{c} Cat. & \\SetCell[r=2]{l} ISA & "
-        "\\SetCell[c=3]{c} Prove (s) & & & \\SetCell[c=2]{c} Verify (ms) & & "
+        "\\SetCell[c=3]{c} Prove (s) & & & \\SetCell[c=3]{c} Verify (ms) & & & "
         "\\SetCell[r=2]{r} B/sig & \\SetCell[r=2]{r} Compression \\\\\n"
     )
     out += " & & & " + " & ".join(prove_allocs + verify_allocs) + " & & \\\\\n"

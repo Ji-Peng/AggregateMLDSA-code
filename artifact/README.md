@@ -267,8 +267,7 @@ carry it):
   - `tab-baselines.tex` (`\label{tab:baselines}`, full width): Aerie
     (Falcon-512, Falcon-1024; AVX2 and AVX-512 rows), ours (44, 65, 87; AVX2,
     AVX-512 and IFMA rows) and Alloul26 (ML-DSA-87, family J; AVX2 and AVX-512
-    rows), with prove time on 16C32T, 8C16T and 1T, verify time on 16C32T and
-    1T, B/sig and the compression factor, signature bytes (FIPS 204: 2,420 /
+    rows), with prove and verify time on 16C32T, 8C16T and 1T, B/sig and the compression factor, signature bytes (FIPS 204: 2,420 /
     3,309 / 4,627 B; Falcon: 666 / 1,280 B) over B/sig. Native AVX2 verification times
     go into the table note. Cells without data read `--`.
   - `tab-relations.tex` (`\label{tab:relations}`): with the opt-in H-exact
