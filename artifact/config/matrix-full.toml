@@ -6,7 +6,7 @@
 
 mode = "full"
 
-# Headline prover and verifier rows (tab:prove, tab:baselines, tab:bytes).
+# Headline prover and verifier rows (tab:baselines, tab:bytes).
 
 [[runs]]
 kind = "ours"

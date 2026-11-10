@@ -177,8 +177,8 @@ registers and EVEX-only mnemonics are counted in `build.json`).
 ### Expected times
 
 The following medians were measured on an idle AMD EPYC 9355 node (Zen 5) at
-$N = 32{,}768$ under H-FIPS on 16C32T, 8C16T and 1T, one warm-up and five runs (`tab:prove`,
-`tab:bytes`, `tab:baselines`). Node-to-node spread is a few percent; `./run.sh full`
+$N = 32{,}768$ under H-FIPS on 16C32T, 8C16T and 1T, one warm-up and five runs (`tab:baselines`,
+`tab:bytes`). Node-to-node spread is a few percent; `./run.sh full`
 reproduces every cell.
 
 | Set | Tier | 16C32T prove | 8C16T prove | 1T prove | 16C32T verify (unc. / cached) | Aggregate (B/sig) |
@@ -226,9 +226,9 @@ its actual core and thread count. Commands are pinned with `taskset` and with
 | --- | --- | --- |
 | C1: the aggregate takes 49.2, 65.4 and 82.7 B per signature at 32K for ML-DSA-44, -65 and -87 | `tab-bytes.tex`, row `total` | `./run.sh full` |
 | C2: every tier and the scalar gate give the same aggregate and verification accepts | `gates.json`, `all_configurations_identical` and `verify` | `./run.sh gates` |
-| C3: prove and verify times on a Zen 5 machine are within 10% of the paper across all three sets | `tab-prove.tex`, `tab-scaling.tex` | `./run.sh full` |
-| C4: the tier ladder is ordered IFMA, AVX-512F, AVX2 and the GF(2) ablation matches | `tab-prove.tex`, `tab-ablation.tex` | `./run.sh quick --smoke` |
-| C5: ours against Aerie and native verification for ML-DSA-44, -65 and -87 | `tab-baselines.tex` | `./run.sh quick` |
+| C3: prove and verify times on a Zen 5 machine are within 10% of the paper across all three sets | `tab-baselines.tex`, `tab-scaling.tex` | `./run.sh full` |
+| C4: the tier ladder is ordered IFMA, AVX-512F, AVX2 and the GF(2) ablation matches | `tab-baselines.tex` (`ours` rows), `tab-ablation.tex` | `./run.sh quick --smoke` |
+| C5: ours against Aerie, Alloul26 and native verification for ML-DSA-44, -65 and -87 | `tab-baselines.tex` (native times in its note) | `./run.sh quick` |
 
 `expected/claims.toml` carries the same table, and each results directory gets
 a `claims-measured.csv` with the values that were actually measured.
@@ -255,19 +255,22 @@ carry it):
   and flags.
 - `paper-tables/`: the generated LaTeX tables for the results directory (also
   copied to `artifact/paper-tables/`, which is ignored by git):
-  - `tab-prove.tex` (`\label{tab:prove}`): 32K prover time across sets (44, 65,
-    87), tiers (IFMA, AVX-512F, AVX2) and allocations (16C32T, 8C16T, 1T).
   - `tab-ablation.tex` (`\label{tab:ablation}`): GF(2)-side ablation (`full
     aggregate`, `Flock after the PIOP`, `public bits` mode B) and control
     ablations (including `AGG_LATE_JOIN=0`).
   - `tab-scaling.tex` (`\label{tab:scaling}`): batch-size scaling ($2^{10}$,
-    $2^{13}$, $2^{15}$) with B/sig, prove, uncached/cached verify and peak RSS
-    in GiB for 44, 65 and 87.
+    $2^{13}$, $2^{15}$) on the AVX2 tier with B/sig, the ratio of signature
+    bytes to B/sig, prove, uncached/cached verify and peak RSS in GiB for 44,
+    65 and 87.
   - `tab-bytes.tex` (`\label{tab:bytes}`): aggregate byte composition per
     signature across components for 44, 65 and 87.
-  - `tab-baselines.tex` (`\label{tab:baselines}`): native AVX2 verification
-    (44, 65, 87), Aerie (Falcon-512, Falcon-1024) and ours (44, 65, 87) on
-    16C32T and 1T.
+  - `tab-baselines.tex` (`\label{tab:baselines}`, full width): Aerie
+    (Falcon-512, Falcon-1024; AVX2 and AVX-512 rows), ours (44, 65, 87; AVX2,
+    AVX-512 and IFMA rows) and Alloul26 (ML-DSA-87, family J; AVX2 and AVX-512
+    rows), with prove time on 16C32T, 8C16T and 1T, verify time on 16C32T and
+    1T, B/sig and the ratio of signature bytes (FIPS 204: 2,420 / 3,309 /
+    4,627 B; Falcon: 666 / 1,280 B) to B/sig. Native AVX2 verification times
+    go into the table note. Cells without data read `--`.
   - `tab-relations.tex` (`\label{tab:relations}`): with the opt-in H-exact
     runs, H-FIPS and H-exact prover times, the change of H-exact against
     H-FIPS, verify times and aggregate bytes for 44, 65 and 87.
@@ -352,7 +355,14 @@ J has a 2^-188 classical bound; family U has a QROM bound); an approximately
 128-bit profile is not configurable.
 
 The optional `--alloul26` flag on `quick`, `full`, or `all` runs the default
-128-signature smoke comparison after the usual work; it is off by default.
+128-signature smoke comparison after the usual work and appends its JSON lines
+to `results/<timestamp>/alloul26.jsonl`; it is off by default.
+`gen_tables.py` reads `alloul26*.jsonl` in the results directory (and any
+file passed with `--alloul26 FILE`) and fills the Alloul26 rows of
+`tab:baselines` from the family J runs at the table's N, placing a run by its
+thread count (32: 16C32T, 16: 8C16T, 1: 1T). To fill the paper's row, append
+the output of `./run.sh alloul26 --n 32768 --family J --isa avx2 --threads 32`
+(and `--isa avx512`) to that file and rerun `./run.sh tables`.
 For aligned measurements invoke `alloul26` explicitly at each matching N,
 ISA, and thread count, pinning both programs to the same CPUs. Under Slurm,
 run every timed command as an `srun -n1 -c 32 --threads-per-core=2

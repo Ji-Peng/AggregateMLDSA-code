@@ -27,6 +27,14 @@ usage() {
   exit 2
 }
 
+# Run the default Alloul26 comparison and keep its JSON lines in the results
+# directory, where gen_tables.py reads them for tab:baselines.
+run_alloul26() {
+  local dir=${AGG_RESULTS:-results/$(cat results/LATEST 2>/dev/null)}
+  mkdir -p "$dir"
+  bash scripts/alloul26.sh | tee -a "$dir/alloul26.jsonl"
+}
+
 mode=${1:-}
 if [ -z "$mode" ]; then
   usage
@@ -58,8 +66,8 @@ case "$mode" in
         --dry-run | -n) exit 0 ;;
       esac
     done
+    if (( alloul26 )); then run_alloul26; fi
     python3 scripts/gen_tables.py || exit 1
-    if (( alloul26 )); then bash scripts/alloul26.sh; fi
     ;;
   alloul26)
     exec bash scripts/alloul26.sh "$@"
@@ -96,8 +104,8 @@ case "$mode" in
     bash scripts/build.sh || exit 1
     python3 scripts/gates.py ${relations[@]+"${relations[@]}"} || exit 1
     python3 scripts/runner.py "$run_mode" "${extra[@]}" || exit 1
+    if (( alloul26 )); then run_alloul26; fi
     python3 scripts/gen_tables.py || exit 1
-    if (( alloul26 )); then bash scripts/alloul26.sh; fi
     ;;
   -h | --help | help)
     usage
