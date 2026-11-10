@@ -223,10 +223,10 @@ def bytes_per_sig(cell):
 
 
 def fmt_ratio(sig_bytes, per_sig):
-    """Signature bytes over aggregate bytes per signature, one decimal."""
+    """Compression factor: signature bytes over aggregate bytes per signature, one decimal."""
     if not per_sig:
         return "--"
-    return f"{sig_bytes / per_sig:.1f}"
+    return f"{sig_bytes / per_sig:.1f}$\\times$"
 
 
 def fmt_bytes_per_sig(cell):
@@ -311,12 +311,12 @@ def relations_table(cells, directory, commit, machine, skipped):
     out += table_begin(
         "tab:relations",
         f"Relations $\\Relfips$ and $\\Relex$ at $N={fmt_n_tex(n)}$ on {alloc}.",
-        "Prove in seconds (change against $\\Relfips$ in parentheses); verify in ms on IFMA, uncached / cached keys.",
+        "Tier columns: prove time in s (change against $\\Relfips$ in parentheses). Verify: IFMA, uncached / cached keys.",
         "Q[l] Q[l] X[r] X[r] X[r] X[1.1,r] X[1.2,r]",
         header_rows=1,
         extra_hlines=extra_hlines,
     )
-    out += "Set & Rel. & " + " & ".join(LABEL[c] for c in ORDER) + " & Verify & Bytes \\\\\n"
+    out += "Set & Rel. & " + " & ".join(LABEL[c] for c in ORDER) + " & Verify (ms) & Bytes \\\\\n"
     for params in sets:
         base_cells = {
             config: pick_ours_cell(
@@ -486,13 +486,14 @@ def ablation_table(cells, directory, commit, machine, skipped):
     out += table_begin(
         "tab:ablation",
         "Ablation of the $\\GFt$ side for ML-DSA-44.",
-        f"$N={fmt_n_tex(n)}$, {LABEL[tier]}, {alloc}, one job. Prove in s, verify in ms, keys not cached. "
+        f"$N={fmt_n_tex(n)}$, {LABEL[tier]}, {alloc}, one job, uncached keys. "
         f"{traced_note} Public bits: with the public instance.",
-        "X[2.6,l] X[r] X[r] X[r]",
+        "X[l] Q[r] Q[r] Q[r]",
         header_rows=1,
         extra_hlines=extra_hlines,
+        colsep="6pt",
     )
-    out += "Variant & Prove & Verify & B/sig \\\\\n"
+    out += "Variant & Prove (s) & Verify (ms) & B/sig \\\\\n"
 
     if full_cell and full_cell.get("times_ms"):
         ver = fmt_ms(median(full_cell["verify_uncached_ms"])) if full_cell.get("verify_uncached_ms") else "--"
@@ -574,14 +575,14 @@ def scaling_table(cells, directory, commit, machine, skipped):
     out += table_begin(
         "tab:scaling",
         "Scaling with the batch size.",
-        f"{LABEL[tier]} tier on {alloc}. Prove in seconds; verify in ms, uncached / cached keys; peak in GiB. "
-        "Ratio: signature bytes over B/sig.",
-        "Q[l] Q[r] X[r] X[r] X[r] X[1.3,r] X[r]",
+        f"{LABEL[tier]} on {alloc}. Verify: uncached / cached keys. Memory: prover peak. "
+        "Compression: signature bytes over B/sig.",
+        "Q[l] Q[r] X[r] Q[r] Q[r] Q[r] Q[r]",
         header_rows=1,
         extra_hlines=extra_hlines,
-        colsep="3pt",
+        colsep="2pt",
     )
-    out += "Set & $N$ & B/sig & Ratio & Prove & Verify & Peak \\\\\n"
+    out += "Set & $N$ & B/sig & Compression & Prove (s) & Verify (ms) & Memory (GiB) \\\\\n"
     for params, chosen_sizes in set_rows:
         nrows = len(chosen_sizes)
         for idx, n in enumerate(chosen_sizes):
@@ -729,7 +730,7 @@ def bytes_table(cells, directory, commit, machine):
     return out
 
 
-# Falcon signature bytes (Falcon specification), the numerator of Aerie's ratio.
+# Falcon signature bytes (Falcon specification), the numerator of Aerie's compression factor.
 FALCON_SIG_BYTES = {512: 666, 1024: 1280}
 # Thread count of each allocation, used to place Alloul26 runs, which record
 # only their thread count.
@@ -860,7 +861,7 @@ def baselines_table(cells, directory, commit, machine, skipped, alloul=()):
             verify = [fmt_ms(v, allow_decimal=True) for v in (v_par, v_1t)]
             if idx == 0:
                 lead = [
-                    f"\\SetCell[r={rows}]{{l}} Aerie-{deg}",
+                    f"\\SetCell[r={rows}]{{l}} Aerie-{deg}~\\cite{{CDBT26}}",
                     f"\\SetCell[r={rows}]{{c}} {falcon_category(deg)}",
                 ]
                 tail = [
@@ -894,7 +895,7 @@ def baselines_table(cells, directory, commit, machine, skipped, alloul=()):
             verify = [fmt_ms(median_of(picked[a], "verify_uncached_ms")) for a in verify_allocs]
             if idx == 0:
                 lead = [
-                    f"\\SetCell[r={rows}]{{l}} ours, {params}",
+                    f"\\SetCell[r={rows}]{{l}} Ours-{params}",
                     f"\\SetCell[r={rows}]{{c}} {constants['category']}",
                 ]
                 tail = [
@@ -923,7 +924,7 @@ def baselines_table(cells, directory, commit, machine, skipped, alloul=()):
             verify.append(fmt_ms(median([r["verify_s"] * 1000 for r in runs])) if runs else "--")
         if idx == 0:
             lead = [
-                f"\\SetCell[r={rows}]{{l}} Alloul26, {ALLOUL_PARAMS}",
+                f"\\SetCell[r={rows}]{{l}} Alloul26-{ALLOUL_PARAMS}~\\cite{{Alloul26}}",
                 f"\\SetCell[r={rows}]{{c}} {constants['category']}",
             ]
             tail = [
@@ -950,7 +951,7 @@ def baselines_table(cells, directory, commit, machine, skipped, alloul=()):
             return ""
         if counts[0] == 1:
             return "one run, "
-        return f"medians of {words.get(counts[0], str(counts[0]))}, "
+        return f"medians of {words.get(counts[0], str(counts[0]))} runs, "
 
     aerie_runs = medians_of(len(c["times_ms"]) for c in aerie if c.get("n") == n and c.get("times_ms"))
     alloul_counts = {}
@@ -961,9 +962,9 @@ def baselines_table(cells, directory, commit, machine, skipped, alloul=()):
     alloul_runs = medians_of(alloul_counts.values()).rstrip(", ")
     note = (
         "Cat.: NIST category. Uncached keys; keys and messages excluded. "
-        "AVX-512: F, BW and VBMI, no IFMA. Ratio: signature bytes over B/sig. "
-        f"Aerie~\\cite{{CDBT26}}: {aerie_runs}prove without setup, B/sig with 40\\,B salt. "
-        "Alloul26~\\cite{Alloul26}: Johnson family" + (f", {alloul_runs}." if alloul_runs else ".")
+        "AVX-512: F, BW and VBMI, no IFMA. Compression: signature bytes over B/sig. "
+        f"Aerie: {aerie_runs}prove without setup, B/sig with 40\\,B salt. "
+        "Alloul26: Johnson family" + (f", {alloul_runs}." if alloul_runs else ".")
     )
     if any(v != "--" for v in native_par + native_1t):
         note += (
@@ -978,7 +979,7 @@ def baselines_table(cells, directory, commit, machine, skipped, alloul=()):
         "tab:baselines",
         f"Baselines at $N={fmt_n_tex(n)}$.",
         note,
-        "Q[l] Q[c] Q[l] X[r] X[r] X[r] X[r] X[r] X[r] X[r]",
+        "Q[l] Q[c] Q[l] X[r] X[r] X[r] X[r] X[r] X[r] Q[r]",
         header_rows=2,
         extra_hlines=hlines,
         env="table*",
@@ -987,7 +988,7 @@ def baselines_table(cells, directory, commit, machine, skipped, alloul=()):
     out += (
         "\\SetCell[r=2]{l} System & \\SetCell[r=2]{c} Cat. & \\SetCell[r=2]{l} ISA & "
         "\\SetCell[c=3]{c} Prove (s) & & & \\SetCell[c=2]{c} Verify (ms) & & "
-        "\\SetCell[r=2]{r} B/sig & \\SetCell[r=2]{r} Ratio \\\\\n"
+        "\\SetCell[r=2]{r} B/sig & \\SetCell[r=2]{r} Compression \\\\\n"
     )
     out += " & & & " + " & ".join(prove_allocs + verify_allocs) + " & & \\\\\n"
     out += "".join(body)

@@ -9,7 +9,7 @@
 #   ./run.sh full     the experiment matrix of the evaluation
 #   ./run.sh tables   raw JSON -> LaTeX tables
 #   ./run.sh all      fetch, build, gates, quick (or full with --full), tables
-#   ./run.sh alloul26  run the optional Alloul26 comparison
+#   ./run.sh alloul26  run one Alloul26 measurement (full --alloul26: the table's cells)
 #   ./run.sh freeze   maintainers: re-pin hashes.json and sources.lock to HEAD
 #
 # Every run uses relation H-FIPS. gates, quick, full and all take
@@ -27,12 +27,38 @@ usage() {
   exit 2
 }
 
-# Run the default Alloul26 comparison and keep its JSON lines in the results
-# directory, where gen_tables.py reads them for tab:baselines.
+# Run the Alloul26 comparison and keep its JSON lines in the results
+# directory, where gen_tables.py reads them for tab:baselines. `quick` runs the
+# 128-signature smoke case. `full` runs the cells of the table: 32,768
+# signatures, family J, the AVX2 and AVX-512 builds, on the CPUs of the
+# 16C32T, 8C16T and 1T allocations that the runner recorded in cpusets.json,
+# ALLOUL26_RUNS (default 2) fresh processes per cell.
 run_alloul26() {
   local dir=${AGG_RESULTS:-results/$(cat results/LATEST 2>/dev/null)}
   mkdir -p "$dir"
-  bash scripts/alloul26.sh | tee -a "$dir/alloul26.jsonl"
+  if [ "$1" != full ]; then
+    bash scripts/alloul26.sh | tee -a "$dir/alloul26.jsonl"
+    return
+  fi
+  local isas=(avx2)
+  # The AVX-512 build targets x86-64-v4.
+  if grep -q avx512vl /proc/cpuinfo && grep -q avx512bw /proc/cpuinfo; then isas+=(avx512); fi
+  local threads cpuset isa
+  while read -r threads cpuset; do
+    for isa in "${isas[@]}"; do
+      bash scripts/alloul26.sh --n 32768 --family J --isa "$isa" --threads "$threads" \
+        --cpus "$cpuset" --runs "${ALLOUL26_RUNS:-2}" | tee -a "$dir/alloul26.jsonl"
+    done
+  done < <(python3 - "$dir/cpusets.json" <<'PY'
+import json, sys
+configs = json.load(open(sys.argv[1], encoding="utf-8"))["configs"]
+for name, threads in (("16C32T", 32), ("8C16T", 16), ("1T", 1)):
+    alloc = configs.get(name, {})
+    # Skip an allocation that this machine cannot provide in full.
+    if alloc.get("available") and alloc.get("threads") == threads and alloc.get("cpuset"):
+        print(threads, alloc["cpuset"])
+PY
+  )
 }
 
 mode=${1:-}
@@ -66,7 +92,7 @@ case "$mode" in
         --dry-run | -n) exit 0 ;;
       esac
     done
-    if (( alloul26 )); then run_alloul26; fi
+    if (( alloul26 )); then run_alloul26 "$mode"; fi
     python3 scripts/gen_tables.py || exit 1
     ;;
   alloul26)
@@ -104,7 +130,7 @@ case "$mode" in
     bash scripts/build.sh || exit 1
     python3 scripts/gates.py ${relations[@]+"${relations[@]}"} || exit 1
     python3 scripts/runner.py "$run_mode" "${extra[@]}" || exit 1
-    if (( alloul26 )); then run_alloul26; fi
+    if (( alloul26 )); then run_alloul26 "$run_mode"; fi
     python3 scripts/gen_tables.py || exit 1
     ;;
   -h | --help | help)

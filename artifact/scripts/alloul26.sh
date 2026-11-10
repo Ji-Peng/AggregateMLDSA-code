@@ -3,16 +3,16 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 usage() {
-  echo 'Usage: alloul26.sh [--n N] [--family J|U] [--isa avx2|avx512] [--soundness default] [--threads T] [--runs R]' >&2
+  echo 'Usage: alloul26.sh [--n N] [--family J|U] [--isa avx2|avx512] [--soundness default] [--threads T] [--cpus LIST] [--runs R]' >&2
 }
-n=128 family=J isa=avx2 soundness=default threads=1 runs=1
+n=128 family=J isa=avx2 soundness=default threads=1 runs=1 cpus=
 while (($#)); do
   case "$1" in
-    --n|--family|--isa|--soundness|--threads|--runs)
+    --n|--family|--isa|--soundness|--threads|--cpus|--runs)
       (($# >= 2)) || { usage; exit 2; }
       case "$1" in
         --n) n=$2 ;; --family) family=$2 ;; --isa) isa=$2 ;;
-        --soundness) soundness=$2 ;; --threads) threads=$2 ;; --runs) runs=$2 ;;
+        --soundness) soundness=$2 ;; --threads) threads=$2 ;; --cpus) cpus=$2 ;; --runs) runs=$2 ;;
       esac
       shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -53,15 +53,19 @@ cargo build --manifest-path "$source_dir/aggregate/r3-cert/Cargo.toml" --release
 tmp=$(mktemp -d "$here/build/alloul26-run.XXXXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 export R3_OUT=$tmp
+# With --cpus the prover and verifier are pinned to that CPU list, so a run
+# uses the same cores as the allocation it is compared with.
+pin_cmd=()
+[[ -z $cpus ]] || pin_cmd=(taskset -c "$cpus")
 for ((run=1; run<=runs; run++)); do
-  /usr/bin/time -v -o "$tmp/time" "$CARGO_TARGET_DIR/release/r3-cert" h9 "$n" >"$tmp/log"
+  /usr/bin/time -v -o "$tmp/time" ${pin_cmd[@]+"${pin_cmd[@]}"} "$CARGO_TARGET_DIR/release/r3-cert" h9 "$n" >"$tmp/log"
   if [[ -n "${ALLOUL_LOG_DIR:-}" ]]; then
     mkdir -p "$ALLOUL_LOG_DIR"
     cp "$tmp/log" "$ALLOUL_LOG_DIR/alloul-$family-$n-$isa-run$run.log"
     cp "$tmp/time" "$ALLOUL_LOG_DIR/alloul-$family-$n-$isa-run$run.time"
     [[ -f "$tmp/h9-cert-$n.bin" ]] && cp "$tmp/h9-cert-$n.bin" "$ALLOUL_LOG_DIR/alloul-$family-$n-$isa-run$run.bin"
   fi
-  python3 - "$tmp/log" "$tmp/time" "$tmp/h9-cert-$n.bin" "$family" "$n" "$threads" "$isa" "$run" <<'PY'
+  python3 - "$tmp/log" "$tmp/time" "$tmp/h9-cert-$n.bin" "$family" "$n" "$threads" "$isa" "$run" "$cpus" <<'PY'
 import json, pathlib, re, sys
 log = pathlib.Path(sys.argv[1]).read_text()
 timing = pathlib.Path(sys.argv[2]).read_text()
@@ -79,7 +83,7 @@ disk_rd_gib = float(disk_m.group(1)) if disk_m else 0.0
 disk_wr_gib = float(disk_m.group(2)) if disk_m else 0.0
 disk_spill_gib = float(disk_m.group(3)) if disk_m else 0.0
 print(json.dumps(dict(system='Alloul26', family=sys.argv[4], N=n, threads=int(sys.argv[6]),
-    isa=sys.argv[7], soundness='default', run=int(sys.argv[8]),
+    isa=sys.argv[7], cpus=sys.argv[9], soundness='default', run=int(sys.argv[8]),
     prove_s=float(match(r'^\s*([\d.]+)\s+TOTAL prover', log))/1000,
     verify_s=float(match(r'^\s*([\d.]+)\s+TOTAL verifier', log))/1000,
     bytes=size, bytes_per_sig=size/n,

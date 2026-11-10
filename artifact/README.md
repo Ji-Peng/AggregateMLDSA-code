@@ -92,7 +92,7 @@ the same pin for commands started inside this directory.
 | `gates` | per parameter set (`--params 44,65,87`) and relation (`--relations`, default `h-fips`): 1K aggregates in every tier, verification, negative check; per set the aggregate on one thread and natver; self-reports | about 5--10 min per relation (estimate) |
 | `quick --smoke` | touches every run kind (`ours`, `mode_b`, `ablations`, `fresh`, `aerie`, `native`) and all three parameter sets at 1K, 1+1 runs | about 5 min after the build (estimate) |
 | `quick` | 1K and 4K (ML-DSA-44) plus 1K (ML-DSA-65, -87), three tiers, 8C16T and 1T, mode B, traced ablations, fresh memory, Aerie (Falcon-512/1024) and native (44/65/87) at 1K | 20--40 min after the build (estimate) |
-| `full` | the complete evaluation matrix for ML-DSA-44, -65 and -87 under H-FIPS: 32K headline on 16C32T, 8C16T and 1T; scaling; mode-B public bits; ablations (`AGG_LATE_JOIN=0`, `AGG_FLOCK_THREADS=0`, etc.) and traced timeline; fresh memory; Aerie and native (44/65/87) baselines, 1+5 warm runs | about 1.7 h (~100 min, estimate) after the build; H-exact adds about 6 min (estimate) |
+| `full` | the complete evaluation matrix for ML-DSA-44, -65 and -87 under H-FIPS: 32K headline on 16C32T, 8C16T and 1T; scaling; mode-B public bits; ablations (`AGG_LATE_JOIN=0`, `AGG_FLOCK_THREADS=0`, etc.) and traced timeline; fresh memory; Aerie (16C32T, 8C16T, 1T) and native (44/65/87) baselines, 1+5 warm runs | about 1.7 h (~100 min, estimate) after the build; H-exact adds about 6 min (estimate); `--alloul26` adds about 3.5 h |
 
 ### Estimated full-run time breakdown
 
@@ -259,17 +259,17 @@ carry it):
     aggregate`, `Flock after the PIOP`, `public bits` mode B) and control
     ablations (including `AGG_LATE_JOIN=0`).
   - `tab-scaling.tex` (`\label{tab:scaling}`): batch-size scaling ($2^{10}$,
-    $2^{13}$, $2^{15}$) on the AVX2 tier with B/sig, the ratio of signature
-    bytes to B/sig, prove, uncached/cached verify and peak RSS in GiB for 44,
-    65 and 87.
+    $2^{13}$, $2^{15}$) on the AVX2 tier with B/sig, the compression factor (signature
+    bytes over B/sig), prove (s), uncached/cached verify (ms) and the prover's
+    peak memory (GiB) for 44, 65 and 87.
   - `tab-bytes.tex` (`\label{tab:bytes}`): aggregate byte composition per
     signature across components for 44, 65 and 87.
   - `tab-baselines.tex` (`\label{tab:baselines}`, full width): Aerie
     (Falcon-512, Falcon-1024; AVX2 and AVX-512 rows), ours (44, 65, 87; AVX2,
     AVX-512 and IFMA rows) and Alloul26 (ML-DSA-87, family J; AVX2 and AVX-512
     rows), with prove time on 16C32T, 8C16T and 1T, verify time on 16C32T and
-    1T, B/sig and the ratio of signature bytes (FIPS 204: 2,420 / 3,309 /
-    4,627 B; Falcon: 666 / 1,280 B) to B/sig. Native AVX2 verification times
+    1T, B/sig and the compression factor, signature bytes (FIPS 204: 2,420 /
+    3,309 / 4,627 B; Falcon: 666 / 1,280 B) over B/sig. Native AVX2 verification times
     go into the table note. Cells without data read `--`.
   - `tab-relations.tex` (`\label{tab:relations}`): with the opt-in H-exact
     runs, H-FIPS and H-exact prover times, the change of H-exact against
@@ -339,12 +339,13 @@ Our code is under the MIT licence (`../LICENSE`); vendored dependencies keep the
 
 ## Comparison with Alloul26
 
-`./run.sh alloul26 --n 128 --family J --isa avx2 --threads 16 --runs 1`
+`./run.sh alloul26 --n 128 --family J --isa avx2 --threads 16 --cpus 0-15 --runs 1`
 fetches the pinned Geode tag into `build/`, builds it with Rust 1.96.0, and
 creates and verifies an ML-DSA-87 certificate from distinct real signatures.
 It prints one JSON line per run. Choose family `J` or `U`, ISA `avx2`
 (x86-64-v3) or `avx512` (x86-64-v4), and any supported power of two from
-32 to 65536. `--soundness default` is the only available profile. The CLI
+32 to 65536. `--cpus LIST` pins the process to that CPU list with `taskset`.
+`--soundness default` is the only available profile. The CLI
 runs one proof per process, so there is no in-process warm-up; each result
 records the upstream prover and in-process verifier times and process peak
 RSS from `/usr/bin/time -v`. Compare with `agg bench --params 87` on the
@@ -354,24 +355,26 @@ only the verifier). Alloul26 uses a stronger fixed soundness target (family
 J has a 2^-188 classical bound; family U has a QROM bound); an approximately
 128-bit profile is not configurable.
 
-The optional `--alloul26` flag on `quick`, `full`, or `all` runs the default
-128-signature smoke comparison after the usual work and appends its JSON lines
-to `results/<timestamp>/alloul26.jsonl`; it is off by default.
+The optional `--alloul26` flag is off by default and appends JSON lines to
+`results/<timestamp>/alloul26.jsonl`. With `quick` it runs the 128-signature
+smoke comparison after the usual work. With `full` (or `all --full`) it runs
+the Alloul26 cells of `tab:baselines`: N = 32768, family J, the AVX2 and
+AVX-512 builds (AVX-512 only on a CPU that has it), on the CPU sets of the
+16C32T, 8C16T and 1T allocations recorded in `cpusets.json`, with 32, 16 and
+1 threads and two fresh processes per cell (`ALLOUL26_RUNS` changes the
+count). An allocation this machine cannot provide in full is skipped. On a
+Zen 5 node one run takes about 3 min on 16C32T, 5 min on 8C16T and 45 min on
+1T, so the twelve runs add about 3.5 h, and each needs 42 GiB of memory.
 `gen_tables.py` reads `alloul26*.jsonl` in the results directory (and any
-file passed with `--alloul26 FILE`) and fills the Alloul26 rows of
-`tab:baselines` from the family J runs at the table's N, placing a run by its
-thread count (32: 16C32T, 16: 8C16T, 1: 1T). To fill the paper's row, append
-the output of `./run.sh alloul26 --n 32768 --family J --isa avx2 --threads 32`
-(and `--isa avx512`) to that file and rerun `./run.sh tables`.
-For aligned measurements invoke `alloul26` explicitly at each matching N,
-ISA, and thread count, pinning both programs to the same CPUs. Under Slurm,
-run every timed command as an `srun -n1 -c 32 --threads-per-core=2
---cpu-bind=none` step: a command in the batch step itself is not held to the
-allocation. Large cases
-can require tens of GiB of memory and substantial disk-backed spill space;
-set `H9_SPILL_DIR`, `H9_SPILL_MIN`, and `H9_SPILL_SEQ` as appropriate.
-The paper's row comes from J with the AVX2 build at 32 threads on 16 Zen 5
-cores (EPYC 9355): 178.8 s, 151.0 B/sig and 42.0 GiB peak at N = 32768, and
-8.97 s at N = 1024. Family U needs up to 72 GiB at 32768; larger cases may
-spill to disk.
+file passed with `--alloul26 FILE`) and fills the Alloul26 rows from the
+family J runs at the table's N, placing a run by its thread count (32:
+16C32T, 16: 8C16T, 1: 1T). Under Slurm, run every timed command as an `srun
+-n1 -c 32 --threads-per-core=2 --cpu-bind=none` step: a command in the batch
+step itself is not held to the allocation. Large cases can need substantial
+disk-backed spill space; set `H9_SPILL_DIR`, `H9_SPILL_MIN`, and
+`H9_SPILL_SEQ` as appropriate.
+The paper's rows come from J at N = 32768 on Zen 5 cores (EPYC 9355), AVX2
+build: 178.8 s on 16C32T, 308.0 s on 8C16T and 2,641.5 s on 1T, with 151.0
+B/sig and 42.0 GiB peak; 8.97 s at N = 1024 on 16C32T. Family U needs up to
+72 GiB at 32768; larger cases may spill to disk.
 Geode is licensed under BSL 1.1 and is fetched from upstream, not redistributed.
