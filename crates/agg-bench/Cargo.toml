@@ -18,9 +18,5 @@ agg-simd = { workspace = true }
 name = "mode_b"
 harness = false
 
-[[bench]]
-name = "step12"
-harness = false
-
 [lints.rust]
 unsafe_code = "forbid"
