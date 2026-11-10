@@ -1111,13 +1111,6 @@ impl SymLanes {
             },
         ]
     }
-
-    /// `P_0, P_1, Q_0, Q_1` at a point from `S_0, S_1, M_0, M_1` there.
-    fn terminal(values: &[E], x: E) -> [E; 4] {
-        let (s0, s1, m0, m1) = (values[0], values[1], values[2], values[3]);
-        let two_x = x + x;
-        [two_x - s0, two_x - s1, x * (x - s0) + m0, x * (x - s1) + m1]
-    }
 }
 
 /// Layer `depth - 2` of a stack for every challenge in one pass over the leaves: node `z`
@@ -1453,6 +1446,24 @@ enum Role {
     Leaves,
 }
 
+/// `P_0, P_1, Q_0, Q_1` at a point from `S_0, S_1, M_0, M_1` there (the integer path of a
+/// recentred stack; `x` is the tree's challenge minus the shift and the centre).
+fn sym_terminal(values: &[E], x: E) -> [E; 4] {
+    let (s0, s1, m0, m1) = (values[0], values[1], values[2], values[3]);
+    let two_x = x + x;
+    [two_x - s0, two_x - s1, x * (x - s0) + m0, x * (x - s1) + m1]
+}
+
+/// The sum-check of one prover group of a session, as the session driver runs it.
+trait SessionOps {
+    fn round_message(&mut self, round: usize) -> Vec<E>;
+    fn bind(&mut self, round: usize, challenge: E);
+    fn claim(&self) -> E;
+    /// The group's own terminal check (the generic kernel has none).
+    fn consistent(&self) -> bool;
+    fn terminal_values(&self) -> Vec<E>;
+}
+
 /// A prover group: the generic kernel or a dedicated path (`kernel::layer`).
 #[allow(clippy::large_enum_variant)]
 enum SessionGroup<'a> {
@@ -1469,7 +1480,9 @@ impl SessionGroup<'_> {
             Self::Pair(g) => g.set_arena(arena),
         }
     }
+}
 
+impl SessionOps for SessionGroup<'_> {
     fn round_message(&mut self, round: usize) -> Vec<E> {
         match self {
             Self::Generic(g) => g.round_message(round),
@@ -1617,7 +1630,6 @@ pub fn prove_in(
     prove_with(stacks, tables, multiplicities, challenges, transcript, check, true)
 }
 
-#[allow(clippy::too_many_lines)]
 fn prove_with(
     stacks: &[LookupStack<'_>],
     tables: &[Table],
@@ -1628,8 +1640,343 @@ fn prove_with(
     dedicated: bool,
 ) -> Result<LookupOutput, LookupError> {
     if crate::kernel::layout() == crate::kernel::Layout::Plane {
-        return plane::prove_with(stacks, tables, multiplicities, challenges, fs, check, dedicated);
+        prove_sessions::<plane::PlaneLayout>(stacks, tables, multiplicities, challenges, fs, check, dedicated)
+    } else {
+        prove_sessions::<RowLayout>(stacks, tables, multiplicities, challenges, fs, check, dedicated)
     }
+}
+
+/// The prover inputs that every table layout reads.
+struct ProverInputs<'i> {
+    stacks: &'i [LookupStack<'i>],
+    multiplicities: &'i [Vec<i32>],
+    shape: &'i LookupShape,
+    /// The challenges `X`.
+    xs: &'i [E],
+    /// Run the dedicated groups where they apply (`false` runs every group on the generic
+    /// kernel over the stored layers, the reference the tests compare against).
+    dedicated: bool,
+}
+
+impl ProverInputs<'_> {
+    /// `X - shift` of stack `j` at challenge `x`.
+    fn shifted(&self, j: usize, x: usize) -> E {
+        self.xs[x] - E::from_i64(i64::from(self.stacks[j].shape.shift))
+    }
+
+    /// `X - shift - c` of stack `j` at challenge `x`, for an integer-path centre `c`.
+    fn centred(&self, j: usize, x: usize, center: i32) -> E {
+        self.shifted(j, x) - E::from_i64(i64::from(center))
+    }
+}
+
+/// The public state of session `s` while its groups are built.
+struct SessionCx<'c> {
+    s: usize,
+    /// `2^(s - 1)`, the cells of one half of a layer-`s` lane.
+    half: usize,
+    /// The point of the layer-`(s - 1)` claims.
+    point: &'c [E],
+    /// The trees of depth `>= s`, in id order.
+    active: &'c [usize],
+    /// `gammas[2 i], gammas[2 i + 1]` batch the `p`- and `q`-claims of `active[i]`.
+    gammas: &'c [E],
+}
+
+impl SessionCx<'_> {
+    fn gamma_of(&self, id: usize) -> (E, E) {
+        let i = self.active.binary_search(&id).expect("an active tree");
+        (self.gammas[2 * i], self.gammas[2 * i + 1])
+    }
+}
+
+/// How the prover stores its fraction trees and the tables of its session groups. The
+/// session driver [`prove_sessions`] issues every transcript event and sums the groups'
+/// messages; a layout builds the trees, the groups over the stored layers and the
+/// dedicated group of an ending stack, and frees its buffers. The driver is monomorphised
+/// per layout, so every group call is static.
+trait ProverLayout: Sized {
+    type Group<'g>: SessionOps + Send
+    where
+        Self: 'g;
+    /// Buffers reused across the sessions.
+    type Scratch;
+
+    /// Every fraction tree (the time [`ProveStats::trees`] measures).
+    fn build(inputs: &ProverInputs<'_>) -> Self;
+    fn scratch() -> Self::Scratch;
+    /// `p_1(0), p_1(1), q_1(0), q_1(1)` per tree, in id order.
+    fn layer1(&self) -> Vec<[E; 4]>;
+    /// Bytes of the stored layers.
+    fn layer_bytes(&self) -> usize;
+    /// The groups of a session's layer kind over the trees `ids`, pushed to `groups`.
+    fn layer_groups<'g>(
+        &'g self,
+        inputs: &'g ProverInputs<'g>,
+        cx: &SessionCx<'_>,
+        ids: &[usize],
+        scratch: &mut Self::Scratch,
+        groups: &mut Vec<(Role, Self::Group<'g>)>,
+    ) -> Result<(), LookupError>;
+    /// The dedicated group of an ending stack's leaf lanes `v_0, v_1` with the plan's
+    /// constant, linear and bilinear coefficients; `None` takes the generic kernel.
+    fn stack_pair<'g>(
+        v: [&'g [i32]; 2],
+        coefficients: [E; 3],
+        point: &[E],
+        scratch: &mut Self::Scratch,
+    ) -> Option<Self::Group<'g>>
+    where
+        Self: 'g;
+    fn generic<'g>(group: Group<'g>) -> Self::Group<'g>
+    where
+        Self: 'g;
+    /// Called once a session's groups are built, before its first round.
+    fn ready<'g>(scratch: &Self::Scratch, groups: &mut [(Role, Self::Group<'g>)])
+    where
+        Self: 'g;
+    /// Called once a session's terminal values are read.
+    fn release<'g>(scratch: &mut Self::Scratch, groups: Vec<(Role, Self::Group<'g>)>)
+    where
+        Self: 'g;
+    /// Free the stored layer `s`, which no later session reads.
+    fn drop_layer(&mut self, s: usize);
+}
+
+/// Row-major fraction trees and the integer lanes of the recentred stacks.
+struct RowLayout {
+    trees: Vec<FractionTree>,
+    /// The centre of the integer path of session `depth - 1` per stack.
+    centers: Vec<Option<i32>>,
+    sym: Vec<Option<SymLanes>>,
+}
+
+impl ProverLayout for RowLayout {
+    type Group<'g> = SessionGroup<'g>;
+    /// Two shared arenas give the concurrent groups four spares in total (the shared pair
+    /// can serve only two folds at once); they persist across sessions, so each size class
+    /// is allocated once and reused.
+    type Scratch = [crate::kernel::SharedArena; 2];
+
+    fn build(inputs: &ProverInputs<'_>) -> Self {
+        let (stacks, shape, xs) = (inputs.stacks, inputs.shape, inputs.xs);
+        let challenges = xs.len();
+        // The centre of the integer path of session `depth - 1` per stack (prover only).
+        let centers: Vec<Option<i32>> = if inputs.dedicated {
+            stacks.iter().map(|stack| SymLanes::center(&stack.stacked)).collect()
+        } else {
+            stacks.iter().map(|_| None).collect()
+        };
+        // The trees of every stack and table, all challenges of one stack or table in the same
+        // passes; the stacks and tables are built concurrently, so the small trees' serial top
+        // layers overlap the main stack's passes.
+        let (sym, mut built): (Vec<Option<SymLanes>>, Vec<Vec<FractionTree>>) = (0..shape.per_challenge())
+            .into_par_iter()
+            .map(|local| {
+                if local < stacks.len() {
+                    let stacked = &stacks[local].stacked;
+                    match centers[local] {
+                        Some(center) => {
+                            let xs_j: Vec<E> = (0..challenges).map(|x| inputs.centred(local, x, center)).collect();
+                            let (trees, lanes) = sym_trees(stacked, center, &xs_j);
+                            (Some(lanes), trees)
+                        }
+                        None => {
+                            let xs_j: Vec<E> = (0..challenges).map(|x| inputs.shifted(local, x)).collect();
+                            (None, stack_trees(stacked, &xs_j))
+                        }
+                    }
+                } else {
+                    (None, table_trees(&inputs.multiplicities[local - stacks.len()], xs))
+                }
+            })
+            .unzip();
+        let sym: Vec<Option<SymLanes>> = sym.into_iter().take(stacks.len()).collect();
+        let trees: Vec<FractionTree> = (0..shape.tree_count())
+            .map(|id| {
+                let (x, kind) = shape.tree(id);
+                let local = match kind {
+                    TreeKind::Stack(j) => j,
+                    TreeKind::Table(t) => stacks.len() + t,
+                };
+                std::mem::take(&mut built[local][x])
+            })
+            .collect();
+        drop(built);
+        debug_assert!(trees.iter().all(|t| t.root().1 == root_of(&t.layer1()).1));
+        Self { trees, centers, sym }
+    }
+
+    fn scratch() -> Self::Scratch {
+        [crate::kernel::TableArena::shared(), crate::kernel::TableArena::shared()]
+    }
+
+    fn layer1(&self) -> Vec<[E; 4]> {
+        self.trees.iter().map(FractionTree::layer1).collect()
+    }
+
+    fn layer_bytes(&self) -> usize {
+        self.trees.iter().map(FractionTree::bytes).sum()
+    }
+
+    fn layer_groups<'g>(
+        &'g self,
+        inputs: &'g ProverInputs<'g>,
+        cx: &SessionCx<'_>,
+        ids: &[usize],
+        _scratch: &mut Self::Scratch,
+        groups: &mut Vec<(Role, SessionGroup<'g>)>,
+    ) -> Result<(), LookupError> {
+        let (stacks, s, half, point) = (inputs.stacks, cx.s, cx.half, cx.point);
+        // Trees whose layer `s` is the one above their leaves run on the stack's integer
+        // lanes; the others on their stored layer.
+        let mut stored = Vec::new();
+        let mut by_stack: Vec<Vec<(usize, E, E, E)>> = vec![Vec::new(); stacks.len()];
+        for &id in ids {
+            let (x, tree_kind) = inputs.shape.tree(id);
+            match tree_kind {
+                TreeKind::Stack(j) if self.sym[j].is_some() && stacks[j].shape.depth() == s + 1 => {
+                    let (gp, gq) = cx.gamma_of(id);
+                    by_stack[j].push((id, inputs.centred(j, x, self.centers[j].unwrap_or(0)), gp, gq));
+                }
+                _ => stored.push(id),
+            }
+        }
+        for (j, list) in by_stack.iter().enumerate().filter(|(_, l)| !l.is_empty()) {
+            let sym_lanes = &self.sym[j].as_ref().expect("an integer-path stack").lanes;
+            let trees_x: Vec<(E, E, E)> = list.iter().map(|&(_, x, gp, gq)| (x, gp, gq)).collect();
+            let coefficients = SymLanes::coefficients(&trees_x);
+            let [s0, s1, m0, m1] = sym_lanes.each_ref().map(Vec::as_slice);
+            // Recentred leaves |a|, |b| <= 2^15 (`SymLanes::of`) bound the lanes
+            // without a scan: |S| = |a + b| <= 2^16, |M| = |a b| <= 2^30.
+            let bounded = IntPairGroup::with_magnitudes(
+                [s0, s1],
+                Some([m0, m1]),
+                coefficients,
+                point,
+                SYM_SPREAD,
+                SYM_SPREAD * SYM_SPREAD / 4,
+            );
+            let group = match bounded {
+                Some(group) => SessionGroup::Pair(group),
+                None => {
+                    let lanes = sym_lanes.iter().map(|lane| Lane::Source(Source::Ints(lane))).collect();
+                    SessionGroup::Generic(
+                        Group::new(lanes, SymLanes::instances(coefficients), Some(point), s - 1, DEGREE)
+                            .map_err(LookupError::Kernel)?,
+                    )
+                }
+            };
+            groups.push((Role::Sym(list.iter().map(|&(id, x, _, _)| (id, x)).collect()), group));
+        }
+        if stored.is_empty() {
+            return Ok(());
+        }
+        let dedicated_group = if inputs.dedicated {
+            let layer_trees = stored
+                .iter()
+                .map(|&id| {
+                    let layer = &self.trees[id].layers[s];
+                    let (gamma_p, gamma_q) = cx.gamma_of(id);
+                    LayerTree {
+                        p: &layer.p,
+                        q: &layer.q,
+                        gamma_p,
+                        gamma_q,
+                    }
+                })
+                .collect();
+            LayerGroup::new(layer_trees, point)
+        } else {
+            None
+        };
+        let group = match dedicated_group {
+            Some(group) => SessionGroup::Layer(group),
+            None => {
+                let lanes: Vec<Lane<'_>> = stored
+                    .iter()
+                    .flat_map(|&id| {
+                        let layer = &self.trees[id].layers[s];
+                        let (p0, p1) = layer.p.split_at(half);
+                        let (q0, q1) = layer.q.split_at(half);
+                        [p0, p1, q0, q1].map(|cells| Lane::Source(Source::Field(cells)))
+                    })
+                    .collect();
+                let instances = stored
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(i, &id)| layer_instances(i, cx.gamma_of(id)))
+                    .collect();
+                SessionGroup::Generic(
+                    Group::new(lanes, instances, Some(point), s - 1, DEGREE).map_err(LookupError::Kernel)?,
+                )
+            }
+        };
+        groups.push((Role::Trees(stored), group));
+        Ok(())
+    }
+
+    fn stack_pair<'g>(
+        v: [&'g [i32]; 2],
+        [constant, linear, bilinear]: [E; 3],
+        point: &[E],
+        _scratch: &mut Self::Scratch,
+    ) -> Option<SessionGroup<'g>>
+    where
+        Self: 'g,
+    {
+        let c = [constant, linear, bilinear, E::zero(), E::zero()];
+        IntPairGroup::new(v, None, c, point).map(SessionGroup::Pair)
+    }
+
+    fn generic<'g>(group: Group<'g>) -> SessionGroup<'g>
+    where
+        Self: 'g,
+    {
+        SessionGroup::Generic(group)
+    }
+
+    fn ready<'g>(scratch: &Self::Scratch, groups: &mut [(Role, SessionGroup<'g>)])
+    where
+        Self: 'g,
+    {
+        for (i, (_, group)) in groups.iter_mut().enumerate() {
+            group.set_arena(&scratch[i % scratch.len()]);
+        }
+    }
+
+    fn release<'g>(_scratch: &mut Self::Scratch, groups: Vec<(Role, SessionGroup<'g>)>)
+    where
+        Self: 'g,
+    {
+        drop(groups);
+    }
+
+    fn drop_layer(&mut self, s: usize) {
+        // Layer `s` is not read again: unmapped on a detached thread, off the PIOP branch's
+        // critical path.
+        let done: Vec<Layer> = self
+            .trees
+            .iter_mut()
+            .filter_map(|tree| tree.layers.get_mut(s).map(std::mem::take))
+            .collect();
+        agg_pcs_config::sched::drop_in_background("lookup layer", done);
+    }
+}
+
+/// The session driver shared by the table layouts: every transcript event of the lookup
+/// prover, in order (challenges `X`, layer 1, `mu_1`, then per session the gammas, the
+/// round messages and challenges, the terminals, the leaves and `mu_s`).
+#[allow(clippy::too_many_lines)]
+fn prove_sessions<L: ProverLayout>(
+    stacks: &[LookupStack<'_>],
+    tables: &[Table],
+    multiplicities: &[Vec<i32>],
+    challenges: usize,
+    fs: &mut impl LookupTranscript,
+    check: bool,
+    dedicated: bool,
+) -> Result<LookupOutput, LookupError> {
     let start = Instant::now();
     let shape = LookupShape::of(stacks, tables, challenges);
     shape.validate()?;
@@ -1640,61 +1987,23 @@ fn prove_with(
     }
     let index_halves: Vec<(Vec<i32>, Vec<i32>)> = tables.iter().map(|t| t.index_halves()).collect();
     let xs = fs.challenges(LookupSite::X, challenges)?;
+    let inputs = ProverInputs {
+        stacks,
+        multiplicities,
+        shape: &shape,
+        xs: &xs,
+        dedicated,
+    };
 
     let build = Instant::now();
-    // The centre of the integer path of session `depth - 1` per stack (prover only).
-    let centers: Vec<Option<i32>> = if dedicated {
-        stacks.iter().map(|stack| SymLanes::center(&stack.stacked)).collect()
-    } else {
-        stacks.iter().map(|_| None).collect()
-    };
-    let shifted = |j: usize, x: usize| xs[x] - E::from_i64(i64::from(stacks[j].shape.shift));
-    // `X - shift - c` for an integer-path stack of centre `c`.
-    let centred = |j: usize, x: usize| shifted(j, x) - E::from_i64(i64::from(centers[j].unwrap_or(0)));
-    // The trees of every stack and table, all challenges of one stack or table in the same
-    // passes; the stacks and tables are built concurrently, so the small trees' serial top
-    // layers overlap the main stack's passes.
-    let (sym, mut built): (Vec<Option<SymLanes>>, Vec<Vec<FractionTree>>) = (0..shape.per_challenge())
-        .into_par_iter()
-        .map(|local| {
-            if local < stacks.len() {
-                let stacked = &stacks[local].stacked;
-                match centers[local] {
-                    Some(center) => {
-                        let xs_j: Vec<E> = (0..challenges).map(|x| centred(local, x)).collect();
-                        let (trees, lanes) = sym_trees(stacked, center, &xs_j);
-                        (Some(lanes), trees)
-                    }
-                    None => {
-                        let xs_j: Vec<E> = (0..challenges).map(|x| shifted(local, x)).collect();
-                        (None, stack_trees(stacked, &xs_j))
-                    }
-                }
-            } else {
-                (None, table_trees(&multiplicities[local - stacks.len()], &xs))
-            }
-        })
-        .unzip();
-    let sym: Vec<Option<SymLanes>> = sym.into_iter().take(stacks.len()).collect();
-    let mut trees: Vec<FractionTree> = (0..shape.tree_count())
-        .map(|id| {
-            let (x, kind) = shape.tree(id);
-            let local = match kind {
-                TreeKind::Stack(j) => j,
-                TreeKind::Table(t) => stacks.len() + t,
-            };
-            std::mem::take(&mut built[local][x])
-        })
-        .collect();
-    drop(built);
+    let mut layout = L::build(&inputs);
     let mut stats = ProveStats {
         trees: build.elapsed().as_secs_f64(),
-        layer_bytes: trees.iter().map(FractionTree::bytes).sum(),
+        layer_bytes: layout.layer_bytes(),
         ..ProveStats::default()
     };
-    debug_assert!(trees.iter().all(|t| t.root().1 == root_of(&t.layer1()).1));
 
-    let layer1: Vec<[E; 4]> = trees.iter().map(FractionTree::layer1).collect();
+    let layer1: Vec<[E; 4]> = layout.layer1();
     if check {
         check_roots(&shape, &layer1)?;
     }
@@ -1709,10 +2018,7 @@ fn prove_with(
     let mut stack_claims: Vec<Option<(Vec<E>, E)>> = vec![None; stacks.len()];
     let mut table_claims: Vec<Option<(Vec<E>, E)>> = vec![None; tables.len()];
     let mut sessions = Vec::new();
-    // Two shared arenas give the concurrent groups four spares in total (the shared pair
-    // can serve only two folds at once); they persist across sessions, so each size class
-    // is allocated once and reused.
-    let arenas = [crate::kernel::TableArena::shared(), crate::kernel::TableArena::shared()];
+    let mut scratch = L::scratch();
 
     for s in 2..=shape.max_depth() {
         let session_start = Instant::now();
@@ -1724,115 +2030,31 @@ fn prove_with(
         }
         let plan = session_plan(&shape, s, &xs, &active, &gammas);
         let half = 1_usize << (s - 1);
-        let gamma_of = |id: usize| {
-            let i = active.binary_search(&id).expect("an active tree");
-            (gammas[2 * i], gammas[2 * i + 1])
+        let cx = SessionCx {
+            s,
+            half,
+            point: &point,
+            active: &active,
+            gammas: &gammas,
         };
-        let mut groups: Vec<(Role, SessionGroup<'_>)> = Vec::with_capacity(plan.groups.len());
+        let mut groups: Vec<(Role, L::Group<'_>)> = Vec::with_capacity(plan.groups.len());
         for (kind, instances) in &plan.groups {
             match kind {
-                GroupKind::Layer(ids) => {
-                    // Trees whose layer `s` is the one above their leaves run on the stack's
-                    // integer lanes; the others on their stored layer.
-                    let mut stored = Vec::new();
-                    let mut by_stack: Vec<Vec<(usize, E, E, E)>> = vec![Vec::new(); stacks.len()];
-                    for &id in ids {
-                        let (x, tree_kind) = shape.tree(id);
-                        match tree_kind {
-                            TreeKind::Stack(j) if sym[j].is_some() && stacks[j].shape.depth() == s + 1 => {
-                                let (gp, gq) = gamma_of(id);
-                                by_stack[j].push((id, centred(j, x), gp, gq));
-                            }
-                            _ => stored.push(id),
-                        }
-                    }
-                    for (j, list) in by_stack.iter().enumerate().filter(|(_, l)| !l.is_empty()) {
-                        let sym_lanes = &sym[j].as_ref().expect("an integer-path stack").lanes;
-                        let trees_x: Vec<(E, E, E)> = list.iter().map(|&(_, x, gp, gq)| (x, gp, gq)).collect();
-                        let coefficients = SymLanes::coefficients(&trees_x);
-                        let [s0, s1, m0, m1] = sym_lanes.each_ref().map(Vec::as_slice);
-                        // Recentred leaves |a|, |b| <= 2^15 (`SymLanes::of`) bound the lanes
-                        // without a scan: |S| = |a + b| <= 2^16, |M| = |a b| <= 2^30.
-                        let bounded = IntPairGroup::with_magnitudes(
-                            [s0, s1],
-                            Some([m0, m1]),
-                            coefficients,
-                            &point,
-                            SYM_SPREAD,
-                            SYM_SPREAD * SYM_SPREAD / 4,
-                        );
-                        let group = match bounded {
-                            Some(group) => SessionGroup::Pair(group),
-                            None => {
-                                let lanes = sym_lanes.iter().map(|lane| Lane::Source(Source::Ints(lane))).collect();
-                                SessionGroup::Generic(
-                                    Group::new(lanes, SymLanes::instances(coefficients), Some(&point), s - 1, DEGREE)
-                                        .map_err(LookupError::Kernel)?,
-                                )
-                            }
-                        };
-                        groups.push((Role::Sym(list.iter().map(|&(id, x, _, _)| (id, x)).collect()), group));
-                    }
-                    if stored.is_empty() {
-                        continue;
-                    }
-                    let dedicated_group = if dedicated {
-                        let layer_trees = stored
-                            .iter()
-                            .map(|&id| {
-                                let layer = &trees[id].layers[s];
-                                let (gamma_p, gamma_q) = gamma_of(id);
-                                LayerTree {
-                                    p: &layer.p,
-                                    q: &layer.q,
-                                    gamma_p,
-                                    gamma_q,
-                                }
-                            })
-                            .collect();
-                        LayerGroup::new(layer_trees, &point)
-                    } else {
-                        None
-                    };
-                    let group = match dedicated_group {
-                        Some(group) => SessionGroup::Layer(group),
-                        None => {
-                            let lanes: Vec<Lane<'_>> = stored
-                                .iter()
-                                .flat_map(|&id| {
-                                    let layer = &trees[id].layers[s];
-                                    let (p0, p1) = layer.p.split_at(half);
-                                    let (q0, q1) = layer.q.split_at(half);
-                                    [p0, p1, q0, q1].map(|cells| Lane::Source(Source::Field(cells)))
-                                })
-                                .collect();
-                            let instances = stored
-                                .iter()
-                                .enumerate()
-                                .flat_map(|(i, &id)| layer_instances(i, gamma_of(id)))
-                                .collect();
-                            SessionGroup::Generic(
-                                Group::new(lanes, instances, Some(&point), s - 1, DEGREE)
-                                    .map_err(LookupError::Kernel)?,
-                            )
-                        }
-                    };
-                    groups.push((Role::Trees(stored), group));
-                }
+                GroupKind::Layer(ids) => layout.layer_groups(&inputs, &cx, ids, &mut scratch, &mut groups)?,
                 GroupKind::Stack(j) => {
                     let (v0, v1) = stacks[*j].stacked.split_at(half);
                     // The plan's instances: constant, linear on v_0 + v_1, bilinear v_0 v_1.
                     let pair = if dedicated && instances.len() == 3 {
-                        let c = [instances[0].gamma, instances[1].gamma, instances[2].gamma, E::zero(), E::zero()];
-                        IntPairGroup::new([v0, v1], None, c, &point)
+                        let c = [instances[0].gamma, instances[1].gamma, instances[2].gamma];
+                        L::stack_pair([v0, v1], c, &point, &mut scratch)
                     } else {
                         None
                     };
                     let group = match pair {
-                        Some(group) => SessionGroup::Pair(group),
+                        Some(group) => group,
                         None => {
                             let lanes = vec![Lane::Source(Source::Ints(v0)), Lane::Source(Source::Ints(v1))];
-                            SessionGroup::Generic(
+                            L::generic(
                                 Group::new(lanes, instances.clone(), Some(&point), s - 1, DEGREE)
                                     .map_err(LookupError::Kernel)?,
                             )
@@ -1851,13 +2073,11 @@ fn prove_with(
                     ];
                     let group = Group::new(lanes, instances.clone(), Some(&point), s - 1, DEGREE)
                         .map_err(LookupError::Kernel)?;
-                    groups.push((Role::Leaves, SessionGroup::Generic(group)));
+                    groups.push((Role::Leaves, L::generic(group)));
                 }
             }
         }
-        for (i, (_, group)) in groups.iter_mut().enumerate() {
-            group.set_arena(&arenas[i % arenas.len()]);
-        }
+        L::ready(&scratch, &mut groups);
         let mut rounds = Vec::with_capacity(s - 1);
         let mut rho = Vec::with_capacity(s - 1);
         // While the tables are large, the groups' messages are computed concurrently (each
@@ -1908,13 +2128,13 @@ fn prove_with(
                 }
                 Role::Sym(list) => {
                     for &(id, x) in list {
-                        by_tree[id] = Some(SymLanes::terminal(&values, x));
+                        by_tree[id] = Some(sym_terminal(&values, x));
                     }
                 }
                 Role::Leaves => leaves.push([values[0], values[1]]),
             }
         }
-        drop(groups);
+        L::release(&mut scratch, groups);
         let terminals: Vec<[E; 4]> = plan
             .continuing
             .iter()
@@ -1934,13 +2154,7 @@ fn prove_with(
             table_claims[t] = Some((rho.clone(), line(leaf[0], leaf[1], mu)));
         }
         point = rho;
-        // Layer `s` is not read again: unmapped on a detached thread, off the PIOP branch's
-        // critical path.
-        let done: Vec<Layer> = trees
-            .iter_mut()
-            .filter_map(|tree| tree.layers.get_mut(s).map(std::mem::take))
-            .collect();
-        agg_pcs_config::sched::drop_in_background("lookup layer", done);
+        layout.drop_layer(s);
         sessions.push(SessionProof {
             rounds,
             terminals,

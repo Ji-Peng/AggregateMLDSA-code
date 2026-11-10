@@ -10,10 +10,8 @@ use jolt_field::{Ring, Zero};
 use rayon::prelude::*;
 
 use super::{
-    check_roots, evaluate_compressed, layer_instances, line, one, root_of, session_plan, Group,
-    GroupKind, Lane, LookupError, LookupOutput, LookupShape, LookupStack, LookupSite,
-    LookupTranscript, ProveStats, SessionProof, Source, Table, TreeKind, SYM_SPREAD,
-    CONCURRENT_GROUP_ROUNDS_MIN_VARS, DEGREE,
+    layer_instances, root_of, Group, Lane, LookupError, ProverInputs, ProverLayout, Role,
+    SessionCx, SessionOps, Source, TreeKind, DEGREE, SYM_SPREAD,
 };
 use crate::kernel::{PlaneLayerGroup, PlaneLayerTree, PlaneLeafGroup};
 use crate::OpeningField as E;
@@ -64,13 +62,6 @@ impl StackCentre {
             mm += gq;
         }
         [constant, sum_s, sum_m, cross, mm]
-    }
-
-    /// `P_0, P_1, Q_0, Q_1` at a point from `S_0, S_1, M_0, M_1` there.
-    fn terminal(values: &[E], x: E) -> [E; 4] {
-        let (s0, s1, m0, m1) = (values[0], values[1], values[2], values[3]);
-        let two_x = x + x;
-        [two_x - s0, two_x - s1, x * (x - s0) + m0, x * (x - s1) + m1]
     }
 }
 
@@ -166,29 +157,19 @@ impl FractionTree {
     }
 }
 
-/// What the prover's group of a session yields at its terminal.
-enum Role {
-    /// `P_0, P_1, Q_0, Q_1` of these trees, in order.
-    Trees(Vec<usize>),
-    /// `S_0, S_1, M_0, M_1` of a stack shared by these trees `(id, X')`.
-    Sym(Vec<(usize, E)>),
-    /// The two leaf-lane values of an ending stack or table.
-    Leaves,
-}
-
 /// Trees of one dedicated layer group: two slots and four lanes per tree (sixteen trees, 64
 /// lanes, within the fused kernel's limits).
 const LAYER_GROUP_TREES: usize = 16;
 
 /// A prover group on planes, or the generic kernel when the shape does not fit.
 #[allow(clippy::large_enum_variant)]
-enum SessionGroup<'a> {
+pub(super) enum SessionGroup<'a> {
     Generic(Group<'a>),
     Layer(PlaneLayerGroup<'a>),
     Leaf(PlaneLeafGroup<'a>),
 }
 
-impl SessionGroup<'_> {
+impl SessionOps for SessionGroup<'_> {
     fn round_message(&mut self, round: usize) -> Vec<E> {
         match self {
             Self::Generic(g) => g.round_message(round),
@@ -228,7 +209,9 @@ impl SessionGroup<'_> {
             Self::Leaf(g) => g.terminal_values(),
         }
     }
+}
 
+impl SessionGroup<'_> {
     fn recycle(self, pool: &mut agg_simd::buf::Pool) {
         match self {
             Self::Generic(_) => {}
@@ -238,400 +221,243 @@ impl SessionGroup<'_> {
     }
 }
 
-#[allow(clippy::too_many_lines)]
-pub(super) fn prove_with(
-    stacks: &[LookupStack<'_>],
-    tables: &[Table],
-    multiplicities: &[Vec<i32>],
-    challenges: usize,
-    fs: &mut impl LookupTranscript,
-    check: bool,
-    dedicated: bool,
-) -> Result<LookupOutput, LookupError> {
-    let start = std::time::Instant::now();
-    let shape = LookupShape::of(stacks, tables, challenges);
-    shape.validate()?;
-    if multiplicities.len() != tables.len()
-        || multiplicities.iter().zip(tables).any(|(m, t)| m.len() != t.len())
-    {
-        return Err(LookupError::Shape(
-            "one multiplicity column per table entry".into(),
-        ));
+/// Plane fraction trees and the centres of the integer-path stacks.
+pub(super) struct PlaneLayout {
+    trees: Vec<FractionTree>,
+    /// The integer path of session `depth - 1` per stack.
+    sym: Vec<Option<StackCentre>>,
+}
+
+impl PlaneLayout {
+    fn center(&self, j: usize) -> i32 {
+        self.sym[j].as_ref().map_or(0, |centre| centre.center)
     }
-    let index_halves: Vec<(Vec<i32>, Vec<i32>)> = tables.iter().map(|t| t.index_halves()).collect();
-    let xs = fs.challenges(LookupSite::X, challenges)?;
+}
 
-    let build = std::time::Instant::now();
-    // The integer path of session `depth - 1` per stack.
-    let sym: Vec<Option<StackCentre>> = if dedicated {
-        stacks
-            .iter()
-            .map(|stack| StackCentre::of(&stack.stacked))
-            .collect()
-    } else {
-        stacks.iter().map(|_| None).collect()
-    };
-    let shifted = |j: usize, x: usize| xs[x] - E::from_i64(i64::from(stacks[j].shape.shift));
-    let centred = |j: usize, x: usize| {
-        shifted(j, x)
-            - E::from_i64(i64::from(
-                sym[j].as_ref().map_or(0, |centre| centre.center),
-            ))
-    };
-    // Layer `depth - 3` of every challenge of a centred stack; layer `depth - 2` is
-    // recomputed from the leaves in its session instead of being stored.
-    let mut uppers: Vec<Vec<Layer>> = (0..stacks.len())
-        .map(|j| {
-            if let Some(centre) = &sym[j] {
-                let xs_j: Vec<E> = (0..challenges).map(|x| centred(j, x)).collect();
-                stack_upper_parents(&stacks[j].stacked, centre.center, &xs_j)
-            } else {
-                Vec::new()
-            }
-        })
-        .collect();
-    let mut trees: Vec<FractionTree> = (0..shape.tree_count())
-        .map(|id| {
-            let (x, kind) = shape.tree(id);
-            match kind {
-                TreeKind::Stack(j) if sym[j].is_some() => {
-                    FractionTree::from_upper(std::mem::take(&mut uppers[j][x]), stacks[j].shape.depth())
-                }
-                TreeKind::Stack(j) => {
-                    FractionTree::from_bottom(stack_bottom(&stacks[j].stacked, shifted(j, x)))
-                }
-                TreeKind::Table(t) => {
-                    FractionTree::from_bottom(table_bottom(&multiplicities[t], xs[x]))
-                }
-            }
-        })
-        .collect();
-    drop(uppers);
-    let mut stats = ProveStats {
-        trees: build.elapsed().as_secs_f64(),
-        layer_bytes: trees.iter().map(FractionTree::bytes).sum(),
-        ..ProveStats::default()
-    };
-    debug_assert!(trees.iter().all(|t| t.root().1 == root_of(&t.layer1()).1));
+impl ProverLayout for PlaneLayout {
+    type Group<'g> = SessionGroup<'g>;
+    /// Table buffers of the plane groups, reused across the sessions.
+    type Scratch = agg_simd::buf::Pool;
 
-    let layer1: Vec<[E; 4]> = trees.iter().map(FractionTree::layer1).collect();
-    if check {
-        check_roots(&shape, &layer1)?;
-    }
-    fs.absorb(LookupSite::Layer1, &layer1.concat())?;
-    let mu = one(fs, LookupSite::Mu(1))?;
-    let mut point = vec![mu];
-    let mut claims: Vec<(E, E)> = layer1
-        .iter()
-        .map(|&[p0, p1, q0, q1]| (line(p0, p1, mu), line(q0, q1, mu)))
-        .collect();
-    let mut stack_claims: Vec<Option<(Vec<E>, E)>> = vec![None; stacks.len()];
-    let mut table_claims: Vec<Option<(Vec<E>, E)>> = vec![None; tables.len()];
-    let mut sessions = Vec::new();
-    // Table buffers of the plane groups, reused across the sessions.
-    let mut pool = agg_simd::buf::Pool::default();
-
-    for s in 2..=shape.max_depth() {
-        let session_start = std::time::Instant::now();
-        let active: Vec<usize> = (0..shape.tree_count())
-            .filter(|&id| shape.tree_depth(id) >= s)
-            .collect();
-        let gammas = fs.challenges(LookupSite::Gamma(s), 2 * active.len())?;
-        let mut claim = E::zero();
-        for (i, &id) in active.iter().enumerate() {
-            claim += gammas[2 * i] * claims[id].0 + gammas[2 * i + 1] * claims[id].1;
-        }
-        let plan = session_plan(&shape, s, &xs, &active, &gammas);
-        let half = 1_usize << (s - 1);
-        let gamma_of = |id: usize| {
-            let i = active.binary_search(&id).expect("an active tree");
-            (gammas[2 * i], gammas[2 * i + 1])
+    fn build(inputs: &ProverInputs<'_>) -> Self {
+        let (stacks, shape, xs) = (inputs.stacks, inputs.shape, inputs.xs);
+        let challenges = xs.len();
+        // The integer path of session `depth - 1` per stack.
+        let sym: Vec<Option<StackCentre>> = if inputs.dedicated {
+            stacks
+                .iter()
+                .map(|stack| StackCentre::of(&stack.stacked))
+                .collect()
+        } else {
+            stacks.iter().map(|_| None).collect()
         };
-        let mut groups: Vec<(Role, SessionGroup<'_>)> = Vec::with_capacity(plan.groups.len());
-        for (kind, instances) in &plan.groups {
-            match kind {
-                GroupKind::Layer(ids) => {
-                    let mut stored = Vec::new();
-                    let mut by_stack: Vec<Vec<(usize, E, E, E)>> = vec![Vec::new(); stacks.len()];
-                    let mut from_leaves: Vec<Vec<(usize, E, E, E)>> =
-                        vec![Vec::new(); stacks.len()];
-                    for &id in ids {
-                        let (x, tree_kind) = shape.tree(id);
-                        match tree_kind {
-                            TreeKind::Stack(j)
-                                if sym[j].is_some() && stacks[j].shape.depth() == s + 1 =>
-                            {
-                                let (gp, gq) = gamma_of(id);
-                                by_stack[j].push((id, centred(j, x), gp, gq));
-                            }
-                            TreeKind::Stack(j)
-                                if sym[j].is_some() && stacks[j].shape.depth() == s + 2 =>
-                            {
-                                let (gp, gq) = gamma_of(id);
-                                from_leaves[j].push((id, centred(j, x), gp, gq));
-                            }
-                            _ => stored.push(id),
-                        }
-                    }
-                    for (j, list) in from_leaves.iter().enumerate().filter(|(_, l)| !l.is_empty())
-                    {
-                        let centre = sym[j].as_ref().expect("an integer-path stack").center;
-                        let xs_j: Vec<E> = list.iter().map(|&(_, x, _, _)| x).collect();
-                        let gammas_j: Vec<(E, E)> =
-                            list.iter().map(|&(_, _, gp, gq)| (gp, gq)).collect();
-                        let rows = agg_simd::lookup::UpperRows::new(
-                            &stacks[j].stacked,
-                            centre,
-                            &powers4(&xs_j),
-                        );
-                        // The centre gate (depth >= 5, spread <= 2^16) guarantees the group.
-                        let group =
-                            PlaneLayerGroup::from_leaves(rows, &gammas_j, &point, &mut pool)
-                                .expect("a centred stack of depth s + 2 fits the leaf-computed layer group");
-                        groups.push((
-                            Role::Trees(list.iter().map(|&(id, ..)| id).collect()),
-                            SessionGroup::Layer(group),
-                        ));
-                    }
-                    for (j, list) in by_stack.iter().enumerate().filter(|(_, l)| !l.is_empty()) {
-                        let centre = sym[j].as_ref().expect("an integer-path stack").center;
-                        let trees_x: Vec<(E, E, E)> =
-                            list.iter().map(|&(_, x, gp, gq)| (x, gp, gq)).collect();
-                        let coefficients = StackCentre::coefficients(&trees_x);
-                        // The centre gate (depth >= 5, spread <= 2^16) guarantees the group.
-                        let group = PlaneLeafGroup::symmetric(
-                            &stacks[j].stacked,
-                            centre,
-                            coefficients,
-                            &point,
-                            &mut pool,
-                        )
-                        .expect("a centred stack of depth s + 1 fits the leaf group");
-                        groups.push((
-                            Role::Sym(list.iter().map(|&(id, x, _, _)| (id, x)).collect()),
-                            SessionGroup::Leaf(group),
-                        ));
-                    }
-                    if stored.is_empty() {
-                        continue;
-                    }
-                    // The dedicated layer group holds at most LAYER_GROUP_TREES trees (the
-                    // fused kernel's slot and lane limits); more trees (ML-DSA-87's eight
-                    // stacks) take one group per chunk, whose messages add up.
-                    let chunks: Vec<Vec<usize>> = if dedicated {
-                        stored.chunks(LAYER_GROUP_TREES).map(<[usize]>::to_vec).collect()
-                    } else {
-                        vec![stored]
-                    };
-                    for stored in chunks {
-                        let dedicated_group = if dedicated {
-                            let layer_trees = stored
-                                .iter()
-                                .map(|&id| {
-                                    let layer = &trees[id].layers[s];
-                                    let (gamma_p, gamma_q) = gamma_of(id);
-                                    PlaneLayerTree {
-                                        p: &layer.p,
-                                        q: &layer.q,
-                                        gamma_p,
-                                        gamma_q,
-                                    }
-                                })
-                                .collect();
-                            PlaneLayerGroup::new(layer_trees, &point, &mut pool)
-                        } else {
-                            None
-                        };
-                        let group = match dedicated_group {
-                            Some(group) => SessionGroup::Layer(group),
-                            None => {
-                                let lanes: Vec<Lane<'_>> = stored
-                                    .iter()
-                                    .flat_map(|&id| {
-                                        let layer = &trees[id].layers[s];
-                                        let (p0, p1) = layer.p.planes();
-                                        let (q0, q1) = layer.q.planes();
-                                        [(p0, p1), (q0, q1)].into_iter().flat_map(|(a, b)| {
-                                            [
-                                                Lane::Source(Source::PlaneSlice((
-                                                    &a[..half],
-                                                    &b[..half],
-                                                ))),
-                                                Lane::Source(Source::PlaneSlice((
-                                                    &a[half..],
-                                                    &b[half..],
-                                                ))),
-                                            ]
-                                        })
-                                    })
-                                    .collect();
-                                let instances = stored
-                                    .iter()
-                                    .enumerate()
-                                    .flat_map(|(i, &id)| layer_instances(i, gamma_of(id)))
-                                    .collect();
-                                SessionGroup::Generic(
-                                    Group::new(lanes, instances, Some(&point), s - 1, DEGREE)
-                                        .map_err(LookupError::Kernel)?,
-                                )
-                            }
-                        };
-                        groups.push((Role::Trees(stored), group));
-                    }
+        // Layer `depth - 3` of every challenge of a centred stack; layer `depth - 2` is
+        // recomputed from the leaves in its session instead of being stored.
+        let mut uppers: Vec<Vec<Layer>> = (0..stacks.len())
+            .map(|j| {
+                if let Some(centre) = &sym[j] {
+                    let xs_j: Vec<E> = (0..challenges)
+                        .map(|x| inputs.centred(j, x, centre.center))
+                        .collect();
+                    stack_upper_parents(&stacks[j].stacked, centre.center, &xs_j)
+                } else {
+                    Vec::new()
                 }
-                GroupKind::Stack(j) => {
-                    let (v0, v1) = stacks[*j].stacked.split_at(half);
-                    let pair = if dedicated && instances.len() == 3 {
-                        let c = [instances[0].gamma, instances[1].gamma, instances[2].gamma];
-                        PlaneLeafGroup::bottom(v0, v1, c, &point, &mut pool)
-                    } else {
-                        None
-                    };
-                    let group = match pair {
-                        Some(group) => SessionGroup::Leaf(group),
-                        None => {
-                            let lanes = vec![
-                                Lane::Source(Source::Ints(v0)),
-                                Lane::Source(Source::Ints(v1)),
-                            ];
-                            SessionGroup::Generic(
-                                Group::new(lanes, instances.clone(), Some(&point), s - 1, DEGREE)
-                                    .map_err(LookupError::Kernel)?,
-                            )
-                        }
-                    };
-                    groups.push((Role::Leaves, group));
-                }
-                GroupKind::Table(t) => {
-                    let (m0, m1) = multiplicities[*t].split_at(half);
-                    let (t0, t1) = &index_halves[*t];
-                    let lanes = vec![
-                        Lane::Source(Source::Ints(m0)),
-                        Lane::Source(Source::Ints(m1)),
-                        Lane::Source(Source::Ints(t0)),
-                        Lane::Source(Source::Ints(t1)),
-                    ];
-                    let group = Group::new(lanes, instances.clone(), Some(&point), s - 1, DEGREE)
-                        .map_err(LookupError::Kernel)?;
-                    groups.push((Role::Leaves, SessionGroup::Generic(group)));
-                }
-            }
-        }
-        let mut rounds = Vec::with_capacity(s - 1);
-        let mut rho = Vec::with_capacity(s - 1);
-        for round in 0..s - 1 {
-            let concurrent = groups.len() > 1 && s - 1 - round >= CONCURRENT_GROUP_ROUNDS_MIN_VARS;
-            let parts: Vec<Vec<E>> = if concurrent {
-                groups
-                    .par_iter_mut()
-                    .map(|(_, group)| group.round_message(round))
-                    .collect()
-            } else {
-                groups
-                    .iter_mut()
-                    .map(|(_, group)| group.round_message(round))
-                    .collect()
-            };
-            let mut message = vec![E::zero(); DEGREE];
-            for part in parts {
-                for (slot, value) in message.iter_mut().zip(part) {
-                    *slot += value;
-                }
-            }
-            fs.absorb(LookupSite::Round(s, round), &message)?;
-            let challenge = one(fs, LookupSite::RoundChallenge(s, round))?;
-            claim = evaluate_compressed(&message, claim, challenge);
-            if concurrent {
-                groups
-                    .par_iter_mut()
-                    .for_each(|(_, group)| group.bind(round, challenge));
-            } else {
-                for (_, group) in &mut groups {
-                    group.bind(round, challenge);
-                }
-            }
-            rounds.push(message);
-            rho.push(challenge);
-        }
-        if check
-            && (groups.iter().fold(E::zero(), |acc, (_, g)| acc + g.claim()) != claim
-                || groups.iter().any(|(_, g)| !g.consistent()))
-        {
-            return Err(LookupError::Terminal(s));
-        }
-        let mut by_tree: Vec<Option<[E; 4]>> = vec![None; shape.tree_count()];
-        let mut leaves = Vec::new();
-        for (role, group) in &groups {
-            let values = group.terminal_values();
-            match role {
-                Role::Trees(ids) => {
-                    for (&id, chunk) in ids.iter().zip(values.as_chunks::<4>().0) {
-                        by_tree[id] = Some(*chunk);
-                    }
-                }
-                Role::Sym(list) => {
-                    for &(id, x) in list {
-                        by_tree[id] = Some(StackCentre::terminal(&values, x));
-                    }
-                }
-                Role::Leaves => leaves.push([values[0], values[1]]),
-            }
-        }
-        for (_, group) in groups {
-            group.recycle(&mut pool);
-        }
-        let terminals: Vec<[E; 4]> = plan
-            .continuing
-            .iter()
-            .map(|&id| by_tree[id].expect("every continuing tree has terminal values"))
+            })
             .collect();
-        fs.absorb(LookupSite::Terminals(s), &terminals.concat())?;
-        fs.absorb(LookupSite::Leaves(s), &leaves.concat())?;
-        let mu = one(fs, LookupSite::Mu(s))?;
-        for (&id, &[p0, p1, q0, q1]) in plan.continuing.iter().zip(&terminals) {
-            claims[id] = (line(p0, p1, mu), line(q0, q1, mu));
+        let trees: Vec<FractionTree> = (0..shape.tree_count())
+            .map(|id| {
+                let (x, kind) = shape.tree(id);
+                match kind {
+                    TreeKind::Stack(j) if sym[j].is_some() => FractionTree::from_upper(
+                        std::mem::take(&mut uppers[j][x]),
+                        stacks[j].shape.depth(),
+                    ),
+                    TreeKind::Stack(j) => FractionTree::from_bottom(stack_bottom(
+                        &stacks[j].stacked,
+                        inputs.shifted(j, x),
+                    )),
+                    TreeKind::Table(t) => {
+                        FractionTree::from_bottom(table_bottom(&inputs.multiplicities[t], xs[x]))
+                    }
+                }
+            })
+            .collect();
+        drop(uppers);
+        debug_assert!(trees.iter().all(|t| t.root().1 == root_of(&t.layer1()).1));
+        Self { trees, sym }
+    }
+
+    fn scratch() -> Self::Scratch {
+        agg_simd::buf::Pool::default()
+    }
+
+    fn layer1(&self) -> Vec<[E; 4]> {
+        self.trees.iter().map(FractionTree::layer1).collect()
+    }
+
+    fn layer_bytes(&self) -> usize {
+        self.trees.iter().map(FractionTree::bytes).sum()
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn layer_groups<'g>(
+        &'g self,
+        inputs: &'g ProverInputs<'g>,
+        cx: &SessionCx<'_>,
+        ids: &[usize],
+        pool: &mut Self::Scratch,
+        groups: &mut Vec<(Role, SessionGroup<'g>)>,
+    ) -> Result<(), LookupError> {
+        let (stacks, s, half, point) = (inputs.stacks, cx.s, cx.half, cx.point);
+        let sym = &self.sym;
+        let mut stored = Vec::new();
+        let mut by_stack: Vec<Vec<(usize, E, E, E)>> = vec![Vec::new(); stacks.len()];
+        let mut from_leaves: Vec<Vec<(usize, E, E, E)>> = vec![Vec::new(); stacks.len()];
+        for &id in ids {
+            let (x, tree_kind) = inputs.shape.tree(id);
+            match tree_kind {
+                TreeKind::Stack(j) if sym[j].is_some() && stacks[j].shape.depth() == s + 1 => {
+                    let (gp, gq) = cx.gamma_of(id);
+                    by_stack[j].push((id, inputs.centred(j, x, self.center(j)), gp, gq));
+                }
+                TreeKind::Stack(j) if sym[j].is_some() && stacks[j].shape.depth() == s + 2 => {
+                    let (gp, gq) = cx.gamma_of(id);
+                    from_leaves[j].push((id, inputs.centred(j, x, self.center(j)), gp, gq));
+                }
+                _ => stored.push(id),
+            }
         }
-        rho.push(mu);
-        for (&j, leaf) in plan.ending_stacks.iter().zip(&leaves) {
-            stack_claims[j] = Some((rho.clone(), line(leaf[0], leaf[1], mu)));
+        for (j, list) in from_leaves.iter().enumerate().filter(|(_, l)| !l.is_empty()) {
+            let centre = sym[j].as_ref().expect("an integer-path stack").center;
+            let xs_j: Vec<E> = list.iter().map(|&(_, x, _, _)| x).collect();
+            let gammas_j: Vec<(E, E)> = list.iter().map(|&(_, _, gp, gq)| (gp, gq)).collect();
+            let rows =
+                agg_simd::lookup::UpperRows::new(&stacks[j].stacked, centre, &powers4(&xs_j));
+            // The centre gate (depth >= 5, spread <= 2^16) guarantees the group.
+            let group = PlaneLayerGroup::from_leaves(rows, &gammas_j, point, pool)
+                .expect("a centred stack of depth s + 2 fits the leaf-computed layer group");
+            groups.push((
+                Role::Trees(list.iter().map(|&(id, ..)| id).collect()),
+                SessionGroup::Layer(group),
+            ));
         }
-        for (&t, leaf) in plan
-            .ending_tables
-            .iter()
-            .zip(&leaves[plan.ending_stacks.len()..])
-        {
-            table_claims[t] = Some((rho.clone(), line(leaf[0], leaf[1], mu)));
+        for (j, list) in by_stack.iter().enumerate().filter(|(_, l)| !l.is_empty()) {
+            let centre = sym[j].as_ref().expect("an integer-path stack").center;
+            let trees_x: Vec<(E, E, E)> = list.iter().map(|&(_, x, gp, gq)| (x, gp, gq)).collect();
+            let coefficients = StackCentre::coefficients(&trees_x);
+            // The centre gate (depth >= 5, spread <= 2^16) guarantees the group.
+            let group =
+                PlaneLeafGroup::symmetric(&stacks[j].stacked, centre, coefficients, point, pool)
+                    .expect("a centred stack of depth s + 1 fits the leaf group");
+            groups.push((
+                Role::Sym(list.iter().map(|&(id, x, _, _)| (id, x)).collect()),
+                SessionGroup::Leaf(group),
+            ));
         }
-        point = rho;
-        let done: Vec<Layer> = trees
+        if stored.is_empty() {
+            return Ok(());
+        }
+        // The dedicated layer group holds at most LAYER_GROUP_TREES trees (the fused
+        // kernel's slot and lane limits); more trees (ML-DSA-87's eight stacks) take one
+        // group per chunk, whose messages add up.
+        let chunks: Vec<Vec<usize>> = if inputs.dedicated {
+            stored.chunks(LAYER_GROUP_TREES).map(<[usize]>::to_vec).collect()
+        } else {
+            vec![stored]
+        };
+        for stored in chunks {
+            let dedicated_group = if inputs.dedicated {
+                let layer_trees = stored
+                    .iter()
+                    .map(|&id| {
+                        let layer = &self.trees[id].layers[s];
+                        let (gamma_p, gamma_q) = cx.gamma_of(id);
+                        PlaneLayerTree {
+                            p: &layer.p,
+                            q: &layer.q,
+                            gamma_p,
+                            gamma_q,
+                        }
+                    })
+                    .collect();
+                PlaneLayerGroup::new(layer_trees, point, pool)
+            } else {
+                None
+            };
+            let group = match dedicated_group {
+                Some(group) => SessionGroup::Layer(group),
+                None => {
+                    let lanes: Vec<Lane<'_>> = stored
+                        .iter()
+                        .flat_map(|&id| {
+                            let layer = &self.trees[id].layers[s];
+                            let (p0, p1) = layer.p.planes();
+                            let (q0, q1) = layer.q.planes();
+                            [(p0, p1), (q0, q1)].into_iter().flat_map(|(a, b)| {
+                                [
+                                    Lane::Source(Source::PlaneSlice((&a[..half], &b[..half]))),
+                                    Lane::Source(Source::PlaneSlice((&a[half..], &b[half..]))),
+                                ]
+                            })
+                        })
+                        .collect();
+                    let instances = stored
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(i, &id)| layer_instances(i, cx.gamma_of(id)))
+                        .collect();
+                    SessionGroup::Generic(
+                        Group::new(lanes, instances, Some(point), s - 1, DEGREE)
+                            .map_err(LookupError::Kernel)?,
+                    )
+                }
+            };
+            groups.push((Role::Trees(stored), group));
+        }
+        Ok(())
+    }
+
+    fn stack_pair<'g>(
+        [v0, v1]: [&'g [i32]; 2],
+        coefficients: [E; 3],
+        point: &[E],
+        pool: &mut Self::Scratch,
+    ) -> Option<SessionGroup<'g>>
+    where
+        Self: 'g,
+    {
+        PlaneLeafGroup::bottom(v0, v1, coefficients, point, pool).map(SessionGroup::Leaf)
+    }
+
+    fn generic<'g>(group: Group<'g>) -> SessionGroup<'g>
+    where
+        Self: 'g,
+    {
+        SessionGroup::Generic(group)
+    }
+
+    fn ready<'g>(_pool: &Self::Scratch, _groups: &mut [(Role, SessionGroup<'g>)])
+    where
+        Self: 'g,
+    {
+    }
+
+    fn release<'g>(pool: &mut Self::Scratch, groups: Vec<(Role, SessionGroup<'g>)>)
+    where
+        Self: 'g,
+    {
+        for (_, group) in groups {
+            group.recycle(pool);
+        }
+    }
+
+    fn drop_layer(&mut self, s: usize) {
+        let done: Vec<Layer> = self
+            .trees
             .iter_mut()
             .filter_map(|tree| tree.layers.get_mut(s).map(std::mem::take))
             .collect();
         agg_pcs_config::sched::drop_in_background("lookup layer", done);
-        sessions.push(SessionProof {
-            rounds,
-            terminals,
-            leaves,
-        });
-        stats.sessions.push(session_start.elapsed().as_secs_f64());
     }
-    let claims = super::LookupClaims {
-        stacks: stack_claims
-            .into_iter()
-            .map(|c| c.expect("every stack ends"))
-            .collect(),
-        multiplicities: table_claims
-            .into_iter()
-            .map(|c| c.expect("every table ends"))
-            .collect(),
-    };
-    stats.total = start.elapsed().as_secs_f64();
-    Ok(LookupOutput {
-        proof: super::LookupProof {
-            layer1,
-            sessions,
-        },
-        claims,
-        stats,
-    })
 }
