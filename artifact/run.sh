@@ -32,7 +32,7 @@ usage() {
 # 128-signature smoke case. `full` runs the cells of the table: 32,768
 # signatures, family J, the AVX2 and AVX-512 builds, on the CPUs of the
 # 16C32T, 8C16T and 1T allocations that the runner recorded in cpusets.json,
-# ALLOUL26_RUNS (default 2) fresh processes per cell.
+# ALLOUL26_RUNS (default 3) fresh processes per cell.
 run_alloul26() {
   local dir=${AGG_RESULTS:-results/$(cat results/LATEST 2>/dev/null)}
   mkdir -p "$dir"
@@ -47,7 +47,7 @@ run_alloul26() {
   while read -r threads cpuset; do
     for isa in "${isas[@]}"; do
       bash scripts/alloul26.sh --n 32768 --family J --isa "$isa" --threads "$threads" \
-        --cpus "$cpuset" --runs "${ALLOUL26_RUNS:-2}" | tee -a "$dir/alloul26.jsonl"
+        --cpus "$cpuset" --runs "${ALLOUL26_RUNS:-3}" | tee -a "$dir/alloul26.jsonl"
     done
   done < <(python3 - "$dir/cpusets.json" <<'PY'
 import json, sys

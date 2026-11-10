@@ -92,7 +92,7 @@ the same pin for commands started inside this directory.
 | `gates` | per parameter set (`--params 44,65,87`) and relation (`--relations`, default `h-fips`): 1K aggregates in every tier, verification, negative check; per set the aggregate on one thread and natver; self-reports | about 5--10 min per relation (estimate) |
 | `quick --smoke` | touches every run kind (`ours`, `mode_b`, `ablations`, `fresh`, `aerie`, `native`) and all three parameter sets at 1K, 1+1 runs | about 5 min after the build (estimate) |
 | `quick` | 1K and 4K (ML-DSA-44) plus 1K (ML-DSA-65, -87), three tiers, 8C16T and 1T, mode B, traced ablations, fresh memory, Aerie (Falcon-512/1024) and native (44/65/87) at 1K | 20--40 min after the build (estimate) |
-| `full` | the complete evaluation matrix for ML-DSA-44, -65 and -87 under H-FIPS: 32K headline on 16C32T, 8C16T and 1T; scaling; mode-B public bits; ablations (`AGG_LATE_JOIN=0`, `AGG_FLOCK_THREADS=0`, etc.) and traced timeline; fresh memory; Aerie (16C32T, 8C16T, 1T) and native (44/65/87) baselines, 1+5 warm runs | about 1.7 h (~100 min, estimate) after the build; H-exact adds about 6 min (estimate); `--alloul26` adds about 3.5 h |
+| `full` | the complete evaluation matrix for ML-DSA-44, -65 and -87 under H-FIPS: 32K headline on 16C32T, 8C16T and 1T; scaling; mode-B public bits; ablations (`AGG_LATE_JOIN=0`, `AGG_FLOCK_THREADS=0`, etc.) and traced timeline; fresh memory; Aerie (16C32T, 8C16T, 1T) and native (44/65/87) baselines, 1+5 warm runs | about 1.7 h (~100 min, estimate) after the build; H-exact adds about 6 min (estimate); `--alloul26` adds about 5 h |
 
 ### Estimated full-run time breakdown
 
@@ -360,10 +360,10 @@ smoke comparison after the usual work. With `full` (or `all --full`) it runs
 the Alloul26 cells of `tab:baselines`: N = 32768, family J, the AVX2 and
 AVX-512 builds (AVX-512 only on a CPU that has it), on the CPU sets of the
 16C32T, 8C16T and 1T allocations recorded in `cpusets.json`, with 32, 16 and
-1 threads and two fresh processes per cell (`ALLOUL26_RUNS` changes the
+1 threads and three fresh processes per cell (`ALLOUL26_RUNS` changes the
 count). An allocation this machine cannot provide in full is skipped. On a
 Zen 5 node one run takes about 3 min on 16C32T, 5 min on 8C16T and 45 min on
-1T, so the twelve runs add about 3.5 h, and each needs 42 GiB of memory.
+1T, so the eighteen runs add about 5 h, and each needs 42 GiB of memory.
 `gen_tables.py` reads `alloul26*.jsonl` in the results directory (and any
 file passed with `--alloul26 FILE`) and fills the Alloul26 rows from the
 family J runs at the table's N, placing a run by its thread count (32:
@@ -373,7 +373,8 @@ step itself is not held to the allocation. Large cases can need substantial
 disk-backed spill space; set `H9_SPILL_DIR`, `H9_SPILL_MIN`, and
 `H9_SPILL_SEQ` as appropriate.
 The paper's rows come from J at N = 32768 on Zen 5 cores (EPYC 9355), AVX2
-build: 178.8 s on 16C32T, 308.0 s on 8C16T and 2,641.5 s on 1T, with 151.0
-B/sig and 42.0 GiB peak; 8.97 s at N = 1024 on 16C32T. Family U needs up to
+build, medians of three runs: 179.2 s on 16C32T, 308.5 s on 8C16T and
+2,637.7 s on 1T, with 151.0 B/sig and 42.0 GiB peak; 8.97 s at N = 1024 on
+16C32T. Family U needs up to
 72 GiB at 32768; larger cases may spill to disk.
 Geode is licensed under BSL 1.1 and is fetched from upstream, not redistributed.
