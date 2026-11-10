@@ -654,12 +654,6 @@ pub struct HFipsRecordOf<P: ParamSet> {
 }
 
 impl<P: ParamSet> HFipsRecordOf<P> {
-    /// The digits of `z[s][j]`.
-    pub fn z_digit(&self, s: usize, j: usize) -> &[i64] {
-        let d = z_form_for::<P>().len();
-        &self.z_digits[(s * N + j) * d..][..d]
-    }
-
     /// The canonical witness of an accepted signature (from [`crate::derive::derive_for`]).
     pub fn from_witness(w: &SigWitness<P>) -> Result<Self, HFipsError> {
         let form = z_form_for::<P>();

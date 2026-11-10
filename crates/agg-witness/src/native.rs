@@ -571,15 +571,6 @@ pub fn verify_internal_trace_for<P: ParamSet>(
     })
 }
 
-/// Algorithm 8 lines 2 to 13 on an expanded key and a precomputed mu.
-pub fn verify_internal_trace(
-    key: &ExpandedKey,
-    mu: &[u8; TR_BYTES],
-    sig: &[u8],
-) -> Result<VerifyTrace<Set44>, SigDecodeError> {
-    verify_internal_trace_for::<Set44>(key, mu, sig)
-}
-
 /// ML-DSA.Verify (Algorithm 3) with context `ctx` for parameter set P.
 pub fn verify_with_context_for<P: ParamSet>(pk: &[u8], msg: &[u8], ctx: &[u8], sig: &[u8]) -> bool {
     if ctx.len() > 255 {

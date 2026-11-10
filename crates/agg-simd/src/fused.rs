@@ -1094,20 +1094,6 @@ pub fn fused_pass_with<L: Leaves>(
     unsafe { fused_pass_uninit(out, input, fill, eval) }
 }
 
-/// Allocate and fold all input planes; each output word is written before it is read.
-pub fn fold_new(r: K, input: &[Planes<'_>], rows: usize, eval: Option<Eval<'_>>) -> (crate::buf::AlignedVec<u64>, Vec<[K; 3]>) {
-    assert!(input
-        .iter()
-        .all(|(a, b)| a.len() >= 2 * rows && b.len() >= 2 * rows));
-    let width = input.len();
-    let mut out = crate::buf::AlignedVec::<u64>::uninit(2 * width * rows);
-    // SAFETY: Fold writes both output planes for every lane and row before evaluation.
-    let fill = Some(Fill::<crate::pattern::Columns>::Fold(r, input));
-    let total = unsafe { fused_pass_uninit(Some((&mut out, width, rows)), input, fill, eval.map(EvalAny::from)) };
-    // SAFETY: Fold has written all 2 * width * rows words on successful return.
-    (unsafe { out.assume_init() }, triples(total))
-}
-
 /// Run a pass into a pooled buffer and return the buffer initialized.
 ///
 /// `out` must hold at least `2 * width * rows` words. The returned buffer has length

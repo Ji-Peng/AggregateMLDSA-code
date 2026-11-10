@@ -152,10 +152,6 @@ pub(crate) fn dot_l<const L: usize>(p: Prime, a: &[Poly32; L], b: &[Poly32; L], 
         out[i] = if p != Prime::Q { centered(r, c) } else { r };
     }
 }
-#[allow(dead_code)]
-pub(crate) fn dot4(p: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Poly32) {
-    dot_l::<4>(p, a, b, out)
-}
 pub(crate) fn reduce(p: Prime, a: &mut Poly32, f: Form) {
     let c = p.consts();
     for x in a.iter_mut() {

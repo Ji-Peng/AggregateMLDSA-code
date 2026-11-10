@@ -227,7 +227,7 @@ impl Stage1Claims {
 
 /// The stage-2 terminal claims: `b_t^(rho)(r^(2))` ([`bit_columns`]) and `P_Z(r^(2))` for
 /// each leaf-checked digit (9 under H-exact: 6 bits, 3 squares); under H-FIPS 10 claims (6 bits, 2 squares for `K_2, K_3`, plus `delta(r^(2))`
-/// and `e(r^(2))`, `stage2::FIPS_TERMINALS`).
+/// and `e(r^(2))`, `stage2::fips_terminals`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage2Claims {
     /// `b_t^(rho)(r^(2))`.

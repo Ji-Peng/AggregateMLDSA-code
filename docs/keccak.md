@@ -168,8 +168,7 @@ claims, not by Flock's word copies.
   composed from Flock's public building blocks, with the caller's claim points added to the
   opening as packed-direct claims (the intake Flock uses for its wiring gather claims); the
   prover computes the claim values from the assembled union buffer. With `pre` the event-2
-  commitment is opened as is (K14); without it Flock commits again (K7). `region_point(i,
-  rows, cols)` builds a claim point on type `i`'s region (rows, word columns, slot prefix);
+  commitment is opened as is (K14); without it Flock commits again (K7).
   `eval_packed(z, point, nu)` evaluates the committed word polynomial at a point, skipping
   the columns whose eq weight is exactly zero. A `UnionProof` is Flock's
   `R1csProofMergedLigerito` plus the claim values (16 bytes each); `size_breakdown()` splits

@@ -546,18 +546,6 @@ impl<'g> TiedPart<'g> {
         )
     }
 
-    /// The tie site's difficulty from the public numbers.
-    #[must_use]
-    pub fn plan_tie_bits(
-        gate: &ChainGate,
-        n: usize,
-        d: u32,
-        segments: usize,
-        profile: Profile,
-    ) -> u8 {
-        Self::plan_work(gate, n, d, segments, profile).tie_bits
-    }
-
     /// The part's tie geometry.
     #[must_use]
     pub fn tie_geometry(&self) -> TieGeometry {

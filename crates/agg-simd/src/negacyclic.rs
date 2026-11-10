@@ -324,9 +324,6 @@ crate::wide::entry_points!(kernel_wide => kernel_w8, kernel_w4; (a:Planes<'_>,co
 // backends; ML-DSA-44 keeps the four-row functions above.
 // ---------------------------------------------------------------------------------------
 
-/// Rows of one column at most (the largest `k` of FIPS 204).
-pub const LANE_ROWS_MAX:usize=8;
-
 /// A raw plane pointer shared by the record tasks, each writing its own disjoint rows.
 #[derive(Clone,Copy)]
 struct Out(*mut u64);

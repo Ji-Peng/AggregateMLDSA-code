@@ -2,9 +2,8 @@
 //!
 //! Flock's union stores a slot's witness BatchMajor: 128-bit word `c` of
 //! instance `j` is union word `(c << nu) + j`. The lincheck reads `z` itself (one
-//! bit-transposing pass for all its row points, `flock_core::lincheck::union_bitbank_fold_multi`);
-//! only the legacy single-proof path ([`SlotBuffers::into_parts`]) builds the byte stripe
-//! of `pack_z_lincheck`. Rows `[n, 2^nu)` are dummy and identically zero in `z`, `a`, `b`.
+//! bit-transposing pass for all its row points, `flock_core::lincheck::union_bitbank_fold_multi`).
+//! Rows `[n, 2^nu)` are dummy and identically zero in `z`, `a`, `b`.
 
 use agg_mldsa_simd::{keccak::Words8, Engine};
 use agg_witness::params::ParamSet;
@@ -46,18 +45,6 @@ impl SlotBuffers {
             .ab
             .expect("row values a, b not built (SlotBuffers::ensure_ab)");
         (std::sync::Arc::unwrap_or_clone(self.z), a, b)
-    }
-
-    /// The tuple `UnionSlotProverInput::new` takes, with the lincheck stripe of `z` built
-    /// here (block width `2^k_log` bits, `2^nu` rows).
-    ///
-    /// # Panics
-    /// As [`Self::into_zab`].
-    #[must_use]
-    pub fn into_parts(self, k_log: usize, nu: usize) -> (Vec<F128>, Vec<F128>, Vec<F128>, Vec<u8>) {
-        let stripe = lincheck_stripe(&self.z, k_log, nu);
-        let (z, a, b) = self.into_zab();
-        (z, a, b, stripe)
     }
 }
 
@@ -118,33 +105,6 @@ fn pack_ab_8way(gate: &ChainGate, nu: usize, n: usize, z: &[F128]) -> Option<(Ve
         Set::S65 => run!(Geo65),
         Set::S87 => run!(Geo87),
     }
-}
-
-/// The byte stripe of `flock_core::lincheck::pack_z_lincheck` of a BatchMajor slot buffer:
-/// group `g` of eight rows is `2^k_log` bytes, byte `128 c + b` holding bit `b` of word
-/// column `c` of rows `8 g .. 8 g + 8` (bit `r` = row `8 g + r`).
-///
-/// # Panics
-/// If `nu < 3` or `z` has another length than `2^(k_log - 7 + nu)`.
-#[must_use]
-pub fn lincheck_stripe(z: &[F128], k_log: usize, nu: usize) -> Vec<u8> {
-    assert!(nu >= 3 && k_log >= 7, "stripe geometry");
-    let k = 1usize << k_log;
-    assert_eq!(z.len(), (k / 128) << nu, "slot buffer length");
-    let mut stripe: Vec<u8> = alloc_zeroed_vec(k << (nu - 3));
-    stripe.par_chunks_mut(k).enumerate().for_each(|(g, out)| {
-        for c in 0..k / 128 {
-            let run = &z[(c << nu) + 8 * g..(c << nu) + 8 * g + 8];
-            if run.iter().all(|w| *w == F128::ZERO) {
-                continue;
-            }
-            let lo: [u64; 8] = core::array::from_fn(|r| run[r].lo);
-            let hi: [u64; 8] = core::array::from_fn(|r| run[r].hi);
-            transpose_8x64(&lo, &mut out[128 * c..128 * c + 64]);
-            transpose_8x64(&hi, &mut out[128 * c + 64..128 * c + 128]);
-        }
-    });
-    stripe
 }
 
 /// Where the 8-way sponge generator writes each record's lane-major input bits (the chain's
@@ -1751,34 +1711,10 @@ where
     }
 }
 
-/// `out[bit] = sum_r bit(v[r], bit) << r` for `bit < 64`: eight 8x8 bit-matrix
-/// transposes (byte `k` of every `v[r]` forms one matrix), three delta swaps each,
-/// instead of 512 single-bit moves.
-#[inline]
-pub(crate) fn transpose_8x64(v: &[u64; 8], out: &mut [u8]) {
-    debug_assert_eq!(out.len(), 64);
-    for k in 0..8 {
-        // Byte r of x is byte k of v[r]: row r, column c = bit 8k + c of v[r].
-        let mut x = 0u64;
-        for (r, &w) in v.iter().enumerate() {
-            x |= ((w >> (8 * k)) & 0xff) << (8 * r);
-        }
-        let t = (x ^ (x >> 7)) & 0x00AA_00AA_00AA_00AA;
-        x ^= t ^ (t << 7);
-        let t = (x ^ (x >> 14)) & 0x0000_CCCC_0000_CCCC;
-        x ^= t ^ (t << 14);
-        let t = (x ^ (x >> 28)) & 0x0000_0000_F0F0_F0F0;
-        x ^= t ^ (t << 28);
-        // Now byte c of x is column c: bit r = bit 8k + c of v[r].
-        out[8 * k..8 * k + 8].copy_from_slice(&x.to_le_bytes());
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::gate::ChainSpec;
-    use flock_core::lincheck::pack_z_lincheck;
     use flock_core::test_rng::Rng;
 
     /// The 8-way generators of every parameter set equal the portable oracle (`pack_slot`
@@ -1895,24 +1831,6 @@ mod tests {
         check::<Geo87, { Geo87::IN_Q }, { Geo87::MSG_Q }>(0xA4);
     }
 
-    /// The delta-swap transpose equals the bit-by-bit definition.
-    #[test]
-    fn transpose_matches_bitwise() {
-        let mut rng = Rng::new(17);
-        for _ in 0..200 {
-            let v: [u64; 8] = core::array::from_fn(|_| rng.next_u64());
-            let mut got = [0u8; 64];
-            transpose_8x64(&v, &mut got);
-            for (bit, &g) in got.iter().enumerate() {
-                let mut want = 0u8;
-                for (r, &x) in v.iter().enumerate() {
-                    want |= (((x >> bit) & 1) as u8) << r;
-                }
-                assert_eq!(g, want, "bit {bit}");
-            }
-        }
-    }
-
     /// `pack_slot_groups` equals `pack_slot` over `instance_rows` on every Keccak
     /// backend, for a one-round permutation gate and a chain with unaligned fields and
     /// scattered outputs, with partial groups, on the global pool and on one thread
@@ -1965,8 +1883,7 @@ mod tests {
         }
     }
 
-    /// The packed buffers agree with Flock's canonical `pack_z_lincheck` and
-    /// the BatchMajor addressing, dummy rows included.
+    /// The packed buffers follow the BatchMajor addressing, dummy rows included.
     #[test]
     fn packing_matches_flock_canonical_layout() {
         let gate = ChainGate::new(ChainSpec::permutation_rounds(1));
@@ -1999,10 +1916,6 @@ mod tests {
                 assert_eq!(bit == 1, logical[j * k + col]);
             }
         }
-        assert_eq!(
-            lincheck_stripe(&bufs.z, lay.k_log, nu),
-            pack_z_lincheck(&logical, nu + lay.k_log, lay.k_log)
-        );
         for j in n..1 << nu {
             for c in 0..k / 128 {
                 assert_eq!(bufs.z[(c << nu) + j], F128::ZERO);

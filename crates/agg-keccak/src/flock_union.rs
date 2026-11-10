@@ -22,8 +22,7 @@
 //! A claim point has `M - 7` coordinates over the padded word address space, rows low:
 //! word column `c` of row `j` of a slot is address `(prefix << (nu + k_log - 7)) | (c <<
 //! nu) | j`, so the point is `[row coordinates (nu) | column coordinates (k_log - 7) |
-//! slot prefix (M - nu - k_log)]`, least significant first
-//! ([`UnionGeometry::region_point`]). A point whose coordinates are exact 0/1 outside a set
+//! slot prefix (M - nu - k_log)]`, least significant first. A point whose coordinates are exact 0/1 outside a set
 //! of free coordinates evaluates the multilinear extension of the words of that aligned
 //! region alone ([`eval_packed`]).
 //!
@@ -403,37 +402,6 @@ impl UnionGeometry {
     #[must_use]
     pub fn word_vars(&self) -> usize {
         self.m_total() - 7
-    }
-
-    /// The claim point on caller type `i`'s region: `rows` on the `nu` row coordinates and
-    /// `cols` on the type's `k_log - 7` word-column coordinates (both zero-extended), then
-    /// the slot prefix as 0/1 constants. Word column `c` of row `j` of the slot is the
-    /// padded word `(prefix << (nu + k_log - 7)) | (c << nu) | j`.
-    ///
-    /// # Panics
-    /// If `rows` or `cols` is too long.
-    #[must_use]
-    pub fn region_point(&self, i: usize, rows: &[F128], cols: &[F128]) -> Vec<F128> {
-        let (nu, k) = (self.nu(), self.k_log(i) - 7);
-        assert!(
-            rows.len() <= nu && cols.len() <= k,
-            "region point coordinates"
-        );
-        let slot = self.slot(i);
-        let mut p = Vec::with_capacity(self.word_vars());
-        p.extend_from_slice(rows);
-        p.resize(nu, F128::ZERO);
-        p.extend_from_slice(cols);
-        p.resize(nu + k, F128::ZERO);
-        for b in 0..slot.prefix_bits {
-            p.push(if (slot.prefix >> b) & 1 == 1 {
-                F128::ONE
-            } else {
-                F128::ZERO
-            });
-        }
-        debug_assert_eq!(p.len(), self.word_vars());
-        p
     }
 
     /// Bytes of the commitment (the Ligerito level-0 cap).

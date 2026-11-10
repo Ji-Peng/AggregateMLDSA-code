@@ -15,9 +15,6 @@ pub const TARGET_BITS: u32 = 128;
 /// Nonce bits beyond the difficulty (Aerie, Akita): honest search fails with
 /// probability at most `exp(-2^7)` per site.
 pub const NONCE_SLACK_BITS: u8 = 7;
-/// Largest difficulty a site may carry (Akita's transition cap; the 32-bit nonce must hold
-/// `g + 7` bits).
-pub const MAX_GRIND_BITS: u8 = 25;
 /// The PIOP base-field modulus `p = 2^64 - 59`.
 pub const P: u64 = u64::MAX - 58;
 

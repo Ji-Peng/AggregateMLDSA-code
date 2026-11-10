@@ -103,7 +103,7 @@ pub fn az_crt_with_for<P: ParamSet>(key: &ExpandedKey<P>, z: &P::VecL, az_hat: &
 }
 
 /// [`az_crt`] with the residue modulo q already in the NTT domain: `az_hat = A_hat o
-/// NTT(z)` in [0, q) (as [`crate::native::verify_internal_trace`] computes it), so only the
+/// NTT(z)` in [0, q) (as [`crate::native::verify_internal_trace_for`] computes it), so only the
 /// product modulo CRT_P31 is computed here. Requires |z|_inf <= 2^20.
 pub fn az_crt_with(key: &ExpandedKey, z: &VecL, az_hat: &[[u64; N]; K]) -> VecK {
     az_crt_with_for::<Set44>(key, z, az_hat)

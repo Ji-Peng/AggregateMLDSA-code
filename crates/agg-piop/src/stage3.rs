@@ -84,13 +84,6 @@ pub const PROJ_INSTANCES: usize = 2;
 /// Gamma index of `ring`.
 pub const GAMMA_RING: usize = 0;
 
-/// H-FIPS checks of stage 3 of ML-DSA-44 (`F_s`, `F_delta`, `F_w1`, `F_omega`; `3 LANES_K + 1`
-/// in general).
-pub const FIPS_CHECKS: usize = 4;
-/// H-FIPS reductions of stage 3 of ML-DSA-44 (stage 2's `delta(r^(2))`, `e(r^(2))`; `2 LANES_K`
-/// in general).
-pub const FIPS_REDUCTIONS: usize = 2;
-
 /// The `gamma^(3)` layout of one parameter set and relation: `rings` ring instances (one,
 /// or one per row `rho` with polynomial lanes), `links` leaf-checked digits (3 under
 /// H-exact, 2 under H-FIPS; `l + k + 3` with lanes), `bools` Boolean value digits (2 under

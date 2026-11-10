@@ -551,13 +551,6 @@ pub(crate) unsafe fn dot_l<const L: usize>(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
-#[allow(dead_code)]
-pub(crate) unsafe fn dot4(prime: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Poly32) {
-    // SAFETY: AVX-512 target features are enabled on this function.
-    unsafe { dot_l::<4>(prime, a, b, out) }
-}
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 pub(crate) unsafe fn reduce(prime: Prime, a: &mut Poly32, form: Form) {
     let c = consts(prime);
     let p = _mm512_set1_epi32(c.p);
@@ -610,4 +603,4 @@ pub(crate) unsafe fn order_to_fips(a: &mut Poly32) {
 // These names remain resolvable on scalar-only targets; dispatch never selects
 // the AVX-512 backend there.
 #[cfg(not(target_arch = "x86_64"))]
-pub(crate) use super::scalar::{dot4, dot_l, intt, ntt, order_from_fips, order_to_fips, reduce};
+pub(crate) use super::scalar::{dot_l, intt, ntt, order_from_fips, order_to_fips, reduce};

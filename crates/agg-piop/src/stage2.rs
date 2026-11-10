@@ -48,10 +48,6 @@ use crate::OpeningField as E;
 pub const STAGE: usize = 2;
 /// Message degree (`leaf8[K_2]`: the `eq` factor times `Q_8(P_Z)`).
 pub const DEGREE: usize = 5;
-/// H-FIPS instances of stage 2 of ML-DSA-44 (`F_e`; one per row lane in general,
-/// [`fips_instances`]).
-pub const FIPS_INSTANCES: usize = 1;
-
 /// H-FIPS instances of stage 2: `F_e` per row lane (0 outside H-FIPS).
 #[must_use]
 pub fn fips_instances(manifest: &CommitmentManifest) -> usize {
@@ -98,10 +94,6 @@ pub fn gamma_fips_lane(manifest: &CommitmentManifest, rho: usize) -> usize {
     gamma_fips(manifest) + rho
 }
 
-/// The H-FIPS terminal lanes of stage 2 of ML-DSA-44 beyond the bits, in wire order:
-/// `delta`, `e` at `r^(2)` ([`fips_terminals`] for every set).
-pub const FIPS_TERMINALS: [Column; 2] = [Column::DELTA, Column::WRAP];
-
 /// The H-FIPS terminal lanes of stage 2 beyond the bits, in wire order: `delta^(rho)` for every
 /// row lane, then `e^(rho)` (empty outside H-FIPS).
 #[must_use]
@@ -136,13 +128,6 @@ pub fn fips_edge_term_at(delta: usize, e: usize) -> Term {
 pub const fn gamma_def_y1(t: usize) -> usize {
     t
 }
-/// Gamma index of the leaf of the `k`-th leaf-checked digit (`manifest.leaf_digits()`) for
-/// ML-DSA-44 ([`gamma_leaf_for`]).
-#[must_use]
-pub const fn gamma_leaf(k: usize) -> usize {
-    W1_BITS + k
-}
-
 /// Gamma index of the leaf of the `k`-th leaf-checked digit of any parameter set.
 #[must_use]
 pub fn gamma_leaf_for(manifest: &CommitmentManifest, k: usize) -> usize {

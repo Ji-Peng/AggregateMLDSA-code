@@ -820,7 +820,7 @@ Ligerito commitments (the level-0 binding happens inside the openings, after `rh
 coordinate; the nonce (below `2^(g + 7)`) travels as `LE32` in the proof header. After the
 coordinates the tie challenger squeezes a 32-byte tie binding that both instance
 challengers absorb (label `agg-keccak/v4/tie-binding`) before Flock binds its statement.
-The difficulty is a function of the part's public geometry (`TiedPart::plan_tie_bits`), so
+The difficulty is a function of the part's public geometry (`TiedPart::plan_work(..).tie_bits`), so
 the plan of event 0 names it before the part exists. Cost: about `2^17` BLAKE3 evaluations
 and 4 bytes per tied part.
 

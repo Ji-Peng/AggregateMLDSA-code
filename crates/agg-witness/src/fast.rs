@@ -211,24 +211,6 @@ pub fn derive_tile_with(
     Ok(())
 }
 
-/// Strict derivation of one record on the process-wide engine.
-pub fn derive_fast(record: &PublicRecord, sig: &[u8]) -> Result<FastWitness, DeriveError> {
-    derive_fast_with(agg_mldsa_simd::engine(), record, sig)
-}
-
-/// [`derive_fast`] with an explicit engine.
-#[doc(hidden)]
-pub fn derive_fast_with(
-    engine: &Engine,
-    record: &PublicRecord,
-    sig: &[u8],
-) -> Result<FastWitness, DeriveError> {
-    let mut out = [FastWitness::zero()];
-    derive_tile_with(engine, &[record], &[sig], &mut out).map_err(|(_, e)| e)?;
-    let [w] = out;
-    Ok(w)
-}
-
 /// Whether the engine path alone accepts the record (no legacy fallback), with its values.
 /// Tests use it to show that honest records never take the fallback.
 #[doc(hidden)]
