@@ -381,8 +381,10 @@ pub trait ParamSet: Copy + Send + Sync + 'static {
     fn zero_vec_k_u64() -> Self::VecKU64;
     /// Creates a boxed zeroed matrix of NTT polynomials.
     fn zero_matrix_ntt() -> Box<Self::MatrixNtt>;
-    /// Creates a boxed zeroed matrix of centered coefficient polynomials.
-    fn zero_matrix_coeff() -> Box<Self::MatrixCoeff>;
+    /// Creates a zeroed matrix of centered coefficient polynomials behind an `Arc`, so that
+    /// the expanded key, the prover's public data and the verifier's key share one copy
+    /// (filled through `Arc::get_mut` before it is shared).
+    fn zero_matrix_coeff() -> std::sync::Arc<Self::MatrixCoeff>;
     /// Creates zeroed ExpandA block counts.
     fn zero_expand_blocks() -> Self::ExpandBlocks;
     /// Initializes prepared matrices for expansion.
@@ -497,7 +499,7 @@ impl ParamSet for Set44 {
     fn zero_w1_encode() -> Self::W1Encode { [0; 768] }
     fn zero_vec_k_u64() -> Self::VecKU64 { [[0; 256]; 4] }
     fn zero_matrix_ntt() -> Box<Self::MatrixNtt> { Box::new([[[0; 256]; 4]; 4]) }
-    fn zero_matrix_coeff() -> Box<Self::MatrixCoeff> { Box::new([[[0; 256]; 4]; 4]) }
+    fn zero_matrix_coeff() -> std::sync::Arc<Self::MatrixCoeff> { std::sync::Arc::new([[[0; 256]; 4]; 4]) }
     fn zero_expand_blocks() -> Self::ExpandBlocks { [[0; 4]; 4] }
     fn make_prepared(rho: &[u8; 32]) -> Self::Prepared { crate::expand::make_prepared_44(rho) }
     fn expand_key(pk: &[u8]) -> Option<crate::expand::ExpandedKey<Self>> {
@@ -590,7 +592,7 @@ impl ParamSet for Set65 {
     fn zero_w1_encode() -> Self::W1Encode { [0; 768] }
     fn zero_vec_k_u64() -> Self::VecKU64 { [[0; 256]; 6] }
     fn zero_matrix_ntt() -> Box<Self::MatrixNtt> { Box::new([[[0; 256]; 5]; 6]) }
-    fn zero_matrix_coeff() -> Box<Self::MatrixCoeff> { Box::new([[[0; 256]; 5]; 6]) }
+    fn zero_matrix_coeff() -> std::sync::Arc<Self::MatrixCoeff> { std::sync::Arc::new([[[0; 256]; 5]; 6]) }
     fn zero_expand_blocks() -> Self::ExpandBlocks { [[0; 5]; 6] }
     fn make_prepared(_rho: &[u8; 32]) -> Self::Prepared { () }
     fn expand_key(pk: &[u8]) -> Option<crate::expand::ExpandedKey<Self>> {
@@ -683,7 +685,7 @@ impl ParamSet for Set87 {
     fn zero_w1_encode() -> Self::W1Encode { [0; 1024] }
     fn zero_vec_k_u64() -> Self::VecKU64 { [[0; 256]; 8] }
     fn zero_matrix_ntt() -> Box<Self::MatrixNtt> { Box::new([[[0; 256]; 7]; 8]) }
-    fn zero_matrix_coeff() -> Box<Self::MatrixCoeff> { Box::new([[[0; 256]; 7]; 8]) }
+    fn zero_matrix_coeff() -> std::sync::Arc<Self::MatrixCoeff> { std::sync::Arc::new([[[0; 256]; 7]; 8]) }
     fn zero_expand_blocks() -> Self::ExpandBlocks { [[0; 7]; 8] }
     fn make_prepared(_rho: &[u8; 32]) -> Self::Prepared { () }
     fn expand_key(pk: &[u8]) -> Option<crate::expand::ExpandedKey<Self>> {

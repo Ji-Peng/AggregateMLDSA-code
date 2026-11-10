@@ -26,7 +26,9 @@
 //! pass of [`LaneStreamedPublic::ring_weights_at`], eight keys at a time, so that it never
 //! leaves the core's caches (it is kept only to fill a cache).
 
+use std::any::Any;
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use aerie_falcon::protocol::algebra::eq_table;
@@ -58,26 +60,84 @@ pub struct LaneKey {
     /// `t1`, one polynomial per row.
     pub t1: Vec<[u16; N]>,
     /// `A[rho][s]`, centered, flat `(rho, s, j)`.
-    pub a: Vec<i32>,
+    pub a: LaneMatrix,
 }
 
 impl LaneKey {
-    /// The lane view of an expanded key.
+    /// The lane view of an expanded key (its matrix shared, not copied).
     #[must_use]
     pub fn from_expanded<P: ParamSet>(key: &ExpandedKey<P>) -> Self {
-        let mut a = Vec::with_capacity(P::K * P::L * N);
-        for rho in 0..P::K {
-            for s in 0..P::L {
-                a.extend_from_slice(P::get_coeff(&key.a, rho, s));
-            }
-        }
         Self {
             set: P::SET,
             pk: key.pk.clone(),
             tr: key.tr,
             t1: (0..P::K).map(|rho| key.t1[rho]).collect(),
-            a,
+            a: LaneMatrix::shared::<P>(&key.a),
         }
+    }
+}
+
+/// The centered matrix `A` of one key, read as one flat `(rho, s, j)` slice: owned by the
+/// verifier (decoded or loaded from a cache file), or shared with the prover's expanded key,
+/// whose `k x l x 256` array has the same layout, so that the prover holds one copy per key.
+#[derive(Clone)]
+pub struct LaneMatrix(MatrixStore);
+
+#[derive(Clone)]
+enum MatrixStore {
+    Owned(Vec<i32>),
+    Set65(Arc<<Set65 as ParamSet>::MatrixCoeff>),
+    Set87(Arc<<Set87 as ParamSet>::MatrixCoeff>),
+}
+
+impl LaneMatrix {
+    /// The expanded key's matrix of a set with polynomial lanes, shared; the matrix of any
+    /// other set is copied.
+    fn shared<P: ParamSet>(a: &Arc<P::MatrixCoeff>) -> Self {
+        let any: Arc<dyn Any + Send + Sync> = a.clone();
+        let store = match any.downcast() {
+            Ok(m) => MatrixStore::Set65(m),
+            Err(any) => match any.downcast() {
+                Ok(m) => MatrixStore::Set87(m),
+                Err(_) => MatrixStore::Owned(
+                    (0..P::K)
+                        .flat_map(|rho| (0..P::L).flat_map(move |s| *P::get_coeff(a, rho, s)))
+                        .collect(),
+                ),
+            },
+        };
+        Self(store)
+    }
+}
+
+impl From<Vec<i32>> for LaneMatrix {
+    fn from(a: Vec<i32>) -> Self {
+        Self(MatrixStore::Owned(a))
+    }
+}
+
+impl Deref for LaneMatrix {
+    type Target = [i32];
+    fn deref(&self) -> &[i32] {
+        match &self.0 {
+            MatrixStore::Owned(a) => a,
+            MatrixStore::Set65(a) => a.as_flattened().as_flattened(),
+            MatrixStore::Set87(a) => a.as_flattened().as_flattened(),
+        }
+    }
+}
+
+impl PartialEq for LaneMatrix {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl Eq for LaneMatrix {}
+
+impl std::fmt::Debug for LaneMatrix {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (**self).fmt(f)
     }
 }
 
@@ -150,8 +210,9 @@ pub struct LanePublicData {
     key_of: Vec<usize>,
     /// `mu_i` of every live record.
     mu: Vec<[u8; TR_BYTES]>,
-    /// `T_i[rho][j]` of every live record, flat `(i, rho, j)`.
-    t: Vec<i32>,
+    /// `T_i[rho][j]` of every live record, flat `(i, rho, j)`; the prover shares its
+    /// instance's buffer.
+    t: Arc<Vec<i32>>,
 }
 
 /// `T~_rho = sum_i eq_sig[i] <T_i[rho], eq_coef>` for every row `rho`. `rows(i, out)` writes
@@ -246,12 +307,20 @@ impl LanePublicData {
             .par_iter()
             .map(|&i| Arc::new(LaneKey::from_expanded(&instance.records[i].key)))
             .collect();
-        let mut t = Vec::with_capacity(instance.records.len() * k * N);
-        for record in &instance.records {
-            for rho in 0..k {
-                t.extend_from_slice(&record.t[rho]);
-            }
-        }
+        // The instance's flat buffer when every record still views its own slot of it, else
+        // a copy (a record whose `T` was changed after the instance was built).
+        let t = instance.t_buffer().map_or_else(
+            || {
+                let mut t = Vec::with_capacity(instance.records.len() * k * N);
+                for record in &instance.records {
+                    for rho in 0..k {
+                        t.extend_from_slice(&record.t[rho]);
+                    }
+                }
+                Arc::new(t)
+            },
+            Arc::clone,
+        );
         Self {
             set: P::SET,
             k,
@@ -409,10 +478,11 @@ impl LanePublicData {
             .par_iter()
             .map(|key| {
                 let mut ints = [0_i64; N];
+                let a: &[i32] = &key.a;
                 (0..l)
                     .map(|s| {
                         (0..k).fold(E::zero(), |acc, rho| {
-                            let row = &key.a[(rho * l + s) * N..(rho * l + s + 1) * N];
+                            let row = &a[(rho * l + s) * N..(rho * l + s + 1) * N];
                             for (x, &entry) in ints.iter_mut().zip(row) {
                                 *x = i64::from(entry);
                             }
@@ -761,9 +831,10 @@ impl<'a> LaneStreamedPublic<'a> {
                     for key in tile {
                         match key {
                             StreamKey::Cached(key) => {
+                                let a: &[i32] = &key.a;
                                 for s in 0..L {
                                     weights.push((0..K).fold(E::zero(), |acc, rho| {
-                                        acc + gammas[rho] * dot(&key.a[(rho * L + s) * N..(rho * L + s + 1) * N], &mut ints)
+                                        acc + gammas[rho] * dot(&a[(rho * L + s) * N..(rho * L + s + 1) * N], &mut ints)
                                     }));
                                 }
                             }
@@ -787,7 +858,7 @@ impl<'a> LaneStreamedPublic<'a> {
                                         pk: fresh.pk.to_vec(),
                                         tr: fresh.tr,
                                         t1: fresh.t1.to_vec(),
-                                        a: flat,
+                                        a: flat.into(),
                                     }));
                                 }
                             }

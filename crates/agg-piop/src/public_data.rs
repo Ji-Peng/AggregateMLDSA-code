@@ -222,8 +222,8 @@ impl SplitWeights {
 pub struct VerifierKey {
     /// Encoded public key.
     pub pk: Vec<u8>,
-    /// `A[rho][s]`, centered coefficient form.
-    pub a: Box<MatrixCoeff>,
+    /// `A[rho][s]`, centered coefficient form (shared with the prover's expanded key).
+    pub a: Arc<MatrixCoeff>,
     /// `t1`, coefficients in `[0, 1023]`.
     pub t1: [[u16; N]; K],
     /// `tr = H(pk, 64)`.
@@ -238,7 +238,7 @@ impl VerifierKey {
         let (a_hat, _) = expand_a(&decoded.rho);
         Some(Self {
             pk: pk.to_vec(),
-            a: inverse_ntt_matrix(&a_hat),
+            a: inverse_ntt_matrix(&a_hat).into(),
             t1: decoded.t1,
             tr: tr(pk),
         })
@@ -249,7 +249,7 @@ impl VerifierKey {
     pub fn from_expanded(key: &ExpandedKey) -> Self {
         Self {
             pk: key.pk.clone(),
-            a: key.a.clone(),
+            a: Arc::clone(&key.a),
             t1: key.t1,
             tr: key.tr,
         }
@@ -309,8 +309,9 @@ pub struct PublicData {
     geom: Geometry,
     keys: Vec<Arc<VerifierKey>>,
     records: Vec<PublicRecordData>,
-    /// `T_i = 2^d (c_i * t1_i)` of every live record, in one buffer (record order).
-    t: Vec<PublicT>,
+    /// `T_i = 2^d (c_i * t1_i)` of every live record, in one flat buffer (record order,
+    /// `k 256` values per record); the prover shares its instance's buffer.
+    t: Arc<Vec<i32>>,
 }
 
 impl PublicData {
@@ -372,7 +373,7 @@ impl PublicData {
             geom,
             keys,
             records,
-            t,
+            t: Arc::new(t.into_flattened().into_flattened()),
         })
     }
 
@@ -408,7 +409,15 @@ impl PublicData {
                 c_tilde: record.c_tilde,
             })
             .collect();
-        let t = instance.records.par_iter().map(Self::t_of).collect();
+        // The instance's flat buffer when every record still views its own slot of it, else
+        // a copy (a record whose `T` was changed after the instance was built).
+        let t = instance.t_buffer().map_or_else(
+            || {
+                let t: Vec<PublicT> = instance.records.par_iter().map(Self::t_of).collect();
+                Arc::new(t.into_flattened().into_flattened())
+            },
+            Arc::clone,
+        );
         Self {
             geom: instance.geom,
             keys,
@@ -449,15 +458,20 @@ impl PublicData {
     /// `T_i` of live record `i`.
     #[must_use]
     pub fn t(&self, i: usize) -> &PublicT {
-        &self.t[i]
+        self.t_records()[i].as_chunks::<N>().0.try_into().expect("k rows")
+    }
+
+    /// `T_i` of every live record, `k 256` values each.
+    fn t_records(&self) -> &[[i32; K * N]] {
+        self.t.as_chunks::<{ K * N }>().0
     }
 
     /// The public table `T(j, rho, i)` on the main domain, zero on padded rows.
     #[must_use]
     pub fn t_table(&self) -> Vec<i64> {
         let mut out = vec![0_i64; self.geom.main_len()];
-        for (i, t) in self.t.iter().enumerate() {
-            for (rho, row) in t.iter().enumerate() {
+        for (i, t) in self.t_records().iter().enumerate() {
+            for (rho, row) in t.as_chunks::<N>().0.iter().enumerate() {
                 for (j, &value) in row.iter().enumerate() {
                     out[main_index(j, rho, i)] = i64::from(value);
                 }
@@ -482,20 +496,20 @@ impl PublicData {
         let eq_position = SplitWeights::new(&eq_table(position));
         let eq_signature = eq_table(signature);
         let (scale, low) = (E::from_u64(1 << D), (1_i32 << D) - 1);
-        self.t
+        self.t_records()
             .par_iter()
             .enumerate()
             .map(|(i, t)| {
                 let mut ct = [0_i32; K * N];
                 let mut bits = 0;
-                for (x, &v) in ct.iter_mut().zip(t.iter().flatten()) {
+                for (x, &v) in ct.iter_mut().zip(t) {
                     *x = v >> D;
                     bits |= v;
                 }
                 if bits & low == 0 {
                     eq_signature[i] * scale * eq_position.dot::<16>(&ct)
                 } else {
-                    eq_signature[i] * eq_position.dot::<16>(t.as_flattened())
+                    eq_signature[i] * eq_position.dot::<16>(t)
                 }
             })
             .reduce(E::zero, |left, right| left + right)

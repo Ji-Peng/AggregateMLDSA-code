@@ -17,6 +17,7 @@ use crate::params::*;
 use agg_mldsa_simd::{Backend, Engine, ExpandedA, Poly32};
 use core::marker::PhantomData;
 use rayon::prelude::*;
+use std::sync::Arc;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 
 /// A k x l matrix of NTT-domain polynomials.
@@ -115,8 +116,9 @@ pub struct ExpandedKey<P: ParamSet = Set44> {
     pub tr: [u8; TR_BYTES],
     /// SHAKE128 blocks used by each RejNTTPoly call.
     pub expand_blocks: P::ExpandBlocks,
-    /// A[r][s] = ctr_q(NTT^{-1}(A_hat[r][s])) in [-(q-1)/2, (q-1)/2].
-    pub a: Box<P::MatrixCoeff>,
+    /// A[r][s] = ctr_q(NTT^{-1}(A_hat[r][s])) in [-(q-1)/2, (q-1)/2], shared with the
+    /// prover's public data instead of copied.
+    pub a: Arc<P::MatrixCoeff>,
     /// A_hat modulo q and NTT(A) modulo the transform prime, in backend order.
     pub prepared: P::Prepared,
     _marker: PhantomData<P>,
@@ -145,11 +147,11 @@ fn expand_tile(engine: &Engine, pks: &[&[u8]]) -> Vec<Option<ExpandedKey<Set44>>
     let mut out: Vec<Option<ExpandedKey<Set44>>> = (0..pks.len()).map(|_| None).collect();
     for ((&i, ex), tr) in live.iter().zip(&expanded).zip(trs.as_chunks::<TR_BYTES>().0) {
         let key = decoded[i].as_ref().expect("live");
-        let mut a = boxed_matrix([0i32; N]);
+        let mut a = Set44::zero_matrix_coeff();
         let mut a_hat_q = boxed_matrix(Poly32::zero());
         let mut a_hat_p2 = boxed_matrix(Poly32::zero());
         *a_hat_q = ex.a_hat;
-        engine.prepare_matrices(&ex.a_hat, &mut a, &mut a_hat_p2);
+        engine.prepare_matrices(&ex.a_hat, Arc::get_mut(&mut a).expect("a fresh matrix"), &mut a_hat_p2);
         out[i] = Some(ExpandedKey {
             pk: pks[i].to_vec(),
             rho: key.rho,
@@ -195,12 +197,13 @@ where
     engine.expand_a_many_kl::<K2, L2>(&[decoded.rho], &mut expanded);
     let ex = &expanded[0];
     let mut a = P::zero_matrix_coeff();
+    let fill = Arc::get_mut(&mut a).expect("a fresh matrix");
     let mut expand_blocks = P::zero_expand_blocks();
     for r in 0..K2 {
         for s in 0..L2 {
             let mut poly = ex.a_hat[r][s];
             engine.intt(agg_mldsa_simd::Prime::Q, &mut poly, agg_mldsa_simd::Scale::Plain, agg_mldsa_simd::Form::Centered);
-            *P::get_coeff_mut(&mut a, r, s) = poly.0;
+            *P::get_coeff_mut(fill, r, s) = poly.0;
             P::set_block(&mut expand_blocks, r, s, usize::from(ex.blocks[r][s]));
         }
     }
@@ -239,12 +242,13 @@ where
     for ((&i, ex), tr) in live.iter().zip(&expanded).zip(trs) {
         let decoded = decoded[i].take().expect("live");
         let mut a = P::zero_matrix_coeff();
+        let fill = Arc::get_mut(&mut a).expect("a fresh matrix");
         let mut expand_blocks = P::zero_expand_blocks();
         for r in 0..K2 {
             for s in 0..L2 {
                 let mut poly = ex.a_hat[r][s];
                 engine.intt(agg_mldsa_simd::Prime::Q, &mut poly, agg_mldsa_simd::Scale::Plain, agg_mldsa_simd::Form::Centered);
-                *P::get_coeff_mut(&mut a, r, s) = poly.0;
+                *P::get_coeff_mut(fill, r, s) = poly.0;
                 P::set_block(&mut expand_blocks, r, s, usize::from(ex.blocks[r][s]));
             }
         }
@@ -274,11 +278,12 @@ impl<P: ParamSet> ExpandedKey<P> {
         let (a_hat, expand_blocks) = expand_a_for::<P>(&decoded.rho);
         let fips = NttPrime::fips();
         let mut a = P::zero_matrix_coeff();
+        let fill = Arc::get_mut(&mut a).expect("a fresh matrix");
         for r in 0..P::K {
             for s in 0..P::L {
                 let ntt_poly = P::get_ntt(&a_hat, r, s);
                 let coeffs = fips.intt(ntt_poly);
-                let row = P::get_coeff_mut(&mut a, r, s);
+                let row = P::get_coeff_mut(fill, r, s);
                 for j in 0..N {
                     row[j] = crate::native::ctr_q(coeffs[j] as i64) as i32;
                 }

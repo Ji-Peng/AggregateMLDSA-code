@@ -369,6 +369,22 @@ impl<P: ParamSet> PublicInstance<P> {
         Self::new_for(&inputs)
     }
 
+    /// `T` of every live record as one flat buffer in record order (`k 256` values per
+    /// record), shared with the records' views, so that the public data can hold it without
+    /// a copy. `None` when some record no longer views slot `i` of one common buffer of
+    /// exactly the live records (a record whose `T` was changed after construction).
+    #[must_use]
+    pub fn t_buffer(&self) -> Option<&Arc<Vec<i32>>> {
+        let data = &self.records.first()?.t.data;
+        let whole = data.len() == self.records.len() * P::K * N;
+        let own_slots = self
+            .records
+            .iter()
+            .enumerate()
+            .all(|(i, record)| record.t.index == i && Arc::ptr_eq(&record.t.data, data));
+        (whole && own_slots).then_some(data)
+    }
+
     /// The public table T(j, rho, i) on the main domain, zero on padded rows: one table per
     /// polynomial lane, row `rho` in lane `rho >> D_VEC` at cell
     /// `j + 256 (rho mod 2^D_VEC) + 2^(8 + D_VEC) i` (one table for ML-DSA-44, one per row

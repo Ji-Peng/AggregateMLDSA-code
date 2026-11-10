@@ -125,7 +125,7 @@ fn entries(store: &KeyStore) -> Vec<Entry<'_>> {
             .map(|key| Entry {
                 pk: &key.pk,
                 tr: &key.tr,
-                a: key.a.clone(),
+                a: key.a.to_vec(),
             })
             .collect(),
     }
@@ -221,8 +221,9 @@ fn rows_from(body: &[u8]) -> Result<KeyCache, CacheError> {
         }
         let decoded = pk_decode(pk).ok_or(CacheError::Entry(i))?;
         check_entry(pk, tr, a_bytes, i)?;
-        let mut a: Box<MatrixCoeff> = Box::new([[[0_i32; N]; L]; K]);
-        for (c, word) in a.iter_mut().flatten().flatten().zip(words(a_bytes)) {
+        let mut a: Arc<MatrixCoeff> = Arc::new([[[0_i32; N]; L]; K]);
+        let fill = Arc::get_mut(&mut a).expect("a fresh matrix");
+        for (c, word) in fill.iter_mut().flatten().flatten().zip(words(a_bytes)) {
             *c = word;
         }
         cache.insert(Arc::new(VerifierKey {
@@ -252,7 +253,7 @@ fn lanes_from<P: ParamSet>(body: &[u8]) -> Result<LaneKeyCache, CacheError> {
             pk: pk.to_vec(),
             tr: tr.try_into().expect("64 bytes"),
             t1: (0..P::K).map(|rho| decoded.t1[rho]).collect(),
-            a: words(a_bytes).collect(),
+            a: words(a_bytes).collect::<Vec<i32>>().into(),
         }));
     }
     Ok(cache)

@@ -1149,7 +1149,7 @@ Soundness: both moved identities test tables committed in round 1 at a point dra
 preceding stage, the argument of `docs/soundness.md` 3.4 for the leaves, links and H-exact's
 Booleanity; no site is added. Cost (local direction, 8K, AVX2, PIOP branches run one after
 the other): stages 1 to 3 together 863 ms to 722 ms (stage 1 about 240 to 50 ms, stage 2
-+75 to +115 ms, stage 3 about equal); the 32K effect is to be measured on xcni.
++75 to +115 ms, stage 3 about equal); the 32K effect is to be measured on the reference Zen 5 node.
 
 ## A1. Mode-A driver: inputs, checks and caches (spec Sections 2, 10, 11, 13)
 

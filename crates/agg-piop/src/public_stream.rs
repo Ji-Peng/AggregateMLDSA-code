@@ -464,7 +464,7 @@ impl StreamedPublic {
                             let fresh_key = keep.then(|| {
                                 Arc::new(VerifierKey {
                                     pk: fresh.pk.clone(),
-                                    a: Box::new(std::array::from_fn(|rho| {
+                                    a: Arc::new(std::array::from_fn(|rho| {
                                         std::array::from_fn(|s| exp.a_hat[rho][s].0)
                                     })),
                                     t1: fresh.t1,
