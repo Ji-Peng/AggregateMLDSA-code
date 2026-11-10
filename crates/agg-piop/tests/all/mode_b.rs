@@ -415,13 +415,6 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
     });
 }
 
-#[test]
-fn mode_b_round_trip_at_64_signatures() {
-    on_large_stack(|| {
-        let _ = round_trip(60, 4, 0xb064);
-    });
-}
-
 /// Relation H-exact (protocol level): honest round trips at
 /// 1, 64 and 256 records; the verifier takes the relation from its caller, so an H-exact
 /// proof verified as H-FIPS and an H-FIPS proof verified as H-exact are rejected before the

@@ -383,44 +383,6 @@ fn round_trip_at_64_signatures() {
     });
 }
 
-#[test]
-#[cfg_attr(
-    debug_assertions,
-    ignore = "Flock and Akita proofs: run with --release"
-)]
-fn round_trip_at_64_signatures_slim() {
-    on_large_stack(|| {
-        round_trip(
-            48,
-            16,
-            0xb064,
-            DEFAULT_PART_LOG2,
-            1,
-            FlockProfile::Slim,
-            ProfileRejection::Item,
-        )
-    });
-}
-
-#[test]
-#[cfg_attr(
-    debug_assertions,
-    ignore = "Flock and Akita proofs: run with --release"
-)]
-fn round_trip_at_256_signatures_in_two_flock_parts_slim() {
-    on_large_stack(|| {
-        round_trip(
-            200,
-            56,
-            0xb256,
-            7,
-            2,
-            FlockProfile::Slim,
-            ProfileRejection::Work,
-        )
-    });
-}
-
 /// Relation H-FIPS in mode A at 64 records (Slim, one Flock
 /// part) and 256 records (two parts); the cross-relation verifier rejects before the instance record.
 #[test]
