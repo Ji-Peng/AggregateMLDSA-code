@@ -12,12 +12,13 @@ use std::time::{Duration, Instant};
 use agg_piop::binding::FlockProfile;
 use agg_piop::manifest::Relation;
 use agg_witness::gen;
+use agg_witness::padding::Geometry;
 use agg_witness::params::{dispatch_set, ParamSet, Set};
 use rayon::prelude::*;
 
 use crate::mode_a::{
-    size_lines, AggregateVerifier, Aggregator, AggregatorConfig, KeyCacheMut, ProveReport,
-    SignedRecord, DEFAULT_PART_LOG2, FLOCK_PROFILE,
+    canonical_layout, size_lines, AggregateVerifier, Aggregator, AggregatorConfig, KeyCacheMut,
+    ProveReport, SignedRecord, DEFAULT_PART_LOG2, FLOCK_PROFILE,
 };
 use crate::record::{self, KeyEntry, RecordEntry};
 use crate::{cache, rss};
@@ -51,16 +52,20 @@ commands:
       profile P = fast, slim or slim8 (Ligerito rate 1/2, 1/4 or 1/8, all 128-bit in
       Flock's accounting; default fast); with --flock-span on (default) a
       batch of more than one segment in whole-segment parts is one tied part over all
-      segments. Relation R = h-fips (default: the FIPS 204 bounds and the hint, so the
+      segments. The defaults prove every batch as one tied part; an aggregate made with
+      --flock-span off above one segment, or a D below the batch's segment size, verifies only with
+      verify --flock-layout any. Relation R = h-fips (default: the FIPS 204 bounds and the hint, so the
       extracted (c~, z, h) is a FIPS 204 signature) or h-exact (the FIPS 204 bounds
       |z| <= 130,993, |u| <= 190,465 without the hint; a reference relation, slightly
       faster). For ML-DSA-65 and ML-DSA-87 h-exact proves |z| <= 524,091 resp. 524,167,
       |u| <= 523,777.
   verify --records RECORDS --aggregate AGGREGATE [--params 44|65|87] [--cache CACHE]
-         [--flock-profile P] [--relation R]
+         [--flock-profile P] [--flock-layout canonical|any] [--relation R]
       Verify the aggregate for the records' (pk, M) (signatures are ignored), under the
       Flock profile its items name (or only under P), under relation R (default h-fips; an
-      aggregate of another relation is rejected) and for the set of --params. With
+      aggregate of another relation is rejected) and for the set of --params. Only the
+      default prover's layout of Flock parts (one tied part per batch) is accepted unless
+      --flock-layout any (span off, two parts per segment). With
       --cache, expanded keys are read from and added to the cache file (one file per
       set). Exit status 0 on accept, 1 on reject.
   bench --count N [--keys K] [--seed S] [--warmup W] [--reps R] [--params 44|65|87]
@@ -72,6 +77,8 @@ commands:
       prover and of the verifier (max over all runs), and the aggregate size per
       signature. With --json, also write every timed run, the aggregate size and
       SHA-256, and the selected kernels as JSON. Set AGG_GIT_REV to print the revision.
+      The verifier is pinned to P and, when --part-log2 or --flock-span give another
+      layout than the default prover's, accepts any layout.
 
 environment:
   AGG_FLOCK_THREADS=K   threads of the pool that proves the Flock parts beside the PIOP
@@ -199,6 +206,16 @@ impl Options {
                     .ok_or_else(|| format!("--{name}: fast, slim or slim8, not {v:?}"))
             })
             .transpose()
+    }
+
+    /// `--name canonical|any`: whether the verifier accepts every supported layout of Flock
+    /// parts (`any`) or only the default prover's (`canonical`, the default).
+    fn flock_layout(&mut self, name: &str) -> Result<bool, String> {
+        match self.take(name).as_deref() {
+            None | Some("canonical") => Ok(false),
+            Some("any") => Ok(true),
+            Some(v) => Err(format!("--{name}: canonical or any, not {v:?}")),
+        }
     }
 
     /// `--name h-fips|h-exact`: the relation, H-FIPS when absent.
@@ -462,6 +479,7 @@ fn verify(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let bytes = crate::read_input(&opts.path("aggregate")?, Some(crate::MAX_AGGREGATE_BYTES))?;
     let cache_path = opts.take("cache").map(PathBuf::from);
     let require = opts.flock_profile("flock-profile")?;
+    let any_layout = opts.flock_layout("flock-layout")?;
     let relation = opts.relation("relation")?;
     let set = opts.params("params")?;
     opts.finish()?;
@@ -477,6 +495,7 @@ fn verify(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
             None => AggregateVerifier::for_set(set),
         }
         .relation(relation);
+        let verifier = if any_layout { verifier.accept_any_layout() } else { verifier };
         let cache = key_cache.as_mut().map_or(KeyCacheMut::None, cache::KeyStore::as_mut);
         let report = verifier.verify_with(&statements(&records), &bytes, cache);
         (report, key_cache)
@@ -616,6 +635,12 @@ pub fn bench_records(
     let verifier = AggregateVerifier::for_set(config.set)
         .require(config.profile)
         .relation(config.relation);
+    // The bench verifies its own aggregate: a layout the configuration asks for is accepted,
+    // and the default layout runs the default verifier's layout check.
+    let verifier = match Geometry::new(records.len()) {
+        Ok(geometry) if config.layout(&geometry) != canonical_layout(&geometry) => verifier.accept_any_layout(),
+        _ => verifier,
+    };
     let statements = statements(records);
     let mut uncached_report = String::new();
     let verify_uncached = timed_runs(warmup, reps, || {
@@ -1054,6 +1079,13 @@ mod tests {
         assert!(o.flock_profile("flock-profile").is_err());
         assert_eq!(parse_flock_profile("fast"), Some(FlockProfile::Fast));
         assert_eq!(parse_flock_profile("slim8"), Some(FlockProfile::Slim8));
+        let mut o = Options::parse(&strings(&["--flock-layout", "any"])).unwrap();
+        assert_eq!(o.flock_layout("flock-layout"), Ok(true));
+        assert_eq!(o.flock_layout("flock-layout"), Ok(false));
+        let mut o = Options::parse(&strings(&["--flock-layout", "canonical"])).unwrap();
+        assert_eq!(o.flock_layout("flock-layout"), Ok(false));
+        let mut o = Options::parse(&strings(&["--flock-layout", "span-off"])).unwrap();
+        assert!(o.flock_layout("flock-layout").is_err());
         let mut o = Options::parse(&strings(&["--relation", "h-exact"])).unwrap();
         assert_eq!(o.relation("relation"), Ok(Relation::HExact));
         assert_eq!(o.relation("relation"), Ok(Relation::HFips));

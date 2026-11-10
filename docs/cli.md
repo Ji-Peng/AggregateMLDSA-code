@@ -53,7 +53,8 @@ Flock parts (K10, K11): segment `sigma` is split into parts of `2^{d_part}` reco
 `d_part = clamp(part_log2, max(3, d_seg - 1), d_seg)` (at most two parts per segment,
 `docs/soundness.md` 3.5; a segment commitment item naming more than `2^MAX_PARTS_LOG2 = 2`
 parts fails to parse, `ItemError::Truncated`, and the verifier reports `VerifyError::Plan`), `part_log2` from `AggregatorConfig` (default
-`DEFAULT_PART_LOG2 = 13`: the whole segment is one part). Each part
+`DEFAULT_PART_LOG2 = 13`: the whole segment is one part; a smaller part size verifies only
+with the layout opt-in, `--flock-layout` below). Each part
 is a tied part (`agg_keccak::tied`, proof version 5): a Flock sponge instance of its records
 and the virtual parity chain of its share (`docs/parity-chain.md`, `docs/keccak.md` 12.7): the sponge cap at
 event 2, the share at event 6 (computed from the part's input bits, kept since event 2), and
@@ -111,7 +112,7 @@ A=target/release/agg
 taskset -c 0,1,3-15 $A keygen-batch [--params 44|65|87] --count 16 --seed 1 --out keys.bin
 taskset -c 0,1,3-15 $A sign-batch [--params 44|65|87] --keys keys.bin --count 256 --seed 1 [--msg-len L] --out records.bin
 taskset -c 0,1,3-15 $A aggregate [--params 44|65|87] --records records.bin --out aggregate.bin [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-fips|h-exact]
-taskset -c 0,1,3-15 $A verify [--params 44|65|87] --records records.bin --aggregate aggregate.bin [--cache keys.cache] [--flock-profile fast|slim|slim8] [--relation h-fips|h-exact]
+taskset -c 0,1,3-15 $A verify [--params 44|65|87] --records records.bin --aggregate aggregate.bin [--cache keys.cache] [--flock-profile fast|slim|slim8] [--flock-layout canonical|any] [--relation h-fips|h-exact]
 AGG_GIT_REV=$(git rev-parse HEAD) taskset -c 0,1,3-15 $A bench [--params 44|65|87] --count 256 [--keys K] [--seed S] [--warmup 1] [--reps 5] [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-fips|h-exact] [--json PATH]
 ```
 
@@ -189,6 +190,21 @@ verified under another profile: `slim` and `slim8` are opt-in, since `slim`'s 15
 zero-check rounds reach only `2^-127.8` (`docs/soundness.md` Section 4.3). `--flock-span off` proves every
 segment on its own (K10 parts) instead of one span over all segments (K16).
 
+`verify --flock-layout canonical|any` (default `canonical`) selects which layouts of Flock
+parts the verifier accepts. The default prover proves every batch as one tied part: the span
+for two or more segments, one part of the full segment otherwise
+(`agg_cli::mode_a::canonical_layout`). A default verifier accepts only that layout and
+rejects any other (`aggregate --flock-span off` above one segment, or a `--part-log2` below
+the batch's segment size, which gives two parts per segment) from segment 0's item before any
+other work, with a message naming `--flock-layout any`
+(`VerifyError::LayoutNotAccepted`). The profile and layout policies live in
+`AggregateVerifier`; the lower-level `FlockVerifier` with `agg_piop::verifier::verify_timed`
+applies neither. With `any` (library:
+`AggregateVerifier::accept_any_layout`) every supported layout is verified, at most two tied
+parts per segment, under the weaker seed bound of `docs/soundness.md` 3.5. `bench` verifies
+its own aggregate with the layout opt-in when `--part-log2` or `--flock-span` give another
+layout than the default prover's.
+
 `verify` reads only `(pk, M)` from the record file and exits with status 0 on accept, 1 on
 reject, 2 on a usage or file error. `bench` generates the records in memory and follows
 the benchmark protocol: `--warmup W` runs (default 1, discarded), then `--reps R` timed runs
@@ -212,13 +228,18 @@ CPU 2 after `crypto_bench off`; the numbers below are not benchmarks.
   span, segments 1 to 3 are covered, the last one verifies it; spans over fewer segments,
   covered items with commitments or proofs, per-segment or second span items inside a span
   rejected), the segment items (profile and span bytes), the options `--flock-profile`,
-  `--flock-span` and `--relation`, the Flock records of honest tables equal `w1Encode`, the batch files, the
-  key cache file;
+  `--flock-span`, `--flock-layout` and `--relation`, the Flock records of honest tables equal `w1Encode`, the batch files, the
+  key cache file; the canonical layout is the default prover's plan at every batch size
+  class (one tied part), and a span-off item of a two-segment batch is refused by a default
+  verifier before the aggregate is parsed;
 - round trips at 64 (one part), 256 (two parts of 128) and 512 (one part) signatures with
   own and shared keys under each profile (`Fast`, `Slim`, `Slim8`): the `c~_i` list, the size report,
   the uncached and cached verifier (in memory and through the cache file) agree, the
   verifier reads the profile from the aggregate, and a verifier pinned to the other profile
-  rejects the item's profile byte before any Flock work;
+  rejects the item's profile byte before any Flock work; the two-part aggregates are refused by
+  a default verifier (`VerifyError::LayoutNotAccepted`) and verified with
+  `accept_any_layout`, as in the binary with `--flock-layout any`; the default layout verifies
+  by default at 1, 9 and 40 records (ML-DSA-44) and 17 and 33 records (ML-DSA-65, ML-DSA-87);
 - relation H-exact: round trips at 64 (one part) and 256 (two parts) signatures under
   `Slim` with `AggregatorConfig::relation = HExact`; a verifier of the other relation
   rejects the aggregate before event 0 (`VerifyError::Relation`); the binary aggregates and

@@ -5,7 +5,9 @@
 //!   profile (`Fast`, `Slim`, `Slim8`): the aggregate size per part, the prover's and the verifier's
 //!   step costs (uncached and cached keys) are printed (`--nocapture`), the cached and
 //!   uncached paths agree, the persistent key cache round-trips, the verifier reads the
-//!   profile from the aggregate and a verifier pinned to the other profile rejects it.
+//!   profile from the aggregate and a verifier pinned to the other profile rejects it; a
+//!   two-part aggregate is refused by a default verifier (layout) and verified with
+//!   `accept_any_layout`.
 //! - Corrupted aggregates (`corrupted_aggregates_are_rejected`): every byte region of the
 //!   wire format, the mode-A segment items (part size, part count, shares, part proofs,
 //!   commitments), the tie nonce and the tied-part proof version, the PIOP work nonces, a
@@ -22,8 +24,9 @@ use std::time::Instant;
 
 use agg_cli::cache;
 use agg_cli::mode_a::{
-    AggregateError, AggregateHooks, AggregateVerifier, Aggregator, AggregatorConfig,
-    SegmentRejection, VerifyCostReport, DEFAULT_PART_LOG2, FLOCK_PROFILE,
+    canonical_layout, AggregateError, AggregateHooks, AggregateVerifier, Aggregator,
+    AggregatorConfig, FlockLayout, SegmentRejection, VerifyCostReport, DEFAULT_PART_LOG2,
+    FLOCK_PROFILE,
 };
 use agg_cli::wire::{ItemError, SegmentCommitments, SegmentProofs, SegmentShares};
 use agg_keccak::sponge::{sponge_gate, SpongeRecord, W1_INPUT_BASE};
@@ -40,7 +43,7 @@ use agg_piop::transcript::TranscriptError;
 use agg_piop::verifier::{verify_timed, ConfigurationError, VerifyError};
 use agg_piop::wire::AggregateProof;
 use agg_witness::gen::{self, Record};
-use agg_witness::padding::main_index;
+use agg_witness::padding::{main_index, Geometry};
 use agg_witness::params::{C_TILDE_BYTES, K, OMEGA, SIG_BYTES, Z_BITS};
 
 fn on_large_stack(f: impl FnOnce() + Send + 'static) {
@@ -213,8 +216,31 @@ fn round_trip_as(
         items.d_part,
         part_log2.min(n.next_power_of_two().max(8).trailing_zeros())
     );
+    // One part is the default prover's layout; two parts per segment verify only with the
+    // layout opt-in, and a default verifier refuses them before any other work.
+    let named = FlockLayout {
+        span: items.span,
+        d_part: items.d_part,
+    };
+    let canonical = named == canonical_layout(&Geometry::new(n).unwrap());
+    assert_eq!(canonical, parts == 1);
+    let layout = |v: AggregateVerifier| if canonical { v } else { v.accept_any_layout() };
 
     let statements = statements(&records);
+    if !canonical {
+        let refused = AggregateVerifier::new()
+            .require(profile)
+            .relation(relation)
+            .verify(&statements, &aggregate.bytes, None);
+        assert!(
+            matches!(
+                rejected(&refused),
+                VerifyError::LayoutNotAccepted { span: 1, d_part, .. } if u32::from(*d_part) == items.d_part
+            ),
+            "{refused}"
+        );
+        assert!(refused.parts.is_empty() && refused.rejection.is_none(), "no Flock part was run");
+    }
     if profile != FlockProfile::Fast {
         // A default verifier only accepts Fast; Slim and Slim8 require opt-in via require().
         let default_verifier = AggregateVerifier::new().relation(relation);
@@ -241,12 +267,14 @@ fn round_trip_as(
         );
     }
 
-    let verifier = if profile != FlockProfile::Fast {
-        AggregateVerifier::new().require(profile)
-    } else {
-        AggregateVerifier::new()
-    }
-    .relation(relation);
+    let verifier = layout(
+        if profile != FlockProfile::Fast {
+            AggregateVerifier::new().require(profile)
+        } else {
+            AggregateVerifier::new()
+        }
+        .relation(relation),
+    );
     let uncached = verifier.verify(&statements, &aggregate.bytes, None);
     eprintln!("{uncached}");
     assert_eq!(
@@ -303,7 +331,7 @@ fn round_trip_as(
     );
     // Pinned verifiers: the aggregate's own profile accepts, the other one rejects at the
     // profile byte of the commitment-phase item (before any Flock work).
-    let pinned = AggregateVerifier::new().require(profile).relation(relation);
+    let pinned = layout(AggregateVerifier::new().require(profile).relation(relation));
     assert!(pinned
         .verify(&statements, &aggregate.bytes, None)
         .accepted());
@@ -319,9 +347,7 @@ fn round_trip_as(
         "{crossed}"
     );
     let other_profile = other(profile);
-    let wrong = AggregateVerifier::new()
-        .require(other_profile)
-        .relation(relation)
+    let wrong = layout(AggregateVerifier::new().require(other_profile).relation(relation))
         .verify(&statements, &aggregate.bytes, None);
     // The other profile also changes the instance record that starts the transcript. If the
     // projection work nonce still passes, the item's profile byte rejects the aggregate;
@@ -657,7 +683,20 @@ fn corrupted_aggregates_are_rejected() {
         let honest = aggregate.proof.clone();
         let bytes = aggregate.bytes.clone();
         let public = statements(&records);
-        let verifier = AggregateVerifier::new();
+        // Two parts in the segment are not the default prover's layout (one part of 2^5): a
+        // default verifier refuses the aggregate before any other work, with the layout error.
+        let refused = AggregateVerifier::new().verify(&public, &bytes, None);
+        assert!(
+            matches!(
+                rejected(&refused),
+                VerifyError::LayoutNotAccepted { span: 1, d_part: 4, canonical_span: 1, canonical_d_part: 5 }
+            ),
+            "{refused}"
+        );
+        assert!(refused.parts.is_empty() && refused.rejection.is_none(), "no Flock part was run");
+        assert!(refused.to_string().contains("--flock-layout any"), "{refused}");
+        // With the layout opt-in the honest aggregate verifies, and every check below runs.
+        let verifier = AggregateVerifier::new().accept_any_layout();
         let honest_report = verifier.verify(&public, &bytes, None);
         assert!(honest_report.accepted(), "{honest_report}");
         assert_eq!(honest_report.parts.len(), 2);
@@ -714,7 +753,9 @@ fn corrupted_aggregates_are_rejected() {
             &verify(&p),
             |e| matches!(e, VerifyError::ProfileNotAccepted(q) if *q == other(FLOCK_PROFILE)),
         );
-        let pinned = AggregateVerifier::new().require(other(FLOCK_PROFILE));
+        let pinned = AggregateVerifier::new()
+            .require(other(FLOCK_PROFILE))
+            .accept_any_layout();
         expect_rejected(
             "profile byte of the item, pinned",
             &pinned.verify(&public, &p.to_bytes(), None),
@@ -731,7 +772,11 @@ fn corrupted_aggregates_are_rejected() {
                 "the work nonce or the item rejects: {r}"
             );
         }
+        // The canonical part size on a two-part item passes a default verifier's layout check
+        // and is rejected later.
         let p = with_items(&honest, |c, _| c.d_part = 5);
+        let r = AggregateVerifier::new().verify(&public, &p.to_bytes(), None);
+        assert!(!matches!(rejected(&r), VerifyError::LayoutNotAccepted { .. }), "{r}");
         let r = verify(&p);
         // The part size enters the proof-of-work plan digest in the instance record, so the
         // projection site's work nonce may reject before the item's part count.
@@ -998,6 +1043,8 @@ fn flock_proofs_are_checked_by_the_flock_verifier_and_cannot_move_between_aggreg
             }
             let public = statements(&ra);
             let verifier = AggregateVerifier::new().relation(relation);
+            // Two parts per segment verify only with the layout opt-in.
+            let verifier = if part_log2 == DEFAULT_PART_LOG2 { verifier } else { verifier.accept_any_layout() };
             assert!(verifier.verify(&public, &a.bytes, None).accepted());
             let lenient = |proof: &AggregateProof| {
                 verify_timed(
@@ -1091,11 +1138,13 @@ fn three_parts_in_a_segment_are_refused() {
             SegmentCommitments::from_bytes(item),
             Err(ItemError::Truncated)
         );
-        let report = AggregateVerifier::new().verify(&statements(&records), &aggregate.bytes, None);
-        expect_rejected("three parts in segment 0", &report, |e| {
-            matches!(e, VerifyError::Plan)
-        });
-        assert!(report.parts.is_empty(), "no Flock part was run");
+        for verifier in [AggregateVerifier::new(), AggregateVerifier::new().accept_any_layout()] {
+            let report = verifier.verify(&statements(&records), &aggregate.bytes, None);
+            expect_rejected("three parts in segment 0", &report, |e| {
+                matches!(e, VerifyError::Plan)
+            });
+            assert!(report.parts.is_empty(), "no Flock part was run");
+        }
     });
 }
 

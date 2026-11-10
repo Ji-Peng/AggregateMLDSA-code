@@ -35,6 +35,13 @@
 //! ([`crate::wire`]); the verifier checks the span when it reaches the last segment, seeded by
 //! [`span_seed`]`(fs_0, .., fs_{S-1}, rec)`.
 //!
+//! Layouts: the default prover proves every batch as one tied part, the span when the batch has
+//! two or more segments and one part of the full segment otherwise ([`canonical_layout`]).
+//! A default [`AggregateVerifier`] accepts only that layout and refuses any other (span off,
+//! two parts per segment) from segment 0's commitment-phase item before any other work
+//! ([`VerifyError::LayoutNotAccepted`]); [`AggregateVerifier::accept_any_layout`] admits every
+//! layout the Keccak side supports (at most two tied parts per segment).
+//!
 //! Memory: the parts are committed one after the other at the commitment phase; each keeps its commitment
 //! and the sponge commitment's Flock prover data (its Reed-Solomon codeword and Merkle tree),
 //! so that the proof opens it without committing again. When the batch has exactly one tied
@@ -179,6 +186,26 @@ pub fn span_seed(fs: &[[u8; 32]], record: &[u8; 32]) -> [u8; 32] {
 #[must_use]
 pub fn spans_segments(geometry: &Geometry, part_log2: u32, span: bool) -> bool {
     spans_with_floor(geometry, part_log2, span, min_part_log2(geometry))
+}
+
+/// The layout of the tied parts of a batch as segment 0's commitment-phase item names it
+/// ([`crate::wire::SegmentCommitments`]): the span byte and the part size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FlockLayout {
+    /// `S >= 2`: one span over all `S` segments; 1: every segment proven on its own.
+    pub span: u8,
+    /// `log2` of the record positions per part.
+    pub d_part: u32,
+}
+
+/// The layout the default prover ([`AggregatorConfig::default`]) emits for a batch of
+/// `geometry`, the only one a default [`AggregateVerifier`] accepts: one span over all
+/// segments with whole-segment parts (span byte `S`, `d_part = d_seg = 13`) when the batch has
+/// two or more segments, else one part of the full segment (span byte 1, `d_part = d_seg`).
+/// Either way the batch is one tied part. It does not depend on the parameter set.
+#[must_use]
+pub fn canonical_layout(geometry: &Geometry) -> FlockLayout {
+    AggregatorConfig::default().layout(geometry)
 }
 
 fn spans_with_floor(geometry: &Geometry, part_log2: u32, span: bool, floor: u32) -> bool {
@@ -1187,12 +1214,17 @@ pub type SignedRecord<'a> = (&'a [u8], &'a [u8], &'a [u8]);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AggregatorConfig {
     /// Requested `log2` of the record positions per Flock part (clamped per segment to
-    /// `[min_part_log2, d_seg]`: at most two parts per segment, [`MAX_PARTS_LOG2`]).
+    /// `[min_part_log2, d_seg]`: at most two parts per segment, [`MAX_PARTS_LOG2`]). A value
+    /// below the batch's `d_seg` gives two parts per segment, a layout other than
+    /// [`canonical_layout`]: such an aggregate verifies only with
+    /// [`AggregateVerifier::accept_any_layout`] (`verify --flock-layout any`).
     pub part_log2: u32,
     /// The Flock profile ([`MODE_A_PROFILES`], bound at the instance record).
     pub profile: FlockProfile,
     /// Prove a batch of more than one segment as one span over all segments when the parts
-    /// are whole segments (module docs; default on).
+    /// are whole segments (module docs; default on). Off, a batch of two or more segments is
+    /// proven segment by segment, a layout other than [`canonical_layout`] that verifies only
+    /// with [`AggregateVerifier::accept_any_layout`].
     pub span: bool,
     /// The relation to prove (default H-FIPS). The Keccak side
     /// does not depend on it.
@@ -1229,6 +1261,23 @@ impl AggregatorConfig {
         Self {
             part_log2,
             ..Self::default()
+        }
+    }
+
+    /// The layout this configuration's prover emits for a batch of `geometry` (the span byte
+    /// and part size of segment 0's commitment-phase item; [`FlockProver`] plans the same way).
+    ///
+    /// # Panics
+    /// Never for a geometry of at most `2^15` records (at most four segments).
+    #[must_use]
+    pub fn layout(&self, geometry: &Geometry) -> FlockLayout {
+        FlockLayout {
+            span: if spans_segments(geometry, self.part_log2, self.span) {
+                u8::try_from(geometry.segments()).expect("at most 255 segments")
+            } else {
+                1
+            },
+            d_part: SegmentParts::plan(geometry, 0, self.part_log2).d_part,
         }
     }
 }
@@ -1998,9 +2047,9 @@ pub struct VerifyCostReport {
     pub profile: FlockProfile,
     /// The relation the aggregate was verified under (the verifier's, never the proof's).
     pub relation: Relation,
-    /// Reading the profile from the aggregate's commitment-phase items (a scan of the header,
-    /// the `c~` list and those items, outside the PIOP verifier's steps; zero when the profile
-    /// was given).
+    /// Reading the profile and the layout from the aggregate's commitment-phase items (a scan
+    /// of the header, the `c~` list and those items, outside the PIOP verifier's steps; zero
+    /// when the profile was given and every layout is accepted).
     pub profile_probe: Duration,
     /// Per Flock part (in verification order; a rejected run stops at the failing part).
     pub parts: Vec<PartVerifyLog>,
@@ -2048,7 +2097,7 @@ impl std::fmt::Display for VerifyCostReport {
             f,
             "  {:<16} {:<32} {:>10.2} ms",
             "profile",
-            "Flock profile from the items",
+            "Flock profile, layout from items",
             ms(self.profile_probe)
         )?;
         let labels = [
@@ -2101,10 +2150,13 @@ impl std::fmt::Display for VerifyCostReport {
 /// the Flock profile named by its commitment-phase items when that is a default-accepted mode-A profile
 /// ([`DEFAULT_ACCEPTED_PROFILES`]: `Fast`; the transcript binds the profile at
 /// the instance record, so the items cannot name another one than the prover bound), or under the profile
-/// fixed by [`Self::require`] (which also admits `Slim` and `Slim8`).
+/// fixed by [`Self::require`] (which also admits `Slim` and `Slim8`). It accepts only the
+/// layout of tied parts the default prover emits ([`canonical_layout`]) unless
+/// [`Self::accept_any_layout`] admits the others.
 pub struct AggregateVerifier {
     gate: ChainGate,
     require: Option<FlockProfile>,
+    any_layout: bool,
     relation: Relation,
     set: Set,
 }
@@ -2125,13 +2177,22 @@ impl Default for AggregateVerifier {
     }
 }
 
-/// The Flock profile id named by the commitment-phase items of `aggregate`, read in place
-/// without parsing the whole aggregate: the header (`u16` version, flags, `u64` `N`), the
-/// `c~_i`, the two framed round-1 commitments, the `LE32` item count, then the framed items
-/// up to the first that parses ([`crate::wire::flock_profile`]). `None` when the bytes end
-/// early or the header names no known set; the full parse in the verifier rejects such
-/// aggregates.
-fn probe_profile_id(aggregate: &[u8]) -> Option<u8> {
+/// What the verifier reads from the commitment-phase items before verifying.
+struct ItemsProbe {
+    /// The Flock profile id of the first item that parses ([`crate::wire::flock_profile`]).
+    profile: u8,
+    /// The layout named by segment 0's item and the batch's canonical layout, when that item
+    /// parses and the header's `N` is a valid batch size.
+    layout: Option<(FlockLayout, FlockLayout)>,
+}
+
+/// The commitment-phase items of `aggregate`, read in place without parsing the whole
+/// aggregate: the header (`u16` version, flags, `u64` `N`), the `c~_i`, the two framed
+/// round-1 commitments, the `LE32` item count, then the framed items up to the first that
+/// parses. `None` when the bytes end early, the header names no known set or no item parses;
+/// the full parse in the verifier rejects such aggregates, as it rejects one whose segment 0
+/// item does not parse (the Keccak side's plan needs every item).
+fn probe_items(aggregate: &[u8]) -> Option<ItemsProbe> {
     fn take<'a>(bytes: &'a [u8], at: &mut usize, len: usize) -> Option<&'a [u8]> {
         let end = at.checked_add(len)?;
         let out = bytes.get(*at..end)?;
@@ -2153,10 +2214,21 @@ fn probe_profile_id(aggregate: &[u8]) -> Option<u8> {
         take(aggregate, at, len)?;
     }
     let count = le32(aggregate, at)?;
-    for _ in 0..count {
+    for index in 0..count {
         let len = le32(aggregate, at)?;
         if let Ok(item) = crate::wire::SegmentCommitments::from_bytes(take(aggregate, at, len)?) {
-            return Some(item.profile);
+            let geometry = usize::try_from(records).ok().and_then(|n| Geometry::new(n).ok());
+            let layout = geometry.filter(|_| index == 0).map(|geometry| {
+                let named = FlockLayout {
+                    span: item.span,
+                    d_part: item.d_part,
+                };
+                (named, canonical_layout(&geometry))
+            });
+            return Some(ItemsProbe {
+                profile: item.profile,
+                layout,
+            });
         }
     }
     None
@@ -2176,6 +2248,7 @@ impl AggregateVerifier {
         Self {
             gate: gate_of(set),
             require: None,
+            any_layout: false,
             relation: Relation::HFips,
             set,
         }
@@ -2206,18 +2279,44 @@ impl AggregateVerifier {
         self
     }
 
-    /// The profile to verify `aggregate` under: the required one, else the mode-A profile its
+    /// Also accept the layouts of tied parts other than [`canonical_layout`] that the Keccak
+    /// side supports: segments proven on their own (span off) and two parts per segment (a
+    /// part size below `d_seg`). Their soundness bound is the one for at most two tied parts per
+    /// segment, weaker than the single tied part a default verifier admits.
+    #[must_use]
+    pub const fn accept_any_layout(mut self) -> Self {
+        self.any_layout = true;
+        self
+    }
+
+    /// The profile to verify under: the required one, else the mode-A profile the
     /// commitment-phase items name, else the default (an unparsable aggregate is rejected later). A
     /// named profile that is not accepted by default is returned as is, so that [`Self::verify`]
     /// can refuse it with a message naming `--flock-profile`.
-    fn profile_of(&self, aggregate: &[u8]) -> FlockProfile {
+    fn profile_of(&self, probe: Option<&ItemsProbe>) -> FlockProfile {
         if let Some(p) = self.require {
             return p;
         }
-        probe_profile_id(aggregate)
-            .and_then(FlockProfile::from_id)
+        probe
+            .and_then(|probe| FlockProfile::from_id(probe.profile))
             .filter(|profile| profile.is_mode_a())
             .unwrap_or(FLOCK_PROFILE)
+    }
+
+    /// The refusal of a layout other than the canonical one, unless any layout is accepted.
+    /// An aggregate whose segment 0 item cannot be read passes here and is rejected by the
+    /// full verification.
+    fn layout_refusal(&self, probe: Option<&ItemsProbe>) -> Option<VerifyError> {
+        if self.any_layout {
+            return None;
+        }
+        let (named, canonical) = probe?.layout?;
+        (named != canonical).then(|| VerifyError::LayoutNotAccepted {
+            span: named.span,
+            d_part: u8::try_from(named.d_part).unwrap_or(u8::MAX),
+            canonical_span: canonical.span,
+            canonical_d_part: u8::try_from(canonical.d_part).unwrap_or(u8::MAX),
+        })
     }
 
     /// Verify `aggregate` for the records `(pk_i, M_i)`. The verifier computes `tr_i`, `mu_i`,
@@ -2245,16 +2344,33 @@ impl AggregateVerifier {
         aggregate: &[u8],
         cache: KeyCacheMut<'_>,
     ) -> VerifyCostReport {
-        let probe = Instant::now();
-        let profile = self.profile_of(aggregate);
-        let profile_probe = if self.require.is_some() {
+        // The profile and the layout are read from the items before any other work; neither
+        // needs the probe when the profile is pinned and every layout is accepted.
+        let clock = Instant::now();
+        let probed = if self.require.is_some() && self.any_layout {
+            None
+        } else {
+            probe_items(aggregate)
+        };
+        let profile = self.profile_of(probed.as_ref());
+        let refusal = if self.require.is_some() || DEFAULT_ACCEPTED_PROFILES.contains(&profile) {
+            self.layout_refusal(probed.as_ref())
+        } else {
+            Some(VerifyError::ProfileNotAccepted(profile))
+        };
+        let profile_probe = if self.require.is_some() && self.any_layout {
             Duration::ZERO
         } else {
-            probe.elapsed()
+            clock.elapsed()
         };
         let keccak = FlockVerifier::for_set(&self.gate, self.set, profile);
         let cached = !matches!(cache, KeyCacheMut::None);
-        let report = if self.require.is_some() || DEFAULT_ACCEPTED_PROFILES.contains(&profile) {
+        let report = if let Some(refusal) = refusal {
+            VerifyReport {
+                outcome: Err(refusal),
+                timings: VerifyTimings::default(),
+            }
+        } else {
             match (self.set, cache) {
                 (Set::S44, KeyCacheMut::None) => verify_timed(
                     statements,
@@ -2298,11 +2414,6 @@ impl AggregateVerifier {
                 }
                 (set, _) => panic!("a key cache of another parameter set than ML-DSA-{}", set.name()),
             }
-        } else {
-            VerifyReport {
-                outcome: Err(VerifyError::ProfileNotAccepted(profile)),
-                timings: VerifyTimings::default(),
-            }
         };
         VerifyCostReport {
             report,
@@ -2321,6 +2432,82 @@ impl AggregateVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// For every batch size class (one segment of each `d_seg`, the lane sets' minimum of 17,
+    /// two to four segments, a partly filled last segment), the default prover's plan is one
+    /// tied part with the canonical layout; the other layouts the Keccak side supports (span
+    /// off, two parts per segment) differ from it wherever they exist, and every
+    /// configuration's [`AggregatorConfig::layout`] is the prover's plan.
+    #[test]
+    fn canonical_layout_is_the_default_provers_plan() {
+        let gate = sponge_gate();
+        for n in [
+            1, 2, 3, 8, 9, 16, 17, 33, 100, 1000, 1024, 4097, 8191, 8192, 8193, 12_000, 16_384,
+            16_385, 24_577, 32_768,
+        ] {
+            let geometry = Geometry::new(n).unwrap();
+            let canonical = canonical_layout(&geometry);
+            let segments = geometry.segments();
+            assert_eq!(canonical.d_part, geometry.d_seg(), "N = {n}");
+            assert_eq!(usize::from(canonical.span), if segments >= 2 { segments } else { 1 }, "N = {n}");
+            let span_off = AggregatorConfig {
+                span: false,
+                ..AggregatorConfig::default()
+            };
+            let two_parts = AggregatorConfig::with_part_log2(geometry.d_seg().saturating_sub(1));
+            for config in [AggregatorConfig::default(), span_off, two_parts] {
+                let plan = keccak_plan(&gate, &geometry, config.part_log2, config.span, config.profile);
+                let layout = config.layout(&geometry);
+                assert_eq!((plan.span, u32::from(plan.d_part)), (layout.span, layout.d_part), "N = {n}");
+                if config == AggregatorConfig::default() {
+                    assert_eq!(layout, canonical, "N = {n}");
+                    assert_eq!(plan.parts.len(), 1, "one tied part at N = {n}");
+                }
+            }
+            assert_eq!(span_off.layout(&geometry) != canonical, segments >= 2, "N = {n}");
+            assert_eq!(two_parts.layout(&geometry) != canonical, geometry.d_seg() > MIN_PART_LOG2, "N = {n}");
+        }
+    }
+
+    /// The layout gate reads segment 0's item before any other work: a span-off item of a
+    /// two-segment batch (the c~ list and items only; nothing after them) is refused by a
+    /// default verifier with the layout error, and a verifier that accepts any layout goes on
+    /// to the full parse, which rejects the truncated bytes.
+    #[test]
+    fn default_verifier_refuses_a_span_off_item_before_parsing() {
+        let n = (1 << 13) + 1;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&agg_piop::manifest::WIRE_VERSION.to_le_bytes());
+        bytes.push(agg_piop::wire::flags(Set::S44, Relation::HFips));
+        bytes.extend_from_slice(&(n as u64).to_le_bytes());
+        bytes.resize(bytes.len() + n * C_TILDE_BYTES, 0);
+        for _ in 0..2 {
+            bytes.extend_from_slice(&0_u32.to_le_bytes());
+        }
+        bytes.extend_from_slice(&2_u32.to_le_bytes());
+        for sigma in 0..2 {
+            let item = SegmentCommitments {
+                profile: FLOCK_PROFILE as u8,
+                d_part: SEGMENT_LOG2,
+                span: 1,
+                commitments: vec![vec![sigma; 8]],
+            }
+            .to_bytes();
+            bytes.extend_from_slice(&u32::try_from(item.len()).unwrap().to_le_bytes());
+            bytes.extend_from_slice(&item);
+        }
+        let report = AggregateVerifier::new().verify(&[], &bytes, None);
+        assert!(
+            matches!(
+                report.report.outcome,
+                Err(VerifyError::LayoutNotAccepted { span: 1, d_part: 13, canonical_span: 2, canonical_d_part: 13 })
+            ),
+            "{report}"
+        );
+        assert!(report.parts.is_empty());
+        let report = AggregateVerifier::new().accept_any_layout().verify(&[], &bytes, None);
+        assert!(matches!(report.report.outcome, Err(VerifyError::Wire(_))), "{report}");
+    }
 
     #[test]
     fn parts_tile_every_segment() {

@@ -96,12 +96,29 @@ fn keygen_sign_aggregate_verify_and_bench() {
     let size = std::fs::metadata(&aggregate).unwrap().len();
     assert!(out.contains(&format!("wrote {size} B")), "{out}");
 
+    // Two parts in the segment are not the default prover's layout: refused without
+    // --flock-layout any, verified with it.
     let (code, out) = agg(&[
         "verify",
         "--records",
         s(&recs),
         "--aggregate",
         s(&aggregate),
+    ]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("is not accepted by default") && out.contains("--flock-layout any"), "{out}");
+    assert_eq!(
+        agg(&["verify", "--records", s(&recs), "--aggregate", s(&aggregate), "--flock-layout", "all"]).0,
+        2
+    );
+    let (code, out) = agg(&[
+        "verify",
+        "--records",
+        s(&recs),
+        "--aggregate",
+        s(&aggregate),
+        "--flock-layout",
+        "any",
     ]);
     assert_eq!(code, 0, "{out}");
     eprintln!("{out}");
@@ -115,6 +132,8 @@ fn keygen_sign_aggregate_verify_and_bench() {
         s(&aggregate),
         "--cache",
         s(&key_cache),
+        "--flock-layout",
+        "any",
     ]);
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("3 keys (3 new)"), "{out}");
@@ -126,6 +145,8 @@ fn keygen_sign_aggregate_verify_and_bench() {
         s(&aggregate),
         "--cache",
         s(&key_cache),
+        "--flock-layout",
+        "any",
     ]);
     assert_eq!(code, 0, "{out}");
     assert!(
@@ -139,8 +160,11 @@ fn keygen_sign_aggregate_verify_and_bench() {
         s(&other),
         "--aggregate",
         s(&aggregate),
+        "--flock-layout",
+        "any",
     ]);
     assert_eq!(code, 1, "{out}");
+    assert!(!out.contains("--flock-layout any"), "rejected past the layout check: {out}");
     assert!(out.contains(": reject"), "{out}");
 
     // Relation H-exact: aggregate and verify with --relation h-exact; the default (H-FIPS)
@@ -160,6 +184,10 @@ fn keygen_sign_aggregate_verify_and_bench() {
     assert!(out.contains("relation H-exact"), "{out}");
     let verify_as = |file: &std::path::Path, relation: Option<&str>| {
         let mut args = vec!["verify", "--records", s(&recs), "--aggregate", s(file)];
+        // The two-part aggregate needs the layout opt-in; the others are default layouts.
+        if file == aggregate.as_path() {
+            args.extend(["--flock-layout", "any"]);
+        }
         if let Some(r) = relation {
             args.extend(["--relation", r]);
         }

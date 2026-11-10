@@ -914,7 +914,12 @@ Code (`agg_piop::{transcript, prover, verifier, wire}`, `agg_cli::{mode_a, wire}
   record. A span's table is all of `Y`, so a span alone would satisfy it without `rec`; the
   alternative is to admit only span layouts under this wire version. Binding `rec`
   keeps every layout (span off, two parts per segment, `--part-log2`) at the cost of one hash
-  and no bytes.
+  and no bytes. The prover still supports every layout, but a default verifier accepts only
+  the default prover's layout, one tied part per batch (`mode_a::canonical_layout`: the span
+  for two or more segments, one full-segment part otherwise), and refuses another one from
+  segment 0's commitment-phase item before any other work (`VerifyError::LayoutNotAccepted`);
+  the others verify only with the opt-in `AggregateVerifier::accept_any_layout` (CLI `verify
+  --flock-layout any`), as `Slim` and `Slim8` need `require`.
 - The shares are computed at event 6 from the part's input bits kept since event 2 (6 MiB
   per non-last part of a full segment), not from the rebuilt witness
   (`TiedPart::final_vectors_of_bits`).

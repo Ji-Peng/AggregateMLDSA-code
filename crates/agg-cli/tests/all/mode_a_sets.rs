@@ -318,6 +318,51 @@ fn full_driver<P: ParamSet>(seed: u64, n: usize, other: Set) {
     assert!(report.parts.iter().all(|p| p.accepted), "the Flock part accepts: {report}");
 }
 
+/// The default prover's layout at small batches: segment 0's item names the canonical layout
+/// of the batch (one part of the full segment), and a default verifier accepts the aggregate.
+fn default_layout_round_trip<P: ParamSet>(seed: u64, n: usize) {
+    use agg_cli::mode_a::{canonical_layout, AggregateVerifier, Aggregator, AggregatorConfig, FlockLayout};
+    use agg_cli::wire::SegmentCommitments;
+
+    let records = agg_witness::gen::records_shared_keys_for::<P>(seed, n, n.div_ceil(4));
+    let signed: Vec<(&[u8], &[u8], &[u8])> =
+        records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice(), r.sig.as_slice())).collect();
+    let statements: Vec<(&[u8], &[u8])> = records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice())).collect();
+    let aggregate = Aggregator::new(AggregatorConfig { set: P::SET, ..AggregatorConfig::default() })
+        .aggregate(&signed)
+        .expect("aggregate");
+    let item = SegmentCommitments::from_bytes(&aggregate.proof.flock_commitments[0]).expect("item");
+    let geometry = Geometry::new(n).unwrap();
+    assert_eq!(
+        FlockLayout { span: item.span, d_part: item.d_part },
+        canonical_layout(&geometry),
+        "{} at N = {n}",
+        P::NAME
+    );
+    assert_eq!((item.d_part, item.commitments.len()), (geometry.d_seg(), 1), "{} at N = {n}", P::NAME);
+    let report = AggregateVerifier::for_set(P::SET).verify_with(
+        &statements,
+        &aggregate.bytes,
+        agg_cli::mode_a::KeyCacheMut::None,
+    );
+    assert!(report.accepted(), "{} at N = {n}: {report}", P::NAME);
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "Flock and Akita proofs; run with --release")]
+fn default_layout_verifies_by_default_at_small_batches_of_every_set() {
+    on_large_stack(|| {
+        for n in [1, 9, 40] {
+            default_layout_round_trip::<Set44>(0x1a44 + n as u64, n);
+        }
+        // 17 records: the smallest lane batch of ML-DSA-65 and ML-DSA-87.
+        for n in [17, 33] {
+            default_layout_round_trip::<Set65>(0x1a65 + n as u64, n);
+            default_layout_round_trip::<Set87>(0x1a87 + n as u64, n);
+        }
+    });
+}
+
 #[test]
 #[cfg_attr(debug_assertions, ignore = "Flock and Akita proofs; run with --release")]
 fn ml_dsa_65_full_driver_with_the_opening() {

@@ -272,7 +272,13 @@ Session `s` reduces the layer-`(s - 1)` claims of every active tree to layer `s`
   segments (one list, one `theta` per segment row, still a union over one list). Mode A
   MUST admit at most two tied parts per segment (`d_part >= d_seg - 1`, code
   `mode_a::MAX_PARTS_LOG2`; verifiers refuse a smaller `d_part` while deriving the plan of
-  event 0). The resulting values, with `S <= 4` segments at `2^15`:
+  event 0). A default verifier admits only the default prover's layout, one tied part per
+  batch (the span for `S >= 2`, one part of the full segment for `S = 1`;
+  `mode_a::canonical_layout`), and refuses every other layout from segment 0's item before
+  any other work (`VerifyError::LayoutNotAccepted`): the first row below. The other rows bound
+  a verifier that opts in to every supported layout (`AggregateVerifier::accept_any_layout`,
+  CLI `verify --flock-layout any`); the two-parts-per-segment rows are the bound for that
+  opt-in. The resulting values, with `S <= 4` segments at `2^15`:
 
   | Layout | Bound | `Fast` | `Slim` | `Slim8` |
   | --- | --- | --- | --- | --- |
@@ -824,7 +830,8 @@ evaluations.
 (relation H-exact or H-FIPS, the caller's relation, bound by byte 3 of event 0 and checked
 by the verifier before event 0) with the plan of Section 6 (Section 10.1 for H-exact, 10.2 for
 H-FIPS), at most two tied parts per segment (3.5), and Akita's plan for the selected catalog
-row. (`Slim` meets every bound except the 15 outer zero-check rounds, which reach `2^-127.8`
+row. A default verifier admits only one tied part per batch (3.5), a special case of the
+two-part hypothesis; the theorem as stated covers the layout opt-in as well. (`Slim` meets every bound except the 15 outer zero-check rounds, which reach `2^-127.8`
 per query once the constant-column contract term is charged, 12.7 item 1; `Slim8`, with 4.3
 and 4.4, has not been rechecked against that term.) Its two hypotheses
 are settled:

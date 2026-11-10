@@ -233,6 +233,19 @@ pub enum VerifyError {
     Configuration(ConfigurationError),
     /// The aggregate names a mode-A Flock profile that a default verifier does not accept.
     ProfileNotAccepted(FlockProfile),
+    /// The aggregate's Keccak side names another layout of tied parts than the one the default
+    /// prover emits for its record count, and the verifier did not opt in to other layouts.
+    /// Span bytes and part sizes as in the mode-A commitment-phase item of segment 0.
+    LayoutNotAccepted {
+        /// The span byte the aggregate names (1: segments proven on their own).
+        span: u8,
+        /// The `log2` part size the aggregate names.
+        d_part: u8,
+        /// The default prover's span byte for this record count.
+        canonical_span: u8,
+        /// The default prover's `log2` part size for this record count.
+        canonical_d_part: u8,
+    },
     /// Malformed proof bytes.
     Wire(WireError),
     /// The proof's relation byte differs from the relation the caller expects (checked
@@ -288,6 +301,17 @@ impl std::fmt::Display for VerifyError {
                     FlockProfile::Slim => "slim",
                     _ => "fast",
                 }
+            ),
+            Self::LayoutNotAccepted {
+                span,
+                d_part,
+                canonical_span,
+                canonical_d_part,
+            } => write!(
+                f,
+                "Flock layout (span byte {span}, parts of 2^{d_part} records) is not accepted by \
+                 default: the default prover's layout for this batch is span byte \
+                 {canonical_span} with parts of 2^{canonical_d_part} records; pass --flock-layout any"
             ),
             Self::Wire(e) => write!(f, "wire: {e}"),
             Self::Relation { expected, found } => {
