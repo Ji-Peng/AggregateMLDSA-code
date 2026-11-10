@@ -88,7 +88,7 @@ their reference machine (AMD EPYC 9355, Zen 5).
 
 Main documents: [`docs/spec.md`](docs/spec.md) (protocol), [`docs/soundness.md`](docs/soundness.md)
 (128-bit soundness and the proof-of-work schedule), [`docs/h-exact.md`](docs/h-exact.md)
-(the three relations), [`docs/deviations.md`](docs/deviations.md) (differences from Aerie).
+(the relations H-exact and H-FIPS), [`docs/deviations.md`](docs/deviations.md) (differences from Aerie).
 
 ## Dependencies
 
