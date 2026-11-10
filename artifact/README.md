@@ -344,18 +344,24 @@ It prints one JSON line per run. Choose family `J` or `U`, ISA `avx2`
 32 to 65536. `--soundness default` is the only available profile. The CLI
 runs one proof per process, so there is no in-process warm-up; each result
 records the upstream prover and in-process verifier times and process peak
-RSS from `/usr/bin/time -v`. Compare with separate process runs of our
-ML-DSA-87 H-FIPS prover on the same allocation and thread count. Alloul26
-uses a stronger fixed soundness target (family J has a 2^-188 classical
-bound; family U has a QROM bound); an approximately 128-bit profile is not
-configurable. H-u is no longer available in the current code.
+RSS from `/usr/bin/time -v`. Compare with `agg bench --params 87` on the
+same allocation and thread count, and take our peak from its `prove_peak_kib`
+(`agg bench` resets the peak before verifying, so `/usr/bin/time -v` sees
+only the verifier). Alloul26 uses a stronger fixed soundness target (family
+J has a 2^-188 classical bound; family U has a QROM bound); an approximately
+128-bit profile is not configurable.
 
 The optional `--alloul26` flag on `quick`, `full`, or `all` runs the default
 128-signature smoke comparison after the usual work; it is off by default.
 For aligned measurements invoke `alloul26` explicitly at each matching N,
-ISA, and thread count, pinning both programs to the same CPUs. Large cases
+ISA, and thread count, pinning both programs to the same CPUs. Under Slurm,
+run every timed command as an `srun -n1 -c 32 --threads-per-core=2
+--cpu-bind=none` step: a command in the batch step itself is not held to the
+allocation. Large cases
 can require tens of GiB of memory and substantial disk-backed spill space;
 set `H9_SPILL_DIR`, `H9_SPILL_MIN`, and `H9_SPILL_SEQ` as appropriate.
-The upstream report gives about 19 s and 6 GiB RSS for J at 2048 on its
-24-vCPU host; larger cases take minutes and may spill hundreds of GiB.
+The paper's row comes from J with the AVX2 build at 32 threads on 16 Zen 5
+cores (EPYC 9355): 178.8 s, 151.0 B/sig and 42.0 GiB peak at N = 32768, and
+8.97 s at N = 1024. Family U needs up to 72 GiB at 32768; larger cases may
+spill to disk.
 Geode is licensed under BSL 1.1 and is fetched from upstream, not redistributed.
