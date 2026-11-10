@@ -602,7 +602,7 @@ ones, under the caller's relation, with the hash relation checked in the clear.
 ## 13. Tests
 
 `taskset -c 0,1,3-15 cargo test -p agg-piop --release` (101 unit tests; 40 integration tests
-in three binaries: `tests/all/` with one module per topic, and `tests/fork_join.rs`,
+in three binaries: `tests/all/` with one module per topic, and `tests/process_state/`,
 `tests/single_thread.rs`, which change process-wide state; one diagnostic test is ignored, and
 the 1,024-signature round trip is ignored in debug builds):
 

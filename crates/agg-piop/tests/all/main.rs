@@ -1,5 +1,5 @@
 //! Integration tests of `agg-piop`, one module per topic, in one test binary. The tests
-//! that change process-wide state (`fork_join`, `single_thread`) stay separate binaries.
+//! that change process-wide state (`process_state`, `single_thread`) stay separate binaries.
 
 #[path = "../common/mod.rs"]
 mod common;

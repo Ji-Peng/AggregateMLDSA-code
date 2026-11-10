@@ -7,9 +7,11 @@
 //! message, a changed stage-2 message, the digests joined in the wrong order and the two
 //! branches' nonces exchanged in the stream are each rejected.
 //!
-//! This binary sets `AGG_PIOP_FORK`, so it holds one test function only.
+//! This module sets `AGG_PIOP_FORK`, so it runs inside the single test function of the
+//! `process_state` binary.
 
-mod common;
+use crate::common;
+use crate::on_large_stack;
 
 use agg_piop::binding::FlockProfile;
 use agg_piop::manifest::{CommitmentManifest, Relation};
@@ -25,15 +27,6 @@ use agg_witness::bridge::BridgeMatrices;
 use agg_witness::instance::PublicInstance;
 use agg_witness::params::C_TILDE_BYTES;
 use jolt_field::Ring;
-
-fn on_large_stack(f: impl FnOnce() + Send + 'static) {
-    std::thread::Builder::new()
-        .stack_size(256 << 20)
-        .spawn(f)
-        .expect("spawn")
-        .join()
-        .expect("test thread");
-}
 
 /// The nonce stream with branch S's nonces moved in front of branch L's.
 fn branches_exchanged(manifest: &CommitmentManifest, work: &[u8]) -> Vec<u8> {
@@ -67,8 +60,7 @@ fn branches_exchanged(manifest: &CommitmentManifest, work: &[u8]) -> Vec<u8> {
     out.finish()
 }
 
-#[test]
-fn forked_transcript_schedules_agree_and_tampering_is_rejected() {
+pub fn run() {
     on_large_stack(|| {
         let records = common::records(0xf0c, 48, 16);
         let instance = PublicInstance::from_records(&records).unwrap();

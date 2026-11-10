@@ -1,11 +1,12 @@
 //! A default aggregate must read the narrow columns through their signed
 //! mirrors and leave every canonical field plane unexpanded.
 //!
-//! This is a separate test binary because the counter is process-wide: the
-//! other integration tests run concurrently and may legitimately materialize a
-//! plane through a fallback reader.
+//! This runs inside the single test function of the `process_state` binary
+//! because the counter is process-wide: the tests of the main binary run
+//! concurrently and may legitimately materialize a plane through a fallback reader.
 
-mod common;
+use crate::common;
+use crate::on_large_stack;
 
 use agg_piop::manifest::Relation;
 use agg_piop::mode_b::prove_mode_b;
@@ -13,17 +14,7 @@ use agg_piop::prover::{ProverInputs, SeededMatrices};
 use agg_witness::instance::PublicInstance;
 use agg_witness::params::C_TILDE_BYTES;
 
-fn on_large_stack(f: impl FnOnce() + Send + 'static) {
-    std::thread::Builder::new()
-        .stack_size(256 << 20)
-        .spawn(f)
-        .expect("spawn")
-        .join()
-        .expect("test thread");
-}
-
-#[test]
-fn default_aggregate_builds_no_lazy_field_plane() {
+pub fn run() {
     on_large_stack(|| {
         let records = common::records(0x1a2f, 60, 4);
         let instance = PublicInstance::from_records(&records).expect("instance");

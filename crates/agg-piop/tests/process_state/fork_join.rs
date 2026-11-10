@@ -7,10 +7,11 @@
 //! the opening, beside the PIOP with the opening after the join, or one after the other)
 //! produce the same proof.
 //!
-//! This binary sets `AGG_FLOCK_THREADS` and `AGG_LATE_JOIN`, so it holds one test function
-//! only.
+//! This module sets `AGG_FLOCK_THREADS` and `AGG_LATE_JOIN`, so it runs inside the single
+//! test function of the `process_state` binary.
 
-mod common;
+use crate::common;
+use crate::on_large_stack;
 
 use std::sync::Mutex;
 
@@ -113,17 +114,7 @@ impl KeccakVerifier for AnyShares {
     }
 }
 
-fn on_large_stack(f: impl FnOnce() + Send + 'static) {
-    std::thread::Builder::new()
-        .stack_size(256 << 20)
-        .spawn(f)
-        .expect("spawn")
-        .join()
-        .expect("test thread");
-}
-
-#[test]
-fn no_piop_or_akita_challenge_depends_on_the_flock_proofs() {
+pub fn run() {
     on_large_stack(|| {
         let records = common::records(0xf01, 24, 8);
         let instance = PublicInstance::from_records(&records).unwrap();
