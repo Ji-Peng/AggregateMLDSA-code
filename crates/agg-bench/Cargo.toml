@@ -7,13 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[features]
-avx512 = ["agg-piop/avx512", "agg-keccak/avx512"]
-
 [dependencies]
 agg-witness = { workspace = true }
 agg-piop = { workspace = true }
-agg-keccak = { workspace = true }
 agg-mldsa-simd = { workspace = true }
 agg-simd = { workspace = true }
 

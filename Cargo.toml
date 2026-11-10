@@ -31,11 +31,6 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 opt-level = 3
 
-[profile.ci]
-inherits = "release"
-debug-assertions = true
-overflow-checks = true
-
 [workspace.dependencies]
 # Internal crates.
 agg-witness = { path = "crates/agg-witness" }
@@ -68,7 +63,6 @@ akita-planner = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e0
 akita-schedules = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640" }
 akita-serialization = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640" }
 akita-pcs = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640", default-features = false }
-akita-sumcheck = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640" }
 akita-transcript = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640", default-features = false, features = ["transcript-blake2b"] }
 akita-types = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640" }
 akita-verifier = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640", default-features = false, features = ["transcript-blake2b"] }

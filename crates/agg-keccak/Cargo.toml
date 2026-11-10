@@ -7,11 +7,6 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[features]
-# Marker only: the AVX-512 kernels of `src/simd` and the vendored Flock trees are
-# selected at run time whatever this flag says (README "SIMD policy").
-avx512 = []
-
 [dependencies]
 aerie-keccak = { workspace = true }
 agg-bridge = { workspace = true }

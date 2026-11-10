@@ -55,12 +55,6 @@ pub type BaseField = aerie_prover::BaseField;
 /// Extension field in which openings and challenges live.
 pub type OpeningField = aerie_prover::OpeningField;
 
-/// Whether this build was compiled with the opt-in `avx512` feature.
-#[must_use]
-pub const fn avx512_enabled() -> bool {
-    cfg!(feature = "avx512")
-}
-
 /// Whether the unsound test stand-ins are compiled in (unit tests, or the `test-hooks`
 /// feature): `prover::FixedMatrices`, `prover::NoKeccak`, `verifier::NoKeccakVerifier`,
 /// and verification under Flock profile 0. A prover, verifier or benchmark build has
@@ -90,7 +84,6 @@ mod tests {
         assert!(!aerie_prover::PROTOCOL_DOMAIN.is_empty());
         let backend = aerie_simd_backend();
         assert!(["scalar", "neon", "avx2", "avx512"].contains(&backend));
-        assert_eq!(avx512_enabled(), cfg!(feature = "avx512"));
         assert!(test_hooks_enabled(), "unit tests always have the stand-ins");
     }
 }

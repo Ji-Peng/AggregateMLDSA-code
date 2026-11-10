@@ -10,10 +10,6 @@ publish.workspace = true
 [features]
 default = ["parallel"]
 parallel = ["aerie-falcon/parallel", "aerie-prover/parallel"]
-# Opt-in AVX-512 paths. Aerie's kernels (aerie-simd) are runtime-dispatched
-# with a scalar fallback whatever this flag says; the flag gates our own
-# AVX-512 kernels (none yet) and is what scripts/bench.sh AVX512=1 turns on.
-avx512 = []
 # Test stand-ins that make the verifier unsound outside tests (see `docs/deviations.md`):
 # `prover::FixedMatrices` (matrices that ignore the bridge seed), `prover::NoKeccak` and
 # `verifier::NoKeccakVerifier` (Flock profile 0, no Keccak argument). Without this
@@ -27,7 +23,6 @@ agg-witness = { workspace = true }
 agg-pcs-config = { workspace = true }
 agg-bridge = { workspace = true }
 agg-mldsa-simd = { workspace = true }
-flock-core = { workspace = true }
 aerie-falcon = { workspace = true }
 aerie-prover = { workspace = true }
 aerie-simd = { workspace = true, features = ["backend-override"] }

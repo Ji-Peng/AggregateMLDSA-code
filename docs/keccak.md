@@ -254,7 +254,7 @@ depths, and by the NUMBER of openings: one per tied part, whatever its size.
 
 Machine: i7-11700K, 7 threads (`taskset -c 0,1,3-15`, `RAYON_NUM_THREADS=7`), CPU 2 not used,
 `crypto_bench off` not run, shared with other jobs. CLMUL build
-(`RUSTFLAGS="-C target-feature=+pclmulqdq"`, `--features agg-keccak/avx512,agg-piop/avx512`,
+(`RUSTFLAGS="-C target-feature=+pclmulqdq"`,
 `target/clmul`), with spans, K17 and `Slim8`. Medians of 5 runs after 1 warmup; RSS is
 `VmHWM`, the maximum over all runs.
 
