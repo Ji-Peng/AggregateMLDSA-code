@@ -572,7 +572,7 @@ def main():
             f"sign-batch --params P --count 1024 --seed {RECORD_SEED}"
         )
         document.setdefault("aggregates", {})
-        # Entries of relations this artifact no longer accepts are dropped.
+        # Drop entries of relations outside RELATIONS.
         for sizes in document["aggregates"].values():
             for entries in sizes.values():
                 for relation in [r for r in entries if r not in RELATIONS]:

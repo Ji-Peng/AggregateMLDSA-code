@@ -1668,9 +1668,9 @@ mod tests {
 
     /// The sponge instance at a full-height count (2,048 records: Flock's block-first
     /// transport) verifies with a bit claim whose column coordinates are zero above the
-    /// chain's 64 word columns, and rejects it with a false value (ring-switch `ClaimMismatch`). Regression: the block rounds
+    /// chain's 64 word columns, and rejects it with a false value (ring-switch `ClaimMismatch`). The block rounds
     /// fold the column bit-bank's multilinear extension, so a bank computed only on the
-    /// columns of nonzero weight (enough for `s_hat_v`) makes the honest proof fail.
+    /// columns of nonzero weight (enough for `s_hat_v`) would make the honest proof fail.
     #[test]
     #[cfg_attr(debug_assertions, ignore = "Flock proofs; run with --release")]
     fn bit_claims_verify_on_a_full_height_sponge() {

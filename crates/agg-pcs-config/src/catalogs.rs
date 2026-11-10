@@ -58,7 +58,7 @@ pub const CATALOG_D_SIG_H_EXACT: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1
 pub const CATALOG_D_SIG_H_FIPS: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
 /// Relation byte of H-exact: the proof header's flags byte and byte 3 of the instance-record
-/// bytes. Byte 0 belonged to a relaxed relation that this version no longer accepts.
+/// bytes. Byte 0 is rejected.
 pub const RELATION_H_EXACT: u8 = 1;
 /// Relation byte of H-FIPS.
 pub const RELATION_H_FIPS: u8 = 2;
