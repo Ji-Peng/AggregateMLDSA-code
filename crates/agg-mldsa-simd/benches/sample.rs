@@ -3,8 +3,6 @@
 //! Evaluates AVX2 and AVX-512 implementations against the C reference implementations
 //! (pq-crystals Dilithium2 AVX2 and Hybrid-SHA-3 AVX-512) and baseline implementations.
 
-#![allow(unexpected_cfgs)]
-
 mod common;
 
 use agg_mldsa_simd::dispatch::{Backend, Engine};
@@ -417,7 +415,7 @@ fn main() {
     common::print_system_info();
     let c_avail = cfg!(cref) && agg_mldsa_cref::available();
     if !c_avail {
-        println!("Note: C references not available. Set AGG_CREF_SRC and RUSTFLAGS='--cfg cref' to enable C comparisons.");
+        println!("Note: C references not available. Set AGG_CREF_SRC (scripts/cref-fetch.sh) to enable C comparisons.");
     }
 
     let mut rng = SimpleRng::new(0x1337_C0DE_5A4B_3C2D);

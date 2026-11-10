@@ -1,5 +1,4 @@
 //! All integration tests of the crate in one test binary (one link step).
-#![allow(unexpected_cfgs)]
 
 // The kernels included from the library source name `crate::params` and `crate::poly`.
 #[allow(unused_imports)]

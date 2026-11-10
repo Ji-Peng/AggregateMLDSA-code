@@ -1,5 +1,4 @@
-//! Run C comparisons with AGG_CREF_SRC set and RUSTFLAGS='--cfg cref'.
-#![allow(unexpected_cfgs)]
+//! Run C comparisons with AGG_CREF_SRC pointing at the fetched C sources (the build script then sets `cfg(cref)`).
 mod common;
 use agg_mldsa_simd::{poly, Backend, Block, Engine, Sink, Xof, XofJob};
 use std::hint::black_box;
