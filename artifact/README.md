@@ -55,6 +55,62 @@ reference measurements), and runs only on request:
 needs no flag: `tab-relations.tex` holds H-exact against H-FIPS when the
 results contain H-exact cells, and a comment otherwise.
 
+## All-prime-field comparator
+
+`--hash-field fp` (on `agg aggregate`, `verify` and `bench`; default `gf2`)
+proves the same relations for every set with the SHAKE256 chain
+$\tilde c_i = H(\mu_i \| \mathrm{w1Encode}(w_1'))$ arithmetized over $F_p$:
+committed round states with degree-3 zero-checks inside the same three-stage
+PIOP, committed with the same Akita presets and opened in the same batched
+opening. There is no Flock proof and no GF(2)-to-$F_p$ bridge; the Keccak
+constraints read the committed `w1Encode` bits directly
+(`../docs/allprime.md`). Everything else is held equal: binary, sets,
+relations, lattice and range PIOP, the $T_{16}$ lookup, transcript,
+proof-of-work schedule, ISA tiers, thread pool, timing protocol and records.
+
+```sh
+REPS=5 scripts/allprime.sh 44 1024 avx2 results/allprime   # SET N TIER OUTDIR
+```
+
+`allprime.sh` builds `agg` once, generates the records (`keygen-batch --seed
+42`, `sign-batch --seed 43`; reused when present), and per field runs
+`agg bench --warmup 1 --reps $REPS --hash-field gf2|fp` under `AGG_ISA=TIER`
+and `/usr/bin/time -v`, then aggregates and verifies the records once. It
+writes `OUTDIR/<set>-<N>-<tier>-<field>.{json,time,log,agg}` and prints one
+row per field: prove, verify (uncached) and cached medians in ms, B/sig,
+prover peak RSS (GiB, from the bench JSON), the first 16 hex digits of the
+records' aggregate SHA-256 and the verdict. `agg bench` signs its own records
+from `--seed 42`.
+
+`./run.sh gates --hash-field fp` gates the $F_p$ aggregates at 1K against
+`expected/hashes-fp.json` (default relations: H-FIPS and H-exact for
+ML-DSA-44, H-FIPS for 65 and 87, plus any the file pins): every tier and
+`RAYON_NUM_THREADS=1` give the same bytes, which equal the pin, verify under
+`fp`, are rejected by `verify --hash-field gf2`, and a flipped byte is
+rejected. `--write-expected` there rewrites `hashes-fp.json` only;
+`./run.sh freeze` re-pins both files (`--skip-fp` leaves `hashes-fp.json`).
+
+Residual differences, to be stated with the numbers:
+
+1. No Flock pool: the whole rayon pool runs the PIOP (`AGG_FLOCK_THREADS`
+   is ignored under `fp`).
+2. The $F_p$ witness has 2,240 cells per Keccak round (the post-theta state
+   and both column parities) against 1,600 bits in GF(2), where theta is
+   linear and free; the last round is not pruned, and slot padding adds 4.8%
+   (ML-DSA-44, 65) or 3.7% (ML-DSA-87) dead cells.
+3. Proof bytes: the Flock span, its cap and `Y_sigma` disappear; more
+   extension-field claims and a larger Akita opening appear; the lookup loses
+   the three carry stacks.
+4. Soundness: the $F_p$ side needs no bridge lemma and no Flock
+   list-decoding argument; its hash argument is a zero-check. Both reach
+   $2^{-128}$ under Module-SIS in the ROM; only the mixed-field side relies on
+   the Flock soundness theorem (Dao, Kominers and Thaler, ePrint 2026/2056,
+   Theorem 4.4).
+5. Memory: the $F_p$ prover commits every Keccak round state, so its peak
+   RSS grows faster with $N$ (`../docs/allprime.md` Section 7). If a node
+   cannot hold the largest batch, both systems are reported at the largest
+   power of two that fits.
+
 ## Hardware and software
 
 - x86-64 Linux built for x86-64-v3: AVX2, BMI2, FMA, POPCNT and

@@ -182,6 +182,9 @@ Environment knobs (all optional; none changes the proof bytes):
 | `AGG_SIMD` | `portable`: turn the `agg-simd` field kernels off (A/B switch; the layout default becomes `row`); `avx512`: name the IFMA backend (requires IFMA hardware, runs at the `AGG_ISA` cap) |
 | `AGG_ISA` | `avx512ifma`, `avx512`, `avx2` or `scalar`: cap every run-time SIMD detector (`agg-simd`, Flock, Akita, ML-DSA kernels); unset detects (README "SIMD policy") |
 | `AGG_SIMD_REPORT` | `1`: print, before the command, the level each crate selected |
+| `AGG_KECCAK_SOURCE` | `--hash-field fp` only: `bits` (default) reads the Keccak columns, their rotations and slot shifts from the packed words; `i8` from expanded `i8` copies (A/B switch) |
+| `AGG_COMMIT_PARALLEL` | `--hash-field fp` only: at most this many of the seven Keccak groups are committed at once (default 2, at least 1) |
+| `AGG_KECCAK_DEFER` | `--hash-field fp` only: `1` keeps the Keccak bit lanes in lookup tables one fold longer (smaller first dense tables), `0` does not; unset, on above `2^31` Keccak cells (8K signatures and up) |
 
 The opening is split at the transcript session: `AGG_OPENING_THREADS` sizes only the
 transcript-bound finish, while the prepare part (registry, commitment admission,
