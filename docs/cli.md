@@ -131,6 +131,9 @@ Environment knobs (all optional; none changes the proof bytes):
 | `AGG_ALLOC_POISON` | `1`: fill reused blocks with `0xA5` (test mode for uninitialised reads) |
 | `AGG_W1_SPLIT` | `0`: build the level-1 weight table instead of its two factors |
 | `AGG_PHASE_STAMPS` | any value: print a `phase-stamp` line per prover step on stderr |
+| `AGG_FLOCK_STAMPS` | any value: print a `flock-stamp <step> <ms>` line per Flock sub-step on stderr (wall time since the previous stamp) |
+| `AGG_SESSION_TRACE` | any value: print a `session-trace` line per round of the PIOP layer engine on stderr (variables, round, width, table rows, pass time) |
+| `AGG_ALLOC_TRACE` | any value: print an `arena-grow` line on stderr when the PIOP table arena must allocate a larger table (bytes, previous capacity) |
 | `AGG_PIOP_LAYOUT` | `plane` or `row`: the PIOP table layout; default `plane` with a vector `agg-simd` backend (IFMA, AVX-512F, AVX2), `row` on the portable one |
 | `AGG_SIMD` | `portable`: turn the `agg-simd` field kernels off (A/B switch; the layout default becomes `row`); `avx512`: name the IFMA backend (requires IFMA hardware, runs at the `AGG_ISA` cap) |
 | `AGG_ISA` | `avx512ifma`, `avx512`, `avx2` or `scalar`: cap every run-time SIMD detector (`agg-simd`, Flock, Akita, ML-DSA kernels); unset detects (README "SIMD policy") |
