@@ -102,11 +102,6 @@ fn table_bottom(m: &[i32], x: E) -> Layer {
     })
 }
 
-/// Layer `depth - 2` of a stack for every challenge in one pass over the leaves.
-fn stack_upper_bottoms(stacked: &[i32], center: i32, xs: &[E]) -> Vec<Layer> {
-    agg_simd::lookup::bottoms(stacked, center, &powers4(xs))
-}
-
 /// Layer `depth - 3` of a stack straight from the leaves.
 fn stack_upper_parents(stacked: &[i32], center: i32, xs: &[E]) -> Vec<Layer> {
     agg_simd::lookup::bottom_parents(stacked, center, &powers4(xs))
@@ -121,12 +116,6 @@ fn powers4(xs: &[E]) -> Vec<[E; 4]> {
             [x, x2, x3, x3 * x]
         })
         .collect()
-}
-
-/// Whether layer `depth - 2` of a centred stack is recomputed from the leaves in
-/// its session instead of being stored (`AGG_LOOKUP_LEAF_UPPER=0` stores it).
-fn leaf_upper() -> bool {
-    std::env::var("AGG_LOOKUP_LEAF_UPPER").map_or(true, |v| v != "0")
 }
 
 /// The stored layers `0 .. depth - 1` of one tree.
@@ -289,18 +278,13 @@ pub(super) fn prove_with(
                 sym[j].as_ref().map_or(0, |centre| centre.center),
             ))
     };
-    // Layer `depth - 2` of every challenge of a centred stack, or layer `depth -
-    // 3` when layer `depth - 2` is recomputed in its session.
-    let leaf_upper = dedicated && leaf_upper();
+    // Layer `depth - 3` of every challenge of a centred stack; layer `depth - 2` is
+    // recomputed from the leaves in its session instead of being stored.
     let mut uppers: Vec<Vec<Layer>> = (0..stacks.len())
         .map(|j| {
             if let Some(centre) = &sym[j] {
                 let xs_j: Vec<E> = (0..challenges).map(|x| centred(j, x)).collect();
-                if leaf_upper {
-                    stack_upper_parents(&stacks[j].stacked, centre.center, &xs_j)
-                } else {
-                    stack_upper_bottoms(&stacks[j].stacked, centre.center, &xs_j)
-                }
+                stack_upper_parents(&stacks[j].stacked, centre.center, &xs_j)
             } else {
                 Vec::new()
             }
@@ -381,9 +365,7 @@ pub(super) fn prove_with(
                                 by_stack[j].push((id, centred(j, x), gp, gq));
                             }
                             TreeKind::Stack(j)
-                                if leaf_upper
-                                    && sym[j].is_some()
-                                    && stacks[j].shape.depth() == s + 2 =>
+                                if sym[j].is_some() && stacks[j].shape.depth() == s + 2 =>
                             {
                                 let (gp, gq) = gamma_of(id);
                                 from_leaves[j].push((id, centred(j, x), gp, gq));

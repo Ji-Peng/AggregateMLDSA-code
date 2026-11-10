@@ -202,13 +202,6 @@ fn fold4(r: [E; 3], previous: &[E], width: usize, row: usize, j: usize) -> E {
     E::reduce_product(acc)
 }
 
-/// Whether the lookup sessions' groups compute two rounds per pass (default on;
-/// `AGG_LOOKUP_LOOKAHEAD=0` runs one pass per round, the same messages).
-fn two_rounds_per_pass() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("AGG_LOOKUP_LOOKAHEAD").map_or(true, |v| v.trim() != "0"))
-}
-
 /// The round driver shared by the dedicated groups.
 struct Engine<S: Level0> {
     source: S,
@@ -1009,7 +1002,7 @@ impl Level0 for LayerSource<'_> {
     }
 
     fn two_rounds_per_pass(&self) -> bool {
-        two_rounds_per_pass()
+        true
     }
 
     fn has_level0_rows(&self) -> bool {
@@ -1455,7 +1448,7 @@ impl Level0 for IntSource<'_> {
     }
 
     fn two_rounds_per_pass(&self) -> bool {
-        two_rounds_per_pass()
+        true
     }
 
     fn folded2_row(&self, r: [E; 3], i: usize, out: &mut [E]) {
