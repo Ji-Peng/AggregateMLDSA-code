@@ -13,7 +13,7 @@ blob: the seven Akita commitments, the mode-A segment items, `Y_sigma`, the PIOP
 claims, the Akita opening) and a `ProveReport` (step times, per Flock part times and sizes,
 the byte size of every part of the aggregate). Steps:
 
-1. Lengths checked; `c~_i` is the first 32 signature bytes; the public instance
+1. Lengths checked; `c~_i` is the first 32 signature bytes for ML-DSA-44 (`lambda/4` bytes per set, below); the public instance
    (`ExpandA`, `tr`, `mu`, `SampleInBall`, `T`) is built.
 2. Witnesses derived with strict FIPS 204 verification (an invalid signature is refused with
    its index) and the round-1 tables `G_main16` (`i32` cells) and `G_main4` (`i8` cells) built.
@@ -256,7 +256,7 @@ CPU 2 after `crypto_bench off`; the numbers below are not benchmarks.
 
 ## 4. Local measurements
 
-Relation sanity runs (revision `f526097`, CLMUL build `RUSTFLAGS="-C
+Relation sanity runs (ML-DSA-44, revision `f526097`, CLMUL build `RUSTFLAGS="-C
 target-feature=+pclmulqdq"`, `agg bench --count 1024 --warmup 1 --reps 1 --flock-profile slim`,
 span on, CPUs 0,1,3-15 with `RAYON_NUM_THREADS=3` while a catalog generation ran with 3
 workers: single noisy runs, not benchmarks):

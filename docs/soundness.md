@@ -97,7 +97,7 @@ sites omit the Flock proofs (K25); Lemma 12.3 covers them.
 
 **Sites and bad sets.** A *site* is one challenge query: a scalar or a vector drawn from
 one oracle stream (Aerie C.1: "we treat each vector as one field challenge"). For a site
-`t`, fix the objects the extractor will return (the 53 Akita polynomials `f`, 54 under H-exact and 59 under H-FIPS, the Flock
+`t`, fix the objects the extractor will return (the Akita polynomials `f`, 59 under H-FIPS and 54 under H-exact (53 under the removed H-u), the Flock
 word vector `z_s` of each tied part up to its Johnson list) and the transcript prefix; the
 *bad set* `Bad_t` is the set of answers after which a doomed transcript (one with a failed
 check or a false pending claim) may stop being doomed. `nu_t` is the numerator of its
@@ -658,7 +658,7 @@ alters a family fails it.
 
 ## 5. Tighter accounting (round-by-round), with the argument
 
-**Lemma S (checks of fixed objects).** Fix the 53 Akita polynomials `f` (54 under H-exact, 59 under H-FIPS) (values in `F_p`
+**Lemma S (checks of fixed objects).** Fix the Akita polynomials `f` (59 under H-FIPS, 54 under H-exact; 53 under the removed H-u) (values in `F_p`
 on their Boolean domains) and a statement. For every challenge input `u` of a PIOP site from
 `X` (event 7) to the PCS export, let
 `D(u) = 1` iff a verifier check determined by `u` fails or a pending claim is false,
@@ -923,7 +923,7 @@ estimate); the claim is 128 bits per query, Aerie's notion.
 | Plan digest in event 0 | 0 (absorbed, not sent) | one SHA3-256 |
 | **Total added** | **645 B = 0.020 B/sig** | well under 0.1 s (estimate) against 23.7 s |
 
-**Measured (local, direction only).** `agg bench --count 1024 --keys 16
+**Measured (local, direction only; relaxed H, the relation before the removed H-u, deviation L8).** `agg bench --count 1024 --keys 16
 --warmup 1 --reps 5`, CLMUL build (`RUSTFLAGS=-C target-feature=+pclmulqdq`, separate target
 dir), `RAYON_NUM_THREADS=3`, `taskset -c 0,1,3-15`, shared machine (load average 5.2 to 5.8),
 the three binaries run back to back, `Slim`, one tied part:
@@ -1340,7 +1340,7 @@ have the stated probabilities.
 | per tied part `p`, after event 6 and before `X`, in segment and part order: the tie site, the `eq_Y` site and the `R` chain rounds (tie challenger); the sponge instance's Flock sites | `H_F` | `N` |
 | `X` (event 7) | `H_P` | `H`: checkpoint `l_2` |
 | the PIOP sites after `X` (Section 3.1), through the stage-3 rounds: in linear order the rest of branch L, branch S, then stage 3 after the branch join (K23) | `H_P` | `N` |
-| Akita's evaluation batch of the 53 claims (54 under H-exact, 59 under H-FIPS, the zero claims of `G_3`'s zero polynomials included; the only Akita site before the root fold, `GrindingSite::EvaluationBatch { level: 0 }`), after stage 3 and the PCS session digest | `H_A` | `N` |
+| Akita's evaluation batch of the 59 claims under H-FIPS (54 under H-exact, 53 under the removed H-u, the zero claims of `G_3`'s zero polynomials included; the only Akita site before the root fold, `GrindingSite::EvaluationBatch { level: 0 }`), after stage 3 and the PCS session digest | `H_A` | `N` |
 | the opening suffix from the root fold challenge (Akita Proposition 10.44): fold challenges, ring-switch `alpha` of every nonterminal level, the rest | `H_A` | `E` (indexed), `H`, `N` |
 
 The segment of `l_1` runs from `sd` to the last stage before `X`: `sd`, `proj.psi`, `fs` and
@@ -1988,7 +1988,7 @@ the Module-SIS instance is `[A | I]` over `Z_q`, `256 k = 1,024` rows, `256 (k +
 have `zeta' = zeta` = 724,481 and 769,537 (the removed H-u's relaxed `z` bound `2^19` stayed below it),
 `B_u = 523,777`, a 48- and 64-byte `c~` (collision term `q_H^2 / 2^385` and `q_H^2 / 2^513`),
 and the instance `[A | I]` with `256 k` rows, `256 (k + l)` columns and `l_inf` bound
-`max(2^19 + B_z, 2 B_u)` = 1,048,379 and 1,048,455.
+`max(2^19 + B_z, 2 B_u)` = 1,048,379 and 1,048,455 (a bound that also covered the removed H-u, `z* in [-2^19, 2^19)`; not recomputed for H-exact and H-FIPS).
 
 *Proof.* Let `(M*, sigma*)` win, `sigma* = (c~*, z*, w1'*, u*, v*)`, and let `S` be the
 answers on `M*`. One of three cases holds.

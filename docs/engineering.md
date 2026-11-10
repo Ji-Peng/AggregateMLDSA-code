@@ -7,7 +7,7 @@ recorded in their patch records. The protocol itself is specified in `docs/spec.
 vendored changes are recorded in `vendor/akita/PATCH.md` and
 `vendor/flock-core/PATCH.md`.
 
-Unless a different condition is stated, timings refer to relation H-u (the default when
+Unless a different condition is stated, timings and sizes refer to ML-DSA-44 under relation H-u (the default when
 they were measured; it has since been removed, and H-FIPS is the default), 32K signatures,
 median of five cold runs, at 49.2 B/sig. The reference run was taken on the two builds that
 run-time ISA dispatch has since replaced: 2.76 s on the AVX-512IFMA build and 2.98 s on the
@@ -297,7 +297,7 @@ the proof bytes unchanged.
   builds all three rows.
 - **Round-23 pruning.** `GateLayout::new` and `round_lanes`
   (`crates/agg-keccak/src/gate.rs`) commit only the lanes of the last round that hold an
-  output bit. For the SHAKE256 sponge that is four of 25 lanes, so the other chi AND bits
+  output bit. For the ML-DSA-44 sponge (32-byte c~) that is four of 25 lanes, so the other chi AND bits
   are neither committed nor constrained.
 - **Sum-check memory traffic.** The zerocheck folds and evaluates the next message in one
   pass (`fold_and_message_x86_avx512`, `zerocheck/multilinear.rs`), the packed round-3 path

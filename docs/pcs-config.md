@@ -25,7 +25,7 @@ Two presets, one per family:
 | Admitted values | `[-8, 7]` | `[-2^15, 2^15 - 1]` |
 | Source class | `CommittedSourceClass::BalancedSignedDigit` | same |
 | Family name | `agg_mldsa_fp64_signed_width4` | `agg_mldsa_fp64_signed_width16` |
-| Groups | `G_main4` (`Z_hi, U_hi, b_0..b_5`), `G_m` (7 multiplicity digits) | `G_main16` (`Z_lo, U_lo, V_lo, V_hi`), `G_1`, `G_2`, `G_3` (in `G_2`'s layout), `G_k` (`K_0, K_1, K_2, K_3`) |
+| Groups (ML-DSA-44 under H-u, Section 3; other sets: last section) | `G_main4` (`Z_hi, U_hi, b_0..b_5`), `G_m` (7 multiplicity digits) | `G_main16` (`Z_lo, U_lo, V_lo, V_hi`), `G_1`, `G_2`, `G_3` (in `G_2`'s layout), `G_k` (`K_0, K_1, K_2, K_3`) |
 
 The width-4 parameters are Aerie's `Fp64SignedWidth4`, checked field by field in
 `preset::tests::preset_matches_aerie_width4_parameters` (deviation D1); the width-16
@@ -72,7 +72,7 @@ admissible; the cost-optimal DP does not pick the fewest digits but small bases:
 | 19 | 5 | 4 | 51,961 |
 | 20 | 5 | 5 | 56,207 |
 
-Width-16 inner digits for the lookup columns (planner probe, the `G_main16` layouts of 256
+Width-16 inner digits for the lookup columns (planner probe, the ML-DSA-44 `G_main16` layouts of 256
 and 1,024 signatures; settled by deviation L3):
 
 | Layout | Inner range | Selected | Estimated proof (B) | Planning time |

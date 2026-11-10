@@ -4,7 +4,7 @@
 | --- | --- |
 | Status | informative; a local profile, **direction only**. No number here is a benchmark result: the development box was shared with other agents' builds (load average 2 to 10), and figures marked "est." are estimates. |
 | Profiled code | the code before the proof-of-work schedule and the speed levers of Section 0 |
-| Relation | numbers labelled H-u were measured under the relaxed relation H-u, the default at the time; H-u has since been removed, and H-FIPS is the default |
+| Relation | numbers labelled H-u were measured under the relaxed relation H-u, the default at the time; H-u has since been removed, and H-FIPS is the default; every number is ML-DSA-44's (the default set; no run passes `--params`) |
 
 ## 0. What happened since the profile
 

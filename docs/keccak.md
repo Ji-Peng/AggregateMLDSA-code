@@ -7,7 +7,7 @@ from the spec are listed in `docs/deviations.md` (the K entries). Sections 1 to 
 the sponge gate, Section 9 the tied part that mode A uses,
 Section 12 the Flock bytes: the mode-A profile (`Fast` by default, or `Slim`), spans over all
 segments, the level-0 cap, the options measured or estimated, and (12.7) tied-part proof
-version 5, the virtual parity chain.
+version 5, the virtual parity chain. Sections 1 to 12 give the ML-DSA-44 values unless stated; the ML-DSA-65 and ML-DSA-87 sponge layouts are in the last section.
 
 ## 1. The chi-only Keccak-f gate
 

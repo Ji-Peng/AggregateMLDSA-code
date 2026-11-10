@@ -3,7 +3,7 @@
 Crate `crates/agg-witness` (`docs/spec.md` Section 14). This note records the
 exact conventions and the bounds the code enforces; the committed column layouts are
 `agg-piop`'s (`docs/lookup.md`, `docs/h-exact.md`). The spec is the
-source of truth; deviations are in `docs/deviations.md` (entries W1 to W3).
+source of truth; deviations are in `docs/deviations.md` (entries W1 to W3). Sections 2 to 6 give the ML-DSA-44 values; the ML-DSA-65 and ML-DSA-87 values are in the last section and in the `ParamSet` constants of `crates/agg-witness/src/params.rs`.
 
 ## 1. Pipeline and modules
 
