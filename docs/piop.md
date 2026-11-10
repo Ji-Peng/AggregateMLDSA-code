@@ -246,6 +246,10 @@ depend on them; `kernel/mod.rs` holds the schedule, `kernel/plan.rs` the compile
   (row blocks filled lane by lane, after a parallel first touch); a quartic lane read only
   by its polynomial is stored translated by `s = -c_3 / (4 c_4)` (Aerie's depressed
   quartic: nine products per lane and pair instead of fourteen).
+  With `Group::defer_coded` (the `F_p` hash field's Keccak groups, knob `AGG_KECCAK_DEFER`
+  in `cli.md`) and at least four local variables, quartet lanes with at most 256 octet
+  patterns fold into octet tables instead, level 3 runs per item, and the dense table is
+  written at bind 3 at a sixteenth of the domain (same messages, half the dense memory).
 - *Dense rounds* (level 3 on): per pair over the table; folds in place (Aerie's
   `fold_rows_in_place`).
 - *Arithmetic.* From level 1 on, the constant coefficient of the inner polynomial is not
