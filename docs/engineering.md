@@ -266,7 +266,7 @@ checks are untouched. The prover changes that matter for time and memory are:
   opening's evaluation and fold (`evaluate_and_fold`) read the i8 and i16 mirrors
   (`sources/dense/kernels.rs`), so the 8 B/cell field plane of a narrow column is built only
   on demand by the few remaining readers (`sources/dense/poly.rs`, a `OnceLock`). A test
-  (`crates/agg-piop/tests/lazy_field_plane.rs`) asserts that a default aggregate builds none.
+  (`crates/agg-piop/tests/process_state/lazy_field_plane.rs`) asserts that a default aggregate builds none.
   Measured on a Zen 5 node (EPYC 9355), 32K signatures, 16 cores / 32 threads: -93 ms and
   -3.2 GiB of prover peak memory on `AGG_ISA=avx2`.
 - **Digit caches.** `CachedDigits16` and `cached_i16_decompose_fold_partitioned`

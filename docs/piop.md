@@ -673,8 +673,8 @@ the 1,024-signature round trip is ignored in debug builds):
   `c~`, other bridge matrices, a changed lookup round or layer-1 value, compensated digit
   claims, a mode-A profile under the no-Keccak stand-in, a changed round message, stage-3
   claim, pre-stage claim or opening byte, a truncated commitment, a non-empty Keccak payload
-  in mode B and a truncated blob are rejected; a padded batch of 10 records round-trips.
-- `tests/all/mode_b.rs`: `prove_mode_b` / `verify_mode_b` round trips at 64, 256 (200 own keys,
+  in mode B and a truncated blob are rejected.
+- `tests/all/mode_b.rs`: `prove_mode_b` / `verify_mode_b` round trips at 256 (200 own keys,
   56 on 3 shared keys) and 1,024 signatures, H-exact at 1, 64 and 256 and H-FIPS round
   trips with the cross-relation rejections; the proof size by part, the prover and verifier
   step timings (uncached, cached) printed; the published bits satisfy
@@ -705,7 +705,7 @@ the 1,024-signature round trip is ignored in debug builds):
   full prover (`FixedMatrices`, unchecked stages): a flipped final-vector bit, a flipped
   level-2 parity, a level-1 and a level-3 carry moved inside `T_16`, and a flipped committed
   bit under the stale round-2 tables are each rejected at the stage-1 terminal.
-- `tests/fork_join.rs`: the transcript never absorbs the Flock proof items (no PIOP
+- `tests/process_state/fork_join.rs`: the transcript never absorbs the Flock proof items (no PIOP
   challenge, no PCS session digest and no Akita challenge depends on them; the side's
   challengers receive the event-6 record digest), the share items are absorbed before `X`,
   and the three prover schedules give the same proof.

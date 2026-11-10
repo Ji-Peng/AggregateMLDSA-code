@@ -928,7 +928,7 @@ Code (`agg_piop::{transcript, prover, verifier, wire}`, `agg_cli::{mode_a, wire}
   0). A non-numeric `AGG_FLOCK_THREADS` is reported once on stderr and replaced by the
   default; larger values are clamped to the larger of the logical CPUs and the global pool
   (`prover::max_flock_threads`).
-  Both schedules give the same proof bytes (test `agg-piop/tests/fork_join.rs`).
+  Both schedules give the same proof bytes (test `agg-piop/tests/process_state/fork_join.rs`).
 - Verifier: it checks the Keccak side right after replaying event 6, as before (the verdict
   does not depend on the order of the checks, and the early check keeps precise rejection
   reasons), and absorbs the proof items at the join.
@@ -991,12 +991,12 @@ Code (`agg_piop::{transcript, prover, verifier, pow}`):
   pool, `AGG_PIOP_THREADS` sets one), else branch S on a scoped thread with the PIOP pool's
   worker stack (64 MiB) beside branch L on the caller's thread, both feeding the global
   pool. `AGG_PIOP_FORK=0` (or `off`) runs L, then S, on the caller's thread. All schedules
-  give the same bytes (`tests/piop_fork.rs`; 1K aggregates identical across `AGG_MLDSA_SIMD`,
+  give the same bytes (`tests/process_state/piop_fork.rs`; 1K aggregates identical across `AGG_MLDSA_SIMD`,
   `RAYON_NUM_THREADS=1|16` and `AGG_PIOP_FORK=0`).
 - Verifier: replays L, then S, on the two clones, then joins; the order of the checks does
   not affect the verdict.
 - `ProveHooks::swap_join` (test only) joins the digests as S, L; the verifier rejects the
-  proof (`tests/piop_fork.rs`, with a changed lookup message, a changed stage-2 message and
+  proof (`tests/process_state/piop_fork.rs`, with a changed lookup message, a changed stage-2 message and
   the branch nonces exchanged in the stream).
 - PIOP wire version 4 is kept (unreleased); aggregates made before this change do not
   verify under it.
@@ -1105,7 +1105,7 @@ Code (`agg_piop::{transcript, prover, verifier}`):
   global pool less the Flock pool), capped at `AGG_OPENING_THREADS`' default; an explicit
   `AGG_OPENING_THREADS` is taken as given. `AGG_LATE_JOIN=0` runs the finish after the
   join instead (K22's schedule); the transcript is the same, so both give the same bytes
-  (`agg-piop/tests/fork_join.rs`).
+  (`agg-piop/tests/process_state/fork_join.rs`).
 - Wire: unchanged (the proof items stay after the stage-3 claims; PIOP wire version 4,
   unreleased, kept). The session digest and the opening of every proof change; aggregates
   made under K22 do not verify under it. The work plan and its digest are unchanged.

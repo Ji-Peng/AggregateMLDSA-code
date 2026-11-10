@@ -924,7 +924,7 @@ fn main() {
     #[cfg(not(cref))]
     if std::env::args().any(|a| a == "--gate") {
         eprintln!(
-            "C comparisons UNRESOLVED; --gate requires AGG_CREF_SRC and RUSTFLAGS='--cfg cref'"
+            "C comparisons UNRESOLVED; --gate requires AGG_CREF_SRC (scripts/cref-fetch.sh)"
         );
         std::process::exit(1);
     }
@@ -1038,7 +1038,7 @@ fn main() {
         }
         #[cfg(not(cref))]
         {
-            println!("C comparisons UNRESOLVED; set AGG_CREF_SRC and RUSTFLAGS='--cfg cref'");
+            println!("C comparisons UNRESOLVED; set AGG_CREF_SRC (scripts/cref-fetch.sh)");
             ok = false;
         }
         let (sched_ok, lane_block_time) = scheduler(&engine, w);
