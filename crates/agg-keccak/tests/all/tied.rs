@@ -1,10 +1,10 @@
 //! The tied part: the sponge
 //! instance with the virtual parity chain (one sum-check from the public final vectors to a
 //! bit-level claim on the sponge commitment). Round trips at 5 records (padded positions, `d
-//! = 3`), 64 (`d = 6`), 256 (`d = 8`), 512 (`d = 9`, one full level-1 block) and 1,024 (`d =
-//! 10`, two level-1 blocks per lane), spans, the tampering cases of the parity chain
-//! with their error names, the precomputed commitment, and a segment split into parts whose
-//! shares XOR to the segment's `Y`. The bridge seed is
+//! = 3`), 64 (`d = 6`), 512 (`d = 9`, one full level-1 block), 1,024 (`d = 10`, two
+//! level-1 blocks per lane) and 2,048 (`d = 11`, a full-height sponge), spans, the
+//! tampering cases of the parity chain with their error names, the precomputed commitment,
+//! and a segment split into parts whose shares XOR to the segment's `Y`. The bridge seed is
 //! derived from the Flock commitments, so the sponge witnesses and the part's bits are
 //! fixed before the seed exists (the commitment phase and the bridge-seed step). Run with `--release`.
 
