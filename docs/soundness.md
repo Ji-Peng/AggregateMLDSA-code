@@ -282,15 +282,15 @@ Session `s` reduces the layer-`(s - 1)` claims of every active tree to layer `s`
 
   | Layout | Bound | `Fast` | `Slim` | `Slim8` |
   | --- | --- | --- | --- | --- |
-  | span on, or one segment with one part | `L_s theta` | `2^-139.51` | `2^-139.00` | `2^-138.51` |
-  | span off, `S = 4` segments, one part each | `S L_s theta` | `2^-137.51` | `2^-137.00` | `2^-136.51` |
-  | one segment, two parts | `L_s^2 theta` | `2^-134.38` | `2^-133.35` | `2^-132.38` |
-  | `S = 4` segments, two parts each | `S L_s^2 theta` | `2^-132.38` | `2^-131.35` | `2^-130.38` |
+  | span on, or one segment with one part | `L_s theta` | `2^-139.50` | `2^-139.00` | `2^-138.50` |
+  | span off, `S = 4` segments, one part each | `S L_s theta` | `2^-137.50` | `2^-137.00` | `2^-136.50` |
+  | one segment, two parts | `L_s^2 theta` | `2^-134.35` | `2^-133.35` | `2^-132.35` |
+  | `S = 4` segments, two parts each | `S L_s^2 theta` | `2^-132.35` | `2^-131.35` | `2^-130.35` |
 
   All are below `2^-128`: no nonce (Aerie: "the projection seed requires no work"). The
   composition proof (12.4) works over a fixed bridge expansion oracle, so it uses the seed
   density `theta' = 2 theta` of Lemma 12.4, and it charges only the first false segment:
-  `max_sigma L_s^(P_sigma) theta' <= 2^-131.38` (`Slim8`, two parts), still no nonce. Without
+  `max_sigma L_s^(P_sigma) theta' <= 2^-131.35` (`Slim8`, two parts), still no nonce. Without
   the two-part cap the bound would be `L_s^P theta` for `P` parts in one segment, which
   exceeds `2^-128` from `P = 3` under `Slim` (`2^-127.7`) and is vacuous at the
   `2^(d_seg - 3)` parts a segment could otherwise hold.
@@ -368,9 +368,11 @@ span_log` rounds (`min(10 + d, 19)` in-block positions, `max(0, d - 9)` block, 3
 
 **List factor.** When these challenges are drawn the sponge commitment is bound only to its
 Johnson list (the level-0 two-point binding happens inside its opening, after them), so each
-bad set is a union over the list, `L_s` elements. With `L = floor(1/(2 eta sqrt(rho_0)))`
-(Flock Eq. (10), `eta = 0.02`, level-0 rate `rho_0 = 2^-r`): `L = 35, 50, 70` for `Fast,
-Slim, Slim8` (`r = 1, 2, 3`). Every identity concerns one list element, so there are no pairs.
+bad set is a union over the list, `L_s` elements. With `L_max = 1/(2 eta sqrt(rho_0))`
+(Flock Eq. (10), `eta = 0.02`, level-0 rate `rho_0 = 2^-r`): `L_max = 35.36, 50, 70.71` for `Fast,
+Slim, Slim8` (`r = 1, 2, 3`). The stated bounds of the seed site (Section 3.5) use `L_max`. The work
+numerators below use the integer `L_s = floor(L_max) = 35, 50, 70`, which is valid because a list
+holds a whole number of codewords, and gives the same work bits. Every identity concerns one list element, so there are no pairs.
 
 * Assigned (normative): `e_tie = L_s (nu_s + 3) / 2^128`, `e_eq = L_s (12 + span_log) / 2^128`,
   `e_round = 2 L_s / 2^128` (`agg_bridge::pow::part_work`). ML-DSA-87: `e_tie = L_s (nu_s + 4) /
@@ -900,7 +902,7 @@ sites of branch S (K23) and for the fold coordinates, whose addresses omit the p
 with the sponge lists and the tied parts' sites (tie, `eq_Y`, chain rounds) with the list
 factor and Flock's per-site bounds by (F) on the segment of `sd` (12.4), with Lemma 12.4
 for the seed; Lemma S and the evaluation batch on the segment of `X` (12.3). (4) Every address weighs at most `2^-128` (Section 3,
-the script's assertion `max weight <= 2^-128`; `sd` at most `2^-131.38`; `proj.psi`
+the script's assertion `max weight <= 2^-128`; `sd` at most `2^-131.35`; `proj.psi`
 `2^-129` by Lemma P and its one-bit grind (K24), below the field sites; the largest PIOP
 plan weight is `2^-128.0931` (`tau`, `15/(16|K|)`) at `N* = 32` and `2^-128.36` at `2^15`;
 so every PIOP site is at most `2^-128.09`; the heaviest quantified site is the tied-part
@@ -1013,9 +1015,9 @@ transport claim batch      128.86   128.36   127.86
 merged-sumcheck round      123.86   123.36   122.86
 ```
 
-Seed `sd` with the sponge lists (Section 3.5, `Fast / Slim / Slim8`): span on `2^-139.51 /
-2^-139.00 / 2^-138.51`; span off at four segments `2^-137.51 / 2^-137.00 / 2^-136.51`; two
-parts in each of four segments `2^-132.38 / 2^-131.35 / 2^-130.38`; all `g = 0` (three
+Seed `sd` with the sponge lists (Section 3.5, `Fast / Slim / Slim8`): span on `2^-139.50 /
+2^-139.00 / 2^-138.50`; span off at four segments `2^-137.50 / 2^-137.00 / 2^-136.50`; two
+parts in each of four segments `2^-132.35 / 2^-131.35 / 2^-130.35`; all `g = 0` (three
 parts in one segment, refused by mode A, would give `2^-127.71` under `Slim`). Per-instance ledger vs
 round-by-round at `2^15`: `3,429/|K| = 2^-116.3` vs `1,329/|K| = 2^-117.6` (stages 275,
 `tau` 25, gammas 3, GKR 1,026). Honest failure per site `< 2^-184.6`, per proof
@@ -1630,9 +1632,9 @@ read the complete linear prefix, so their bad sets may use all of it:
   (K) gives `c~_i* = SHAKE256(mu_i* || w1Encode(b'_i*(z)))` while (3.3) fails for
   `b_i*(f_1)`, and w1Encode is the bit packing of spec 8, so `delta(z) != 0`. On the event of
   Lemma 12.4 at most a fraction `theta' = 2 theta` of the seeds kill a fixed nonzero `delta`,
-  so `Pr[Bad_sd] <= L^(P_sigma*) theta'`: `L^2 theta' = 2^-133.38 / 2^-132.35 / 2^-131.38`
-  (`Fast` / `Slim` / `Slim8`, two parts in `sigma*`), `L theta' = 2^-138.51 / 2^-138.00 /
-  2^-137.51` with one part or a span. Only the first false segment is charged; the sums over
+  so `Pr[Bad_sd] <= L^(P_sigma*) theta'`: `L^2 theta' = 2^-133.35 / 2^-132.35 / 2^-131.35`
+  (`Fast` / `Slim` / `Slim8`, two parts in `sigma*`), `L theta' = 2^-138.50 / 2^-138.00 /
+  2^-137.50` with one part or a span. Only the first false segment is charged; the sums over
   segments of Section 3.5 are a conservative superset. Outside `Bad_sd`, `C2_sigma*` is false.
 * `proj.psi` (a plain stage of this segment; its input encodes the candidate's round-1
   commitments, so `f_1` and its `v` are fixed before the answer). From its answer on, `C1` is
@@ -1805,7 +1807,7 @@ eps_hash + eps_fs + eps_br + eps_merkle + delta_X + E[ sum_{a in Addr} eps(a) ] 
 with `E[sum eps(a)] <= rho (Q + R_f + R_coord + R_F)` (Aerie Eq. (18)) and `rho = max eps(a)
 <= 2^-128`: PIOP sites `<= 2^-128.09` (Sections 10 and 10.1, max weight, every relation),
 `proj.psi` `2^-129` (Lemma P and one bit of work, K24), tied-part sites (tie, `eq_Y`, chain rounds) `<= 2^-128` (3.6; the tie site is the heaviest quantified site, `2^-128.034` under `Slim` and `2^-128.063` under `Fast`), `sd <=
-2^-131.38`, `fs` 0, Flock sites `<= 2^-128` by (F) (`Fast`), Akita field sites by its plan, fold
+2^-131.35`, `fs` 0, Flock sites `<= 2^-128` by (F) (`Fast`), Akita field sites by its plan, fold
 coordinates `<= 2^-128.088` (4.6). No site sits at exactly `2^-128` except where Flock's validated per-site bound is. `eps_hash` covers the hashed entries of 12.1 item 1;
 the branch digests `d_L`, `d_S` of K23 are not among them and enter through `eps_br <= 5
 Q_P^2 / 2^257 + Q_P / 2^191` (Lemma 12.1b). This is the bound of Section 7.

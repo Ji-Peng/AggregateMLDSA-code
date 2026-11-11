@@ -152,6 +152,11 @@ def list_size(rate_exp: int) -> int:
     return math.isqrt(625 * 2**rate_exp)
 
 
+def list_bound(rate_exp: int) -> Fraction:
+    """L_max itself, rounded up at 10^-6: the list factor of the stated seed-site bounds."""
+    return Fraction(math.isqrt(625 * 2**rate_exp * 10**12 - 1) + 1, 10**6)
+
+
 def capacity_log(n: int, k_log: int = SPONGE_K_LOG) -> int:
     """agg_keccak::prover::capacity_log: rows of the sponge instance."""
     nu = max((n - 1).bit_length() if n > 1 else 0, 3, MIN_DENSE_M - k_log)
@@ -380,9 +385,9 @@ def print_summary(args) -> None:
     theta = Fraction(1, math.comb(8192, 14)) * 2 + Fraction(1, math.comb(4096, 18))
     print("== Seed site sd (event 3), no nonce ==")
     for prof in ("fast", "slim", "slim8"):
-        ls = list_size(L0_RATE[prof])
+        ls = list_bound(L0_RATE[prof])
         e = theta * ls
-        print(f"{prof:<6} theta = 2^{math.log2(theta):.2f}, times L_s = {ls}: 2^{math.log2(e):.2f}, g = {grind_bits(e.numerator, e.denominator)}")
+        print(f"{prof:<6} theta = 2^{math.log2(theta):.2f}, times L_s = {float(ls):.2f}: 2^{math.log2(e):.2f}, g = {grind_bits(e.numerator, e.denominator)}")
         # sum over segment checks of L_s^(parts in the segment) theta (docs/soundness.md);
         # mode A admits at most two parts per segment.
         rows = (("span off, 4 segments x 1 part", 4 * ls), ("1 segment x 2 parts", ls * ls),
