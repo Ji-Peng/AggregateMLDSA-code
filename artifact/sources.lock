@@ -6,7 +6,7 @@
 
 [[source]]
 name = "ours"
-commit = "72613cc51881f7c1e4a95670e69d94901805b80b"
+commit = "be37f4e0049fb65dc0c2b4fe9e0631f528da6f52"
 license = "MIT"
 role = "prover, verifier"
 in_repo = true

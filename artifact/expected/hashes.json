@@ -1,40 +1,40 @@
 {
-  "commit": "72613cc51881f7c1e4a95670e69d94901805b80b",
+  "commit": "be37f4e0049fb65dc0c2b4fe9e0631f528da6f52",
   "records": "keygen-batch --params P --count 1024 --seed 42; sign-batch --params P --count 1024 --seed 43",
   "aggregates": {
     "44": {
       "1024": {
         "h-fips": {
-          "bytes": 428155,
-          "sha256": "d1238dbddb3111bc4664f80cd9f416271ff084dcb10be0b550f51a8f21a18e5d"
+          "bytes": 428157,
+          "sha256": "49e7774d78ed550e5183e6892faab99d16fdf4e1f23b6f2d7e8903eb91cef67c"
         },
         "h-exact": {
-          "bytes": 428049,
-          "sha256": "ec15db93bd54afc0ead249c626bd78fce7c2337e7def4626e03bac09957968e4"
+          "bytes": 428070,
+          "sha256": "91daeb6eea1966b1ccfd1dfbe720405a2ec792f07f3143ba07fc1b92ed09b5e4"
         }
       }
     },
     "65": {
       "1024": {
         "h-fips": {
-          "bytes": 450126,
-          "sha256": "1f691ea46a0f9d8439444ec7df0a4b5c9c2895e23cb35c72469bf010456e5fc0"
+          "bytes": 450142,
+          "sha256": "68121f40b392691cfa39afdb6e16b053a068a734c403ab7c074fa003babf0e9f"
         },
         "h-exact": {
-          "bytes": 448363,
-          "sha256": "290a1b8bbdb56ffcc7e4c8120c1218c42f2eb407fba67420162897de6068027b"
+          "bytes": 448335,
+          "sha256": "0fb96d4013084887a6e736d693158c0ee9cf5da2050bd4c5b2ad6fd71908fbc7"
         }
       }
     },
     "87": {
       "1024": {
         "h-fips": {
-          "bytes": 489408,
-          "sha256": "ed467bd16ea49a9d6dc620c516ba232288a927a449bd2b9a7040f6259c07a055"
+          "bytes": 489444,
+          "sha256": "d6038a83e974ebf5bc8655d46355b64aeb0a50ca2424e7dabbf64364ff69094e"
         },
         "h-exact": {
-          "bytes": 488679,
-          "sha256": "56d298e62907f50932ddae6b086641959222cd040bf165e0e5be8ca9f3202194"
+          "bytes": 488646,
+          "sha256": "b48e9266fd9ac262439119feaa93884941c91270a8f9f1a0513c5258c492bc58"
         }
       }
     }
