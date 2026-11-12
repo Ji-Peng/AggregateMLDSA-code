@@ -1,10 +1,10 @@
-//! Mode A end to end: the aggregator turns records `(pk_i, M_i, signature_i)` into an
+//! Mode A end to end: the aggregator turns records `(pk_i, M'_i, signature_i)` into an
 //! aggregate, the list of `c~_i` and one proof holding the algebraic PIOP (`agg-piop`), the
-//! Flock Keccak sub-proofs (`agg-keccak`) and the bridge data; the verifier takes `(pk_i, M_i)`
+//! Flock Keccak sub-proofs (`agg-keccak`) and the bridge data; the verifier takes `(pk_i, M'_i)`
 //! and the aggregate and returns accept or reject with the cost of every step.
 //!
 //! Transcript (one Spongefish stream run by `agg_piop::prover`): the instance record (record
-//! digest over `(pk_i, M_i, c~_i)`, the Flock profile: `Fast`, `Slim` or `Slim8`,
+//! digest over `(pk_i, M'_i, c~_i)`, the Flock profile: `Fast`, `Slim` or `Slim8`,
 //! [`AggregatorConfig::profile`]), then the round-1 Akita commitment `G_main`, the Flock
 //! commitments, the bridge seed `sd`, the round-2 Akita commitments, the Flock seeds
 //! `fs_sigma`, the final vectors `Y_sigma` and the part shares, the lookup and the three
@@ -1207,7 +1207,7 @@ impl KeccakVerifier for FlockVerifier<'_> {
     }
 }
 
-/// A signed record `(pk, M, signature)` (pure ML-DSA, empty context).
+/// A signed record `(pk, M', signature)` for a formatted message M'.
 pub type SignedRecord<'a> = (&'a [u8], &'a [u8], &'a [u8]);
 
 /// Aggregator configuration.
@@ -2055,7 +2055,7 @@ pub struct VerifyCostReport {
     pub parts: Vec<PartVerifyLog>,
     /// The segment and reason when the Keccak side rejected.
     pub rejection: Option<(usize, SegmentRejection)>,
-    /// Records `(pk_i, M_i)` given.
+    /// Records `(pk_i, M'_i)` given.
     pub records: usize,
     /// Aggregate bytes.
     pub aggregate_bytes: usize,
@@ -2319,7 +2319,7 @@ impl AggregateVerifier {
         })
     }
 
-    /// Verify `aggregate` for the records `(pk_i, M_i)`. The verifier computes `tr_i`, `mu_i`,
+    /// Verify `aggregate` for the records `(pk_i, M'_i)`. The verifier computes `tr_i`, `mu_i`,
     /// `c_i = SampleInBall(c~_i)`, `T_i` and the `ExpandA` data itself; with `cache`, keys
     /// found there are not expanded again and new expansions are added.
     ///

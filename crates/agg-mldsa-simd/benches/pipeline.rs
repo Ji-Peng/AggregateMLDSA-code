@@ -228,7 +228,7 @@ fn main() {
             .map(|r| {
                 let mut c_tilde = [0u8; 32];
                 c_tilde.copy_from_slice(&r.sig[..32]);
-                (r.pk.as_slice(), r.msg.as_slice(), c_tilde)
+                (r.pk.as_slice(), r.m_prime.as_slice(), c_tilde)
             })
             .collect();
         let inst = agg_witness::instance::PublicInstance::new_with(&e, &inputs).unwrap();

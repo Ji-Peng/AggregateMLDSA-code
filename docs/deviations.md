@@ -1160,7 +1160,7 @@ the other): stages 1 to 3 together 863 ms to 722 ms (stage 1 about 240 to 50 ms,
 
 Code (`agg_cli::mode_a::{Aggregator, AggregateVerifier}`):
 
-- The aggregator takes `(pk_i, M_i, signature_i)`; `c~_i` is the first 32 bytes of the
+- The aggregator takes `(pk_i, M'_i, signature_i)` for formatted messages `M'_i` (spec Section 1); `c~_i` is the first 32 bytes of the
   signature, and every signature is verified strictly while its witness is derived
   (`agg_witness::derive`, FIPS 204 Algorithm 8), so an invalid one is refused with its
   index before anything is committed. The Flock side's records are `mu_i` and the
@@ -1170,7 +1170,7 @@ Code (`agg_cli::mode_a::{Aggregator, AggregateVerifier}`):
   then the proof blob (Akita commitments, the mode-A segment items of K10, `Y_sigma`, PIOP
   rounds and claims, the Akita opening). There is no projection seed in the transcript
   (P2); the ordering is that of spec Section 10.
-- The verifier takes `(pk_i, M_i)` and the aggregate and recomputes `tr_i`, `mu_i`,
+- The verifier takes `(pk_i, M'_i)` and the aggregate and recomputes `tr_i`, `mu_i`,
   `c_i = SampleInBall(c~_i)`, `T_i` and the `ExpandA` data (`agg_piop::verifier`, P10). The
   optional key cache is `agg_piop::public_data::KeyCache` in memory (a hash map keyed by the
   encoded key) and, on disk, `agg_cli::cache` (entries addressed by `SHA3-256(pk)`, holding

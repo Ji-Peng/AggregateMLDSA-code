@@ -49,7 +49,7 @@ fn real_signatures_derive_check_and_extract_byte_identically() {
         // extracted signature is the original one, byte for byte.
         let sig = h.extract_signature(&p.c_tilde).expect("extract");
         assert_eq!(sig, r.sig);
-        assert!(native::verify(&r.pk, &r.msg, &sig));
+        assert!(native::verify(&r.pk, &r.m_prime, &sig));
         assert_eq!(h.hint_weight(), signature_hint_weight(&r.sig));
         assert_eq!(h.hint_weight() + h.u_h, OMEGA as i64);
         weights.push(h.hint_weight());
@@ -95,7 +95,7 @@ fn edge_residue_record_uses_the_corner_witness() {
 /// The synthetic weight-80 record of `gen::hint_corner_record` with its hint.
 struct Synthetic {
     pk: Vec<u8>,
-    msg: Vec<u8>,
+    m_prime: Vec<u8>,
     sig: Vec<u8>,
     h: SmallK,
 }
@@ -105,7 +105,7 @@ fn synthetic() -> Synthetic {
     let h = native::sig_decode(&r.sig).unwrap().h;
     Synthetic {
         pk: r.pk,
-        msg: r.msg,
+        m_prime: r.m_prime,
         sig: r.sig,
         h,
     }
@@ -114,7 +114,7 @@ fn synthetic() -> Synthetic {
 fn derive_synthetic(s: &Synthetic) -> (PublicInstance, HFipsRecord) {
     let mut ct = [0u8; C_TILDE_BYTES];
     ct.copy_from_slice(&s.sig[..C_TILDE_BYTES]);
-    let inst = PublicInstance::new(&[(s.pk.as_slice(), s.msg.as_slice(), ct)]).unwrap();
+    let inst = PublicInstance::new(&[(s.pk.as_slice(), s.m_prime.as_slice(), ct)]).unwrap();
     let p = &inst.records[0];
     let w = derive(&p.key, &p.mu, &s.sig).expect("the synthetic signature is accepted");
     assert_eq!(w.h, s.h);
@@ -126,8 +126,8 @@ fn derive_synthetic(s: &Synthetic) -> (PublicInstance, HFipsRecord) {
 fn synthetic_weight_80_signature_with_the_corner() {
     let s = synthetic();
     // A genuine FIPS 204 signature: this crate's Algorithm 8 and RustCrypto's verifier accept.
-    assert!(native::verify(&s.pk, &s.msg, &s.sig));
-    assert!(gen::crate_verify(&s.pk, &s.msg, &s.sig));
+    assert!(native::verify(&s.pk, &s.m_prime, &s.sig));
+    assert!(gen::crate_verify(&s.pk, &s.m_prime, &s.sig));
     let (inst, rec) = derive_synthetic(&s);
     assert_eq!(rec.hint_weight(), OMEGA as i64);
     assert_eq!(rec.u_h, 0);
@@ -157,7 +157,7 @@ fn synthetic_weight_80_signature_with_the_corner() {
     let ext = rec.extract_signature(&ct).unwrap();
     assert_eq!(ext, s.sig);
     assert_eq!(rec.extracted_hint(), s.h);
-    assert!(native::verify(&s.pk, &s.msg, &ext));
+    assert!(native::verify(&s.pk, &s.m_prime, &ext));
 }
 
 #[test]
@@ -291,8 +291,8 @@ fn padded_rows_satisfy_the_relation() {
 fn corner_record_round_trip<P: ParamSet>(seed: u64) -> (PublicInstance<P>, HFipsRecordOf<P>) {
     let r = gen::hint_corner_record_for::<P>(seed);
     assert_eq!((r.pk.len(), r.sig.len()), (P::PK_BYTES, P::SIG_BYTES));
-    assert!(native::verify_for::<P>(&r.pk, &r.msg, &r.sig));
-    assert!(gen::crate_verify_for::<P>(&r.pk, &r.msg, &r.sig));
+    assert!(native::verify_for::<P>(&r.pk, &r.m_prime, &r.sig));
+    assert!(gen::crate_verify_for::<P>(&r.pk, &r.m_prime, &r.sig));
     let inst = PublicInstance::<P>::from_records_for(std::slice::from_ref(&r)).unwrap();
     let p = &inst.records[0];
     let w = derive_for::<P>(&p.key, &p.mu, &r.sig).expect("the synthetic signature is accepted");

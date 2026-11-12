@@ -43,7 +43,7 @@ commands:
       K ML-DSA key pairs from seeds derived from S (test keys: the file holds the seeds).
   sign-batch --keys KEYS --count N [--seed S] [--msg-len L] [--params 44|65|87]
              --out RECORDS
-      N signed records (pure mode, empty context); record i is signed by key i mod K,
+      N signed records (formatted messages in pure mode, empty context); record i is signed by key i mod K,
       messages are derived from S (length L, or pseudo-random in [0, 160)).
   aggregate --records RECORDS --out AGGREGATE [--params 44|65|87] [--part-log2 D]
             [--flock-profile P] [--flock-span on|off] [--relation R]
@@ -61,7 +61,7 @@ commands:
       |u| <= 523,777.
   verify --records RECORDS --aggregate AGGREGATE [--params 44|65|87] [--cache CACHE]
          [--flock-profile P] [--flock-layout canonical|any] [--relation R]
-      Verify the aggregate for the records' (pk, M) (signatures are ignored), under the
+      Verify the aggregate for the records' (pk, M') (signatures are ignored), under the
       Flock profile its items name (or only under P), under relation R (default h-fips; an
       aggregate of another relation is rejected) and for the set of --params. Only the
       default prover's layout of Flock parts (one tied part per batch) is accepted unless
@@ -378,13 +378,13 @@ pub fn sign_records_for(
             .into_par_iter()
             .map(|i| {
                 let (sk, pk) = &signers[i % signers.len()];
-                let msg = message(seed, i as u64, msg_len);
+                let m_prime = gen::pure(&message(seed, i as u64, msg_len));
                 let mut rnd = [0_u8; 32];
                 gen::derive_bytes(b"cli-rnd", &[seed, i as u64], &mut rnd);
                 RecordEntry {
                     pk: pk.clone(),
-                    sig: gen::sign_for::<P>(sk, &msg, Some(&rnd)),
-                    msg,
+                    sig: gen::sign_for::<P>(sk, &m_prime, Some(&rnd)),
+                    m_prime,
                 }
             })
             .collect()
@@ -439,14 +439,14 @@ fn sign_batch(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
 fn signed(records: &[RecordEntry]) -> Vec<SignedRecord<'_>> {
     records
         .iter()
-        .map(|r| (r.pk.as_slice(), r.msg.as_slice(), r.sig.as_slice()))
+        .map(|r| (r.pk.as_slice(), r.m_prime.as_slice(), r.sig.as_slice()))
         .collect()
 }
 
 fn statements(records: &[RecordEntry]) -> Vec<(&[u8], &[u8])> {
     records
         .iter()
-        .map(|r| (r.pk.as_slice(), r.msg.as_slice()))
+        .map(|r| (r.pk.as_slice(), r.m_prime.as_slice()))
         .collect()
 }
 
@@ -1166,11 +1166,12 @@ mod tests {
         assert_ne!(keys[0].pk, keys[1].pk);
         let records = sign_records(&keys, 3, 7, Some(10));
         assert_eq!(records[0].pk, records[2].pk);
-        assert_eq!(records[1].msg.len(), 10);
+        assert_eq!(records[1].m_prime.len(), 12);
+        assert!(records.iter().all(|r| r.m_prime[..2] == [0, 0]));
         for r in &records {
-            assert!(gen::crate_verify(&r.pk, &r.msg, &r.sig));
+            assert!(gen::crate_verify(&r.pk, &r.m_prime, &r.sig));
         }
         let free = sign_records(&keys, 2, 8, None);
-        assert!(free.iter().all(|r| r.msg.len() < 160));
+        assert!(free.iter().all(|r| r.m_prime.len() < 162));
     }
 }

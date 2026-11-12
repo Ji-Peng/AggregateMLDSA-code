@@ -19,7 +19,7 @@
 //! carry zero weight and `T = 0`.
 //!
 //! The prover builds the data from its instance ([`LanePublicData::from_instance`], `T`
-//! stored). The verifier builds [`LaneStreamedPublic`] from the `(pk, M, c~)` triples: keys
+//! stored). The verifier builds [`LaneStreamedPublic`] from the `(pk, M', c~)` triples: keys
 //! are decoded once per distinct `pk` (or taken from a [`LaneKeyCache`]), `T` is not stored
 //! (each record's `c_i * t1_i` is recomputed from the sparse challenge in the one pass of
 //! [`LaneStreamedPublic::t_evaluations`]), and `A` of an uncached key is expanded inside the
@@ -565,7 +565,7 @@ fn sample_in_ball_tile(
 }
 
 /// The verifier's public data of a batch of a parameter set with polynomial lanes, from the
-/// `(pk, M, c~)` triples (module docs): the distinct keys (cached, or decoded with `tr`),
+/// `(pk, M', c~)` triples (module docs): the distinct keys (cached, or decoded with `tr`),
 /// `mu` and the sparse `c` of every record. Fresh keys borrow their `pk` from the triples.
 #[derive(Clone, Debug)]
 pub struct LaneStreamedPublic<'a> {
@@ -586,7 +586,7 @@ pub struct LaneStreamedPublic<'a> {
 }
 
 impl<'a> LaneStreamedPublic<'a> {
-    /// The verifier's data from `(pk, M, c~)` triples (pure mode, empty context): per distinct
+    /// The verifier's data from `(pk, M', c~)` triples: per distinct
     /// `pk` its `cache` entry, or `pkDecode` and `tr = H(pk)` (eight keys per multi-lane
     /// call); per record `mu = H(tr || 0 || 0 || M)` and `SampleInBall(c~)` (64 records per
     /// call).
@@ -666,7 +666,7 @@ impl<'a> LaneStreamedPublic<'a> {
                 let mu_inputs: Vec<[&[u8]; 4]> = tile
                     .iter()
                     .zip(key_tile)
-                    .map(|(&(_, msg, _), &key)| [&keys[key].tr()[..], &[0_u8, 0_u8][..], &[][..], msg])
+                    .map(|(&(_, msg, _), &key)| [&keys[key].tr()[..], msg, &[][..], &[][..]])
                     .collect();
                 engine.shake256_many(&mu_inputs, TR_BYTES, mu.as_flattened_mut());
                 let seeds: Vec<&[u8]> = tile.iter().map(|(_, _, c)| c.as_ref()).collect();
@@ -944,7 +944,7 @@ mod tests {
         }
     }
 
-    /// The verifier's data from `(pk, M, c~)` equals the prover's: the same `mu`, `T` rows,
+    /// The verifier's data from `(pk, M', c~)` equals the prover's: the same `mu`, `T` rows,
     /// public evaluations and (in a cache) keys, uncached and with a cold and a warm cache.
     fn prepared_data_equals_the_instance_data<P: ParamSet>()
     where
@@ -956,7 +956,7 @@ mod tests {
         let prover = LanePublicData::from_instance(&instance);
         let inputs: Vec<(&[u8], &[u8], P::CTilde)> = records
             .iter()
-            .map(|r| (r.pk.as_slice(), r.msg.as_slice(), P::c_tilde_from_slice(&r.sig)))
+            .map(|r| (r.pk.as_slice(), r.m_prime.as_slice(), P::c_tilde_from_slice(&r.sig)))
             .collect();
         let mut rng = SplitMix64::new(93);
         let vars = COEF_VARS + prover.padded_records().trailing_zeros() as usize;

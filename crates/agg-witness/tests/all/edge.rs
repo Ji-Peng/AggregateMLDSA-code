@@ -40,17 +40,17 @@ fn check_records(records: &[gen::Record]) {
     for (i, (r, w)) in records.iter().zip(&wits).enumerate() {
         let bytes = reencode_h(&inst.records[i].c_tilde, &w.z, &w.u, &w.w1).unwrap();
         assert_eq!(bytes, r.sig);
-        assert!(crate_verify(&r.pk, &r.msg, &bytes));
+        assert!(crate_verify(&r.pk, &r.m_prime, &bytes));
     }
 }
 
 #[test]
 fn pinned_decompose_edge_residue() {
     let rec = edge_record(common::EDGE_RESIDUE);
-    assert!(crate_verify(&rec.pk, &rec.msg, &rec.sig));
+    assert!(crate_verify(&rec.pk, &rec.m_prime, &rec.sig));
     let inst = PublicInstance::from_records(std::slice::from_ref(&rec)).unwrap();
     let key = &inst.records[0].key;
-    let w = derive(key, &mu(&key.tr, &rec.msg, &[]), &rec.sig).unwrap();
+    let w = derive(key, &mu(&key.tr, &rec.m_prime), &rec.sig).unwrap();
     let mut found = None;
     for r in 0..K {
         for j in 0..N {
@@ -73,7 +73,7 @@ fn pinned_z_at_the_honest_bound() {
     let rec = edge_record(common::EDGE_ZMAX);
     let inst = PublicInstance::from_records(std::slice::from_ref(&rec)).unwrap();
     let key = &inst.records[0].key;
-    let w = derive(key, &mu(&key.tr, &rec.msg, &[]), &rec.sig).unwrap();
+    let w = derive(key, &mu(&key.tr, &rec.m_prime), &rec.sig).unwrap();
     assert_eq!(inf_norm(&w.z), B_Z);
     let mut batch = gen::records(401, 2);
     batch.push(rec);

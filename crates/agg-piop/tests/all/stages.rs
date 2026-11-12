@@ -725,9 +725,9 @@ fn ml_dsa_87_h_fips_piop_round_trip_on_256_signatures() {
 }
 
 /// The PIOP part of ML-DSA-65 and ML-DSA-87 on a transcript that starts from the real
-/// instance record (the manifest, the digest of the `(pk, M, c~)` records with the set's
+/// instance record (the manifest, the digest of the `(pk, M', c~)` records with the set's
 /// `c~` width, Flock profile 0 and the set's proof-of-work plan): the prover searches the
-/// nonces, the verifier replays them and builds its public data from `(pk, M, c~)` with an
+/// nonces, the verifier replays them and builds its public data from `(pk, M', c~)` with an
 /// expanded-key cache. Both reach the same PCS session; a changed nonce or a changed `c~` is
 /// caught.
 fn lane_round_trip_on_the_instance_record<P: agg_witness::params::ParamSet>(
@@ -750,7 +750,7 @@ fn lane_round_trip_on_the_instance_record<P: agg_witness::params::ParamSet>(
     let inputs: Vec<(&[u8], &[u8], P::CTilde)> = batch
         .records
         .iter()
-        .map(|r| (r.pk.as_slice(), r.msg.as_slice(), P::c_tilde_from_slice(&r.sig)))
+        .map(|r| (r.pk.as_slice(), r.m_prime.as_slice(), P::c_tilde_from_slice(&r.sig)))
         .collect();
     let plan = PowPlan::new(manifest, FlockProfile::None, &KeccakPlan::default());
     let record_of = |inputs: &[(&[u8], &[u8], P::CTilde)]| {
@@ -773,7 +773,7 @@ fn lane_round_trip_on_the_instance_record<P: agg_witness::params::ParamSet>(
     let work = transcript.work_stream();
     assert_eq!(work.len(), plan.work_bits().div_ceil(8));
 
-    // The verifier: the public data from (pk, M, c~), cold and then warm cache.
+    // The verifier: the public data from (pk, M', c~), cold and then warm cache.
     let mut cache = LaneKeyCache::new(P::SET);
     let verify = |record: &[u8], work: &[u8], cache: &mut LaneKeyCache| -> Result<[u8; 32], String> {
         let public = LaneStreamedPublic::prepare::<P>(&inputs, Some(&*cache)).map_err(|e| format!("{e:?}"))?;

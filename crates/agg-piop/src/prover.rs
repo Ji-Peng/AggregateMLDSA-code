@@ -573,7 +573,7 @@ impl From<LookupError> for ProveError {
 pub struct ProverInputs<'a, P: ParamSet = Set44> {
     /// The public instance (keys expanded, `mu`, `c`, `T`).
     pub instance: &'a PublicInstance<P>,
-    /// `(pk, M, c~)` per live record, in order (bound by the record digest).
+    /// `(pk, M', c~)` per live record, in order (bound by the record digest).
     pub records: &'a [(&'a [u8], &'a [u8], P::CTilde)],
     /// The signatures, in order.
     pub signatures: &'a [&'a [u8]],

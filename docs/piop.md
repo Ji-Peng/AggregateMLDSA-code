@@ -668,7 +668,7 @@ the 1,024-signature round trip is ignored in debug builds):
   trip of the main tables.
 - `tests/all/prove_verify.rs`: a full prover run at 256 signatures; the opening claims taken
   from the stage-3 terminal values equal the evaluations of the committed tables at the
-  group points; the blob round-trips and verifies from `(pk, M)` with and without cached
+  group points; the blob round-trips and verifies from `(pk, M')` with and without cached
   keys; mode A over fixed matrices is refused; a shorter or reordered record list, a changed
   `c~`, other bridge matrices, a changed lookup round or layer-1 value, compensated digit
   claims, a mode-A profile under the no-Keccak stand-in, a changed round message, stage-3

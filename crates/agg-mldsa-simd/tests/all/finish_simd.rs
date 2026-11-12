@@ -51,7 +51,7 @@ fn sparse_against_public_t() {
 fn real_signatures_and_schoolbook() {
     for record in (0..3).map(|i|gen::record(1729,i)).chain([gen::hint_corner_record(1729)]) {
         let key=expand::ExpandedKey::from_bytes(&record.pk).unwrap();
-        let mu=native::mu(&key.tr,&record.msg,&[]);
+        let mu=native::mu(&key.tr,&record.m_prime);
         let witness=derive::derive(&key,&mu,&record.sig).unwrap();
         let az=crt::az_schoolbook(&key.a,&witness.z);
         for e in engines() { for r in 0..4 {

@@ -39,7 +39,7 @@ four threads or more: half at 32 threads or more, 3/8 of the pool rounded to nea
 least 2 below. The defaults are 16 threads on a 32-thread pool and 6 on a 16-thread pool; there
 the three pools add up to 60 and 28 threads. `AGG_PIOP_S_THREADS=0` keeps the shared pool.
 
-`agg_cli::mode_a::AggregateVerifier::verify(&[(pk, M)], aggregate, cache)` returns a
+`agg_cli::mode_a::AggregateVerifier::verify(&[(pk, M')], aggregate, cache)`, for formatted messages `M'` of either FIPS 204 form and any context, returns a
 `VerifyCostReport`: accept or the first failing check, the 15 step times of
 `agg_piop::verifier::VerifyTimings`, per Flock part the setup and verification time, and the
 keys expanded in the run. The verifier computes `tr_i, mu_i, c_i, T_i` and the `ExpandA`
@@ -103,7 +103,7 @@ over tampered round-1 bits).
 | File | Format (`agg_cli::record`, `agg_cli::cache`) |
 | --- | --- |
 | keys | `"AGGKEYS1" \|\| count LE32 \|\| (seed[32] \|\| LE32 len \|\| pk)*` (test keys: holds the `KeyGen` seeds) |
-| records | `"AGGRECS1" \|\| count LE32 \|\| (LE32 len \|\| pk, LE32 len \|\| M, LE32 len \|\| signature)*` |
+| records | `"AGGRECS2" \|\| count LE32 \|\| (LE32 len \|\| pk, LE32 len \|\| M', LE32 len \|\| signature)*`, with `M'` the formatted message (`sign-batch` writes pure mode with an empty context) |
 | aggregate | the wire bytes of `agg_piop::wire` (mode-A items of `agg_cli::wire`); `agg verify` refuses a file above 64 MiB (`MAX_AGGREGATE_BYTES`) with exit 2 |
 | key cache | `"AGGKCACH" \|\| 2 \|\| set id (0x44, 0x65, 0x87) \|\| count LE32 \|\| (SHA3-256(pk) \|\| pk \|\| tr \|\| A[k][l][256] as LE32)*`; on load an entry must have the hash `SHA3-256(pk)`, a decodable `pk`, `tr = H(pk, 64)` and every word of `A` in `[-(q-1)/2, (q-1)/2]` (else `CacheError::Entry`); `A` is not re-derived from `rho`, so the file is trusted local state; version 1 files (no set byte) hold ML-DSA-44 keys and still load |
 
@@ -205,7 +205,7 @@ parts per segment, under the weaker seed bound of `docs/soundness.md` 3.5. `benc
 its own aggregate with the layout opt-in when `--part-log2` or `--flock-span` give another
 layout than the default prover's.
 
-`verify` reads only `(pk, M)` from the record file and exits with status 0 on accept, 1 on
+`verify` reads only `(pk, M')` from the record file and exits with status 0 on accept, 1 on
 reject, 2 on a usage or file error. `bench` generates the records in memory and follows
 the benchmark protocol: `--warmup W` runs (default 1, discarded), then `--reps R` timed runs
 (default 5), for each of prove, verify uncached and verify with every key cached (after one

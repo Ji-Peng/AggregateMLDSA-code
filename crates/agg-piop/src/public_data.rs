@@ -315,7 +315,7 @@ pub struct PublicData {
 }
 
 impl PublicData {
-    /// Precomputes the batch from `(pk, M, c~)` triples (pure mode, empty context). Keys
+    /// Precomputes the batch from `(pk, M', c~)` triples. Keys
     /// are expanded once per distinct `pk`; with a cache, cached keys are not expanded and
     /// new ones are added.
     pub fn prepare(
@@ -363,7 +363,7 @@ impl PublicData {
                 let c = sample_in_ball(&c_tilde);
                 let record = PublicRecordData {
                     key,
-                    mu: mu(&keys[key].tr, msg, &[]),
+                    mu: mu(&keys[key].tr, msg),
                     c_tilde,
                 };
                 (record, sparse_t(&c, &keys[key].t1))
@@ -819,7 +819,7 @@ mod tests {
             .records
             .iter()
             .zip(&records)
-            .map(|(record, source)| (source.pk.as_slice(), source.msg.as_slice(), record.c_tilde))
+            .map(|(record, source)| (source.pk.as_slice(), source.m_prime.as_slice(), record.c_tilde))
             .collect();
         let from_instance = PublicData::from_instance(&instance);
         let mut cache = KeyCache::default();

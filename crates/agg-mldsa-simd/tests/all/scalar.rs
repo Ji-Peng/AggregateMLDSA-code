@@ -205,7 +205,7 @@ fn integer_path_and_real_finish() {
     for case in 0..4 {
         let rec = gen::record(64, case);
         let key = expand::ExpandedKey::from_bytes(&rec.pk).unwrap();
-        let mu = native::mu(&key.tr, &rec.msg, &[]);
+        let mu = native::mu(&key.tr, &rec.m_prime);
         let witness = derive::derive(&key, &mu, &rec.sig).unwrap();
         let z = if case == 0 {
             [[GAMMA1 as i64; 256]; 4]

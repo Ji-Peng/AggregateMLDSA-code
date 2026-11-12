@@ -33,7 +33,7 @@ impl Batch {
         self.records.is_empty()
     }
 
-    /// `(pk, M, c~)` per record.
+    /// `(pk, M', c~)` per record.
     #[must_use]
     pub fn inputs(&self) -> Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> {
         self.records
@@ -41,7 +41,7 @@ impl Batch {
             .map(|r| {
                 let c_tilde: [u8; C_TILDE_BYTES] =
                     r.sig[..C_TILDE_BYTES].try_into().expect("signature prefix");
-                (r.pk.as_slice(), r.msg.as_slice(), c_tilde)
+                (r.pk.as_slice(), r.m_prime.as_slice(), c_tilde)
             })
             .collect()
     }
@@ -52,12 +52,12 @@ impl Batch {
         self.records.iter().map(|r| r.sig.as_slice()).collect()
     }
 
-    /// `(pk, M)` per record (what the verifier is given).
+    /// `(pk, M')` per record (what the verifier is given).
     #[must_use]
     pub fn public(&self) -> Vec<(&[u8], &[u8])> {
         self.records
             .iter()
-            .map(|r| (r.pk.as_slice(), r.msg.as_slice()))
+            .map(|r| (r.pk.as_slice(), r.m_prime.as_slice()))
             .collect()
     }
 }
@@ -108,7 +108,7 @@ mod tests {
         assert!(!batch.is_empty());
         let inputs = batch.inputs();
         assert_eq!(inputs[1].2[..], batch.records[1].sig[..C_TILDE_BYTES]);
-        assert_eq!(batch.public()[3].1, batch.records[3].msg.as_slice());
+        assert_eq!(batch.public()[3].1, batch.records[3].m_prime.as_slice());
         assert_eq!(batch.signatures().len(), 4);
         let ms = Duration::from_millis;
         assert_eq!(median_duration(&[ms(5), ms(1), ms(3)]), Some(ms(3)));

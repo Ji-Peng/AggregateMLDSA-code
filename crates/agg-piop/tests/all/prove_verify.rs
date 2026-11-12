@@ -37,7 +37,7 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
             .map(|r| {
                 let mut ct = [0_u8; C_TILDE_BYTES];
                 ct.copy_from_slice(&r.sig[..C_TILDE_BYTES]);
-                (r.pk.as_slice(), r.msg.as_slice(), ct)
+                (r.pk.as_slice(), r.m_prime.as_slice(), ct)
             })
             .collect();
         let signatures: Vec<&[u8]> = records.iter().map(|r| r.sig.as_slice()).collect();
@@ -95,7 +95,7 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
 
         let public: Vec<(&[u8], &[u8])> = records
             .iter()
-            .map(|r| (r.pk.as_slice(), r.msg.as_slice()))
+            .map(|r| (r.pk.as_slice(), r.m_prime.as_slice()))
             .collect();
         let mut cache = KeyCache::default();
         let start = std::time::Instant::now();

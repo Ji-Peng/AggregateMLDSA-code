@@ -460,7 +460,7 @@ impl VerifyReport {
     }
 }
 
-/// Verify `proof_bytes` for the records `(pk_i, M_i)` under `relation`, the relation the
+/// Verify `proof_bytes` for the records `(pk_i, M'_i)` under `relation`, the relation the
 /// caller expects (never read from the proof: a proof whose header names another relation
 /// is rejected before the instance record); the `c~_i` come from the proof. An unsound configuration
 /// ([`check_configuration`]) is refused before the proof is read.
@@ -558,7 +558,7 @@ enum Public<'a, 'c> {
     Lanes(LaneStreamedPublic<'a>, Option<&'c mut LaneKeyCache>),
 }
 
-/// The lane public data of `(pk_i, M_i, c~_i)` and the record digest.
+/// The lane public data of `(pk_i, M'_i, c~_i)` and the record digest.
 fn prepare_lanes<'a, P: ParamSet>(
     records: &[(&'a [u8], &[u8])],
     c_tilde: &[Vec<u8>],
@@ -951,7 +951,7 @@ pub fn verify_piop(
 /// `public_pass(r^(2), r^(3), gamma_rows)` returns `T~_rho(r^(2))` per row and
 /// `w_A^(s)(r^(3))` per lane of `z` for the ring coefficients `gamma_rows`
 /// (`lane_public::LaneStreamedPublic::{t_evaluations, ring_weights_at}` on the data that
-/// `LaneStreamedPublic::prepare` builds from the `(pk, M, c~)` triples).
+/// `LaneStreamedPublic::prepare` builds from the `(pk, M', c~)` triples).
 #[allow(clippy::too_many_arguments)]
 pub fn verify_piop_lanes(
     manifest: &CommitmentManifest,

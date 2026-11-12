@@ -6,7 +6,6 @@
 //! seeds so that tests and downstream fixtures are reproducible.
 
 use crate::params::{ParamSet, Set44};
-use ml_dsa::signature::Verifier;
 use ml_dsa::{
     EncodedSignature, EncodedVerifyingKey, ExpandedSigningKey, MlDsa44,
     Signature, VerifyingKey, B32,
@@ -54,13 +53,14 @@ impl SplitMix64 {
     }
 }
 
-/// One public record with its signature: (pk, M, sigma), pure mode with empty context.
+/// One public record with its signature: (pk, M', sigma) for a formatted message M'.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
     /// Encoded public key (1,312 bytes for ML-DSA-44).
     pub pk: Vec<u8>,
-    /// Message M (pure mode, empty context: M' = 0x00 || 0x00 || M).
-    pub msg: Vec<u8>,
+    /// Formatted message M' (FIPS 204 Algorithm 3 line 5 or Algorithm 5 line 18). The
+    /// generators below build pure-mode messages with an empty context, M' = 0 || 0 || M.
+    pub m_prime: Vec<u8>,
     /// Encoded signature (2,420 bytes for ML-DSA-44).
     pub sig: Vec<u8>,
 }
@@ -88,27 +88,31 @@ pub fn keypair(seed: &[u8; 32]) -> (ExpandedSigningKey<MlDsa44>, Vec<u8>) {
     keypair_for::<Set44>(seed)
 }
 
-/// Signs `msg` in pure mode with empty context for parameter set P.
+/// Signs a formatted message M' with ML-DSA.Sign_internal (Algorithm 7) for parameter set P.
+/// `rnd = None` is the deterministic variant (rnd = 0^32); `Some(r)` is the hedged variant
+/// with the given randomness.
 pub fn sign_for<P: ParamSet>(
     sk: &ExpandedSigningKey<P::Signer>,
-    msg: &[u8],
+    m_prime: &[u8],
     rnd: Option<&[u8; 32]>,
 ) -> Vec<u8> {
-    let sig = match rnd {
-        None => sk.sign_deterministic(msg, b"").expect("empty context"),
-        Some(r) => sk.sign_internal(&[&[0u8, 0u8], msg], &B32::from(*r)),
-    };
-    sig.encode().as_slice().to_vec()
+    let rnd = B32::from(rnd.copied().unwrap_or([0u8; 32]));
+    sk.sign_internal(&[m_prime], &rnd).encode().as_slice().to_vec()
 }
 
-/// Signs `msg` in pure mode with empty context. `rnd = None` is the deterministic variant
-/// (rnd = 0^32); `Some(r)` is the hedged variant with the given randomness.
-pub fn sign(sk: &ExpandedSigningKey<MlDsa44>, msg: &[u8], rnd: Option<&[u8; 32]>) -> Vec<u8> {
-    sign_for::<Set44>(sk, msg, rnd)
+/// Signs a formatted message M' with ML-DSA.Sign_internal (Algorithm 7).
+pub fn sign(sk: &ExpandedSigningKey<MlDsa44>, m_prime: &[u8], rnd: Option<&[u8; 32]>) -> Vec<u8> {
+    sign_for::<Set44>(sk, m_prime, rnd)
 }
 
-/// Verifies with the crate for parameter set P (pure mode, empty context).
-pub fn crate_verify_for<P: ParamSet>(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+/// The pure-mode formatted message with an empty context, M' = 0 || 0 || M.
+pub fn pure(msg: &[u8]) -> Vec<u8> {
+    crate::native::pure_message(msg, &[]).expect("empty context")
+}
+
+/// Verifies a formatted message M' with the crate's ML-DSA.Verify_internal for parameter set P;
+/// false on any decoding failure.
+pub fn crate_verify_for<P: ParamSet>(pk: &[u8], m_prime: &[u8], sig: &[u8]) -> bool {
     let Ok(enc_pk) = EncodedVerifyingKey::<P::Signer>::try_from(pk) else {
         return false;
     };
@@ -119,12 +123,12 @@ pub fn crate_verify_for<P: ParamSet>(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool 
     let Some(sigma) = Signature::<P::Signer>::decode(&enc_sig) else {
         return false;
     };
-    vk.verify(msg, &sigma).is_ok() && vk.verify_with_context(msg, &[], &sigma)
+    vk.verify_internal(m_prime, &sigma)
 }
 
-/// Verifies with the crate (pure mode, empty context); false on any decoding failure.
-pub fn crate_verify(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
-    crate_verify_for::<Set44>(pk, msg, sig)
+/// Verifies a formatted message M' with the crate's ML-DSA.Verify_internal.
+pub fn crate_verify(pk: &[u8], m_prime: &[u8], sig: &[u8]) -> bool {
+    crate_verify_for::<Set44>(pk, m_prime, sig)
 }
 
 /// Key seed of record `index` under `seed` when every record has its own key.
@@ -147,9 +151,9 @@ pub fn message(seed: u64, index: u64) -> Vec<u8> {
 /// Deterministic record `index` under `seed` for parameter set P.
 pub fn record_for<P: ParamSet>(seed: u64, index: u64) -> Record {
     let (sk, pk) = keypair_for::<P>(&key_seed(seed, index));
-    let msg = message(seed, index);
-    let sig = sign_for::<P>(&sk, &msg, None);
-    Record { pk, msg, sig }
+    let m_prime = pure(&message(seed, index));
+    let sig = sign_for::<P>(&sk, &m_prime, None);
+    Record { pk, m_prime, sig }
 }
 
 /// Deterministic record `index` under `seed` (own key, deterministic signing).
@@ -160,11 +164,11 @@ pub fn record(seed: u64, index: u64) -> Record {
 /// Deterministic record with hedged signing for parameter set P.
 pub fn record_hedged_for<P: ParamSet>(seed: u64, key_index: u64, index: u64) -> Record {
     let (sk, pk) = keypair_for::<P>(&key_seed(seed, key_index));
-    let msg = message(seed, index);
+    let m_prime = pure(&message(seed, index));
     let mut rnd = [0u8; 32];
     derive_bytes(b"rnd", &[seed, key_index, index], &mut rnd);
-    let sig = sign_for::<P>(&sk, &msg, Some(&rnd));
-    Record { pk, msg, sig }
+    let sig = sign_for::<P>(&sk, &m_prime, Some(&rnd));
+    Record { pk, m_prime, sig }
 }
 
 /// Deterministic record with hedged signing: key `key_index`, message and rnd from `index`.
@@ -196,13 +200,13 @@ pub fn records_shared_keys_for<P: ParamSet>(seed: u64, n: usize, n_keys: usize) 
         .into_par_iter()
         .map(|i| {
             let (sk, pk) = &keys[i % n_keys];
-            let msg = message(seed ^ 0x5eed, i as u64);
+            let m_prime = pure(&message(seed ^ 0x5eed, i as u64));
             let mut rnd = [0u8; 32];
             derive_bytes(b"rnd-shared", &[seed, i as u64], &mut rnd);
             Record {
                 pk: pk.clone(),
-                msg: msg.clone(),
-                sig: sign_for::<P>(sk, &msg, Some(&rnd)),
+                sig: sign_for::<P>(sk, &m_prime, Some(&rnd)),
+                m_prime,
             }
         })
         .collect()
@@ -327,8 +331,8 @@ pub fn hint_corner_record_for<P: ParamSet>(seed: u64) -> Record {
     pk.resize(P::PK_BYTES, 0);
     let key = ExpandedKey::<P>::from_bytes_for(&pk).unwrap();
     assert!(key.t1.as_ref().iter().flatten().all(|&t| t == 0));
-    let msg = message(seed ^ 0x4F1F5, 0);
-    let mu = mu(&key.tr, &msg, &[]);
+    let msg = pure(&message(seed ^ 0x4F1F5, 0));
+    let mu = mu(&key.tr, &msg);
 
     // z uniform in [-B_z, B_z], then two coefficients moved so that (A z) = q - gamma2 at
     // CORNER and (A z) = 0 at ZERO (the only non-wrap residue with r1 = 0 and r0 <= 0, where
@@ -427,7 +431,7 @@ pub fn hint_corner_record_for<P: ParamSet>(seed: u64) -> Record {
     }
     let c_tilde = commitment_hash_for::<P>(&mu, w1_encode_for::<P>(&w1).as_ref());
     let sig = sig_encode_for::<P>(&c_tilde, &z, &h);
-    Record { pk, msg, sig }
+    Record { pk, m_prime: msg, sig }
 }
 
 #[cfg(test)]
@@ -443,14 +447,14 @@ mod tests {
         for r in &a {
             assert_eq!(r.pk.len(), PK_BYTES);
             assert_eq!(r.sig.len(), SIG_BYTES);
-            assert!(crate_verify(&r.pk, &r.msg, &r.sig));
-            assert!(!crate_verify(&r.pk, b"wrong message", &r.sig) || r.msg == b"wrong message");
+            assert!(crate_verify(&r.pk, &r.m_prime, &r.sig));
+            assert!(!crate_verify(&r.pk, b"wrong message", &r.sig) || r.m_prime == b"wrong message");
         }
         let h = record_hedged(1, 0, 5);
-        assert!(crate_verify(&h.pk, &h.msg, &h.sig));
+        assert!(crate_verify(&h.pk, &h.m_prime, &h.sig));
         let s = records_shared_keys(2, 6, 2);
         assert_eq!(s[0].pk, s[2].pk);
-        assert!(s.iter().all(|r| crate_verify(&r.pk, &r.msg, &r.sig)));
+        assert!(s.iter().all(|r| crate_verify(&r.pk, &r.m_prime, &r.sig)));
     }
 
     #[test]
@@ -461,18 +465,18 @@ mod tests {
         for r in &a {
             assert_eq!(r.pk.len(), Set65::PK_BYTES);
             assert_eq!(r.sig.len(), Set65::SIG_BYTES);
-            assert!(crate_verify_for::<Set65>(&r.pk, &r.msg, &r.sig));
-            assert!(crate::native::verify_for::<Set65>(&r.pk, &r.msg, &r.sig));
-            assert!(!crate_verify_for::<Set65>(&r.pk, b"wrong message", &r.sig) || r.msg == b"wrong message");
-            assert!(!crate::native::verify_for::<Set65>(&r.pk, b"wrong message", &r.sig) || r.msg == b"wrong message");
+            assert!(crate_verify_for::<Set65>(&r.pk, &r.m_prime, &r.sig));
+            assert!(crate::native::verify_for::<Set65>(&r.pk, &r.m_prime, &r.sig));
+            assert!(!crate_verify_for::<Set65>(&r.pk, b"wrong message", &r.sig) || r.m_prime == b"wrong message");
+            assert!(!crate::native::verify_for::<Set65>(&r.pk, b"wrong message", &r.sig) || r.m_prime == b"wrong message");
         }
         let h = record_hedged_for::<Set65>(65, 0, 5);
-        assert!(crate_verify_for::<Set65>(&h.pk, &h.msg, &h.sig));
-        assert!(crate::native::verify_for::<Set65>(&h.pk, &h.msg, &h.sig));
+        assert!(crate_verify_for::<Set65>(&h.pk, &h.m_prime, &h.sig));
+        assert!(crate::native::verify_for::<Set65>(&h.pk, &h.m_prime, &h.sig));
         let s = records_shared_keys_for::<Set65>(65, 4, 2);
         assert_eq!(s[0].pk, s[2].pk);
-        assert!(s.iter().all(|r| crate_verify_for::<Set65>(&r.pk, &r.msg, &r.sig)));
-        assert!(s.iter().all(|r| crate::native::verify_for::<Set65>(&r.pk, &r.msg, &r.sig)));
+        assert!(s.iter().all(|r| crate_verify_for::<Set65>(&r.pk, &r.m_prime, &r.sig)));
+        assert!(s.iter().all(|r| crate::native::verify_for::<Set65>(&r.pk, &r.m_prime, &r.sig)));
     }
 
     #[test]
@@ -483,18 +487,18 @@ mod tests {
         for r in &a {
             assert_eq!(r.pk.len(), Set87::PK_BYTES);
             assert_eq!(r.sig.len(), Set87::SIG_BYTES);
-            assert!(crate_verify_for::<Set87>(&r.pk, &r.msg, &r.sig));
-            assert!(crate::native::verify_for::<Set87>(&r.pk, &r.msg, &r.sig));
-            assert!(!crate_verify_for::<Set87>(&r.pk, b"wrong message", &r.sig) || r.msg == b"wrong message");
-            assert!(!crate::native::verify_for::<Set87>(&r.pk, b"wrong message", &r.sig) || r.msg == b"wrong message");
+            assert!(crate_verify_for::<Set87>(&r.pk, &r.m_prime, &r.sig));
+            assert!(crate::native::verify_for::<Set87>(&r.pk, &r.m_prime, &r.sig));
+            assert!(!crate_verify_for::<Set87>(&r.pk, b"wrong message", &r.sig) || r.m_prime == b"wrong message");
+            assert!(!crate::native::verify_for::<Set87>(&r.pk, b"wrong message", &r.sig) || r.m_prime == b"wrong message");
         }
         let h = record_hedged_for::<Set87>(87, 0, 5);
-        assert!(crate_verify_for::<Set87>(&h.pk, &h.msg, &h.sig));
-        assert!(crate::native::verify_for::<Set87>(&h.pk, &h.msg, &h.sig));
+        assert!(crate_verify_for::<Set87>(&h.pk, &h.m_prime, &h.sig));
+        assert!(crate::native::verify_for::<Set87>(&h.pk, &h.m_prime, &h.sig));
         let s = records_shared_keys_for::<Set87>(87, 4, 2);
         assert_eq!(s[0].pk, s[2].pk);
-        assert!(s.iter().all(|r| crate_verify_for::<Set87>(&r.pk, &r.msg, &r.sig)));
-        assert!(s.iter().all(|r| crate::native::verify_for::<Set87>(&r.pk, &r.msg, &r.sig)));
+        assert!(s.iter().all(|r| crate_verify_for::<Set87>(&r.pk, &r.m_prime, &r.sig)));
+        assert!(s.iter().all(|r| crate::native::verify_for::<Set87>(&r.pk, &r.m_prime, &r.sig)));
     }
 
     #[test]
@@ -505,7 +509,7 @@ mod tests {
         let (sk, pk) = keypair_with_rho(&key_seed(9, 1), &rho);
         assert_eq!(pk[..32], victim[..32]);
         assert_ne!(pk, victim);
-        let msg = message(9, 2);
+        let msg = pure(&message(9, 2));
         let sig = sign(&sk, &msg, None);
         assert!(crate_verify(&pk, &msg, &sig));
         assert!(crate::native::verify(&pk, &msg, &sig));

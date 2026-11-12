@@ -46,8 +46,8 @@ fn framed(items: &[Vec<u8>]) -> usize {
 fn sweep<P: ParamSet>(seed: u64, n: usize) {
     let records = records_of::<P>(seed, n);
     let signed: Vec<(&[u8], &[u8], &[u8])> =
-        records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice(), r.sig.as_slice())).collect();
-    let statements: Vec<(&[u8], &[u8])> = records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice())).collect();
+        records.iter().map(|r| (r.pk.as_slice(), r.m_prime.as_slice(), r.sig.as_slice())).collect();
+    let statements: Vec<(&[u8], &[u8])> = records.iter().map(|r| (r.pk.as_slice(), r.m_prime.as_slice())).collect();
     let aggregate = Aggregator::new(AggregatorConfig { set: P::SET, ..AggregatorConfig::default() })
         .aggregate(&signed)
         .expect("aggregate");
@@ -134,8 +134,8 @@ fn truncated_and_flipped_aggregates_are_rejected_without_panics() {
 fn span_round_trip<P: ParamSet>(seed: u64, n: usize) {
     let records = records_of::<P>(seed, n);
     let signed: Vec<(&[u8], &[u8], &[u8])> =
-        records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice(), r.sig.as_slice())).collect();
-    let statements: Vec<(&[u8], &[u8])> = records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice())).collect();
+        records.iter().map(|r| (r.pk.as_slice(), r.m_prime.as_slice(), r.sig.as_slice())).collect();
+    let statements: Vec<(&[u8], &[u8])> = records.iter().map(|r| (r.pk.as_slice(), r.m_prime.as_slice())).collect();
     let aggregate = Aggregator::new(AggregatorConfig { set: P::SET, ..AggregatorConfig::default() })
         .aggregate(&signed)
         .expect("aggregate");

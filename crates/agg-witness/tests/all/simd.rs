@@ -26,7 +26,7 @@ fn inputs(records: &[Record]) -> Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> {
             let mut c = [0u8; C_TILDE_BYTES];
             let n = r.sig.len().min(C_TILDE_BYTES);
             c[..n].copy_from_slice(&r.sig[..n]);
-            (r.pk.as_slice(), r.msg.as_slice(), c)
+            (r.pk.as_slice(), r.m_prime.as_slice(), c)
         })
         .collect()
 }
@@ -97,9 +97,9 @@ fn assert_instance_matches_reference(engine: &Engine, records: &[Record]) {
     inst.records.par_iter().zip(records).for_each(|(p, r)| {
         assert_eq!(p.key.pk, r.pk);
         assert_eq!(p.key.prepared.backend, engine.backend());
-        assert_eq!(p.msg, r.msg);
+        assert_eq!(p.m_prime, r.m_prime);
         assert_eq!(p.c_tilde[..], r.sig[..C_TILDE_BYTES]);
-        assert_eq!(p.mu, mu(&tr(&r.pk), &r.msg, &[]));
+        assert_eq!(p.mu, mu(&tr(&r.pk), &r.m_prime));
         let c = sample_in_ball(&r.sig[..C_TILDE_BYTES]);
         let t = public_t(&c, &p.key.t1);
         assert_eq!(p.c, c);

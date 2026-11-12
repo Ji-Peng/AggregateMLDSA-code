@@ -5,7 +5,7 @@
 use crate::common;
 
 use agg_witness::gen::{self, crate_verify, SplitMix64};
-use agg_witness::native::{sig_decode, verify, verify_with_context};
+use agg_witness::native::{prehash_message, pure_message, sig_decode, verify, verify_with_context};
 use agg_witness::params::*;
 use rayon::prelude::*;
 
@@ -14,8 +14,8 @@ fn reference_verifier_accepts_random_signatures() {
     let records = common::mixed_records(100, 128, 32);
     assert_eq!(records.len(), 160);
     records.par_iter().for_each(|r| {
-        assert!(crate_verify(&r.pk, &r.msg, &r.sig));
-        assert!(verify(&r.pk, &r.msg, &r.sig));
+        assert!(crate_verify(&r.pk, &r.m_prime, &r.sig));
+        assert!(verify(&r.pk, &r.m_prime, &r.sig));
     });
 }
 
@@ -24,8 +24,8 @@ fn reference_verifier_accepts_random_signatures_65() {
     let records = common::mixed_records_for::<Set65>(1650, 128, 32);
     assert_eq!(records.len(), 160);
     records.par_iter().for_each(|r| {
-        assert!(gen::crate_verify_for::<Set65>(&r.pk, &r.msg, &r.sig));
-        assert!(agg_witness::native::verify_for::<Set65>(&r.pk, &r.msg, &r.sig));
+        assert!(gen::crate_verify_for::<Set65>(&r.pk, &r.m_prime, &r.sig));
+        assert!(agg_witness::native::verify_for::<Set65>(&r.pk, &r.m_prime, &r.sig));
     });
 }
 
@@ -34,8 +34,8 @@ fn reference_verifier_accepts_random_signatures_87() {
     let records = common::mixed_records_for::<Set87>(1870, 128, 32);
     assert_eq!(records.len(), 160);
     records.par_iter().for_each(|r| {
-        assert!(gen::crate_verify_for::<Set87>(&r.pk, &r.msg, &r.sig));
-        assert!(agg_witness::native::verify_for::<Set87>(&r.pk, &r.msg, &r.sig));
+        assert!(gen::crate_verify_for::<Set87>(&r.pk, &r.m_prime, &r.sig));
+        assert!(agg_witness::native::verify_for::<Set87>(&r.pk, &r.m_prime, &r.sig));
     });
 }
 
@@ -59,17 +59,17 @@ fn reference_verifier_agrees_with_crate_on_mutations() {
                 let mut s = r.sig.clone();
                 let pos = lo + rng.below((hi - lo) as u64) as usize;
                 s[pos] ^= 1 << rng.below(8);
-                out.push((r.pk.clone(), r.msg.clone(), s));
+                out.push((r.pk.clone(), r.m_prime.clone(), s));
             }
             // Wrong message, wrong key, truncated signature, flipped public-key bit.
-            let mut m = r.msg.clone();
+            let mut m = r.m_prime.clone();
             m.push(0x55);
             out.push((r.pk.clone(), m, r.sig.clone()));
-            out.push((other.pk.clone(), r.msg.clone(), r.sig.clone()));
-            out.push((r.pk.clone(), r.msg.clone(), r.sig[..SIG_BYTES - 1].to_vec()));
+            out.push((other.pk.clone(), r.m_prime.clone(), r.sig.clone()));
+            out.push((r.pk.clone(), r.m_prime.clone(), r.sig[..SIG_BYTES - 1].to_vec()));
             let mut pk = r.pk.clone();
             pk[32 + rng.below((PK_BYTES - 32) as u64) as usize] ^= 1;
-            out.push((pk, r.msg.clone(), r.sig.clone()));
+            out.push((pk, r.m_prime.clone(), r.sig.clone()));
             out
         })
         .collect();
@@ -94,8 +94,8 @@ fn reference_verifier_rejects_large_z_like_crate() {
     let mut z = d.z;
     z[1][7] = B_Z + 1;
     let s = agg_witness::native::sig_encode(&d.c_tilde, &z, &d.h);
-    assert!(!verify(&r.pk, &r.msg, &s));
-    assert!(!crate_verify(&r.pk, &r.msg, &s));
+    assert!(!verify(&r.pk, &r.m_prime, &s));
+    assert!(!crate_verify(&r.pk, &r.m_prime, &s));
 }
 
 #[test]
@@ -111,12 +111,39 @@ fn reference_verifier_with_context_strings() {
             &EncodedVerifyingKey::<MlDsa44>::try_from(pk.as_slice()).unwrap(),
         );
         assert!(vk.verify_with_context(b"context test", &ctx, &sig));
-        assert_eq!(verify(&pk, b"context test", &bytes), ctx_len == 0);
+        let m_prime = pure_message(b"context test", &ctx).unwrap();
+        assert!(verify(&pk, &m_prime, &bytes));
+        assert!(gen::crate_verify(&pk, &m_prime, &bytes));
+        assert_eq!(verify(&pk, &gen::pure(b"context test"), &bytes), ctx_len == 0);
     }
     assert!(!verify_with_context(
         &pk,
         b"m",
         &[0u8; 256],
-        &gen::sign(&sk, b"m", None)
+        &gen::sign(&sk, &gen::pure(b"m"), None)
     ));
+    assert!(pure_message(b"m", &[0u8; 256]).is_none());
+}
+
+#[test]
+fn formatted_messages_separate_the_two_forms_and_the_contexts() {
+    // DER encoding of the SHAKE128 object identifier, with a 256-bit pre-hash (FIPS 204
+    // Algorithm 4 lines 17-18).
+    const SHAKE128_OID: [u8; 11] = [0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x0B];
+    use sha3::digest::{ExtendableOutput, Update, XofReader};
+    let (sk, pk) = gen::keypair(&gen::key_seed(105, 0));
+    let mut ph = [0u8; 32];
+    let mut xof = sha3::Shake128::default();
+    xof.update(b"pre-hashed message");
+    xof.finalize_xof().read(&mut ph);
+    let hashed = prehash_message(b"app", &SHAKE128_OID, &ph).unwrap();
+    assert_eq!(hashed[..5], [1, 3, b'a', b'p', b'p']);
+    assert_eq!(hashed.len(), 2 + 3 + SHAKE128_OID.len() + 32);
+    let pure = pure_message(b"pre-hashed message", b"app").unwrap();
+    for (m_prime, other) in [(&hashed, &pure), (&pure, &hashed)] {
+        let sig = gen::sign(&sk, m_prime, None);
+        assert!(verify(&pk, m_prime, &sig));
+        assert!(gen::crate_verify(&pk, m_prime, &sig));
+        assert!(!verify(&pk, other, &sig));
+    }
 }

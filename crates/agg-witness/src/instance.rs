@@ -1,7 +1,7 @@
 //! Public instance: the verifier's per-record precomputation.
 //!
 //! For live record i: the expanded key (A_hat_i, A_i, tr_i, shared between records with the same
-//! key), mu_i = H(tr_i || 0x00 || 0x00 || M_i, 64), c_i = SampleInBall(c~_i) and
+//! key), mu_i = H(tr_i || M'_i, 64) for the formatted message M'_i, c_i = SampleInBall(c~_i) and
 //! T_i = 2^d (c_i * t1_i) over Z. The public main-domain table T(j, rho, i) is zero on padded rows.
 //! Keys expand in tiles of 8 (`ExpandedKey::many`); records hash in tiles of 64 (batched mu
 //! digests and SampleInBall streams), and T is the sparse product written straight into one
@@ -76,8 +76,8 @@ impl<P: ParamSet> Eq for TView<P> {}
 pub struct PublicRecord<P: ParamSet = Set44> {
     /// Expanded public key.
     pub key: Arc<ExpandedKey<P>>,
-    /// Message M.
-    pub msg: Vec<u8>,
+    /// Formatted message M'.
+    pub m_prime: Vec<u8>,
     /// c~ from the aggregate.
     pub c_tilde: P::CTilde,
     /// mu.
@@ -186,7 +186,7 @@ fn distinct_keys_by<'k>(pks: &[&'k [u8]], hash: impl Fn(&[u8]) -> u64 + Sync) ->
 }
 
 impl PublicInstance<Set44> {
-    /// Builds the instance from (pk, M, c~) triples; keys are expanded once per distinct pk.
+    /// Builds the instance from (pk, M', c~) triples; keys are expanded once per distinct pk.
     pub fn new(inputs: &[(&[u8], &[u8], [u8; C_TILDE_BYTES])]) -> Result<Self, InstanceError> {
         Self::new_with(agg_mldsa_simd::engine(), inputs)
     }
@@ -227,7 +227,7 @@ impl PublicInstance<Set44> {
                 let mu_inputs: Vec<[&[u8]; 4]> = tile_keys
                     .iter()
                     .zip(tile)
-                    .map(|(key, (_, msg, _))| [&key.tr[..], &[0u8, 0u8][..], &[][..], *msg])
+                    .map(|(key, (_, msg, _))| [&key.tr[..], *msg, &[][..], &[][..]])
                     .collect();
                 engine.shake256_many(&mu_inputs, TR_BYTES, mus.as_flattened_mut());
                 let seeds: Vec<[u8; C_TILDE_BYTES]> = tile.iter().map(|(_, _, c)| *c).collect();
@@ -246,7 +246,7 @@ impl PublicInstance<Set44> {
             .enumerate()
             .map(|(i, ((mu, c), (_, msg, c_tilde)))| PublicRecord {
                 key: key_of(i),
-                msg: msg.to_vec(),
+                m_prime: msg.to_vec(),
                 c_tilde: *c_tilde,
                 mu,
                 c: challenge_from_sparse(&c),
@@ -264,7 +264,7 @@ impl PublicInstance<Set44> {
                 let mut ct = [0u8; C_TILDE_BYTES];
                 let n = r.sig.len().min(C_TILDE_BYTES);
                 ct[..n].copy_from_slice(&r.sig[..n]);
-                (r.pk.as_slice(), r.msg.as_slice(), ct)
+                (r.pk.as_slice(), r.m_prime.as_slice(), ct)
             })
             .collect();
         Self::new(&inputs)
@@ -272,7 +272,7 @@ impl PublicInstance<Set44> {
 }
 
 impl<P: ParamSet> PublicInstance<P> {
-    /// Builds the instance for parameter set P from (pk, M, c~) triples.
+    /// Builds the instance for parameter set P from (pk, M', c~) triples.
     pub fn new_for(inputs: &[(&[u8], &[u8], P::CTilde)]) -> Result<Self, InstanceError> {
         let geom = Geometry::<P>::new_for(inputs.len()).map_err(InstanceError::Geometry)?;
         let pks: Vec<&[u8]> = inputs.iter().map(|&(pk, _, _)| pk).collect();
@@ -305,7 +305,7 @@ impl<P: ParamSet> PublicInstance<P> {
                 let mu_inputs: Vec<[&[u8]; 4]> = tile_keys
                     .iter()
                     .zip(tile)
-                    .map(|(key, (_, msg, _))| [&key.tr[..], &[0u8, 0u8][..], &[][..], *msg])
+                    .map(|(key, (_, msg, _))| [&key.tr[..], *msg, &[][..], &[][..]])
                     .collect();
                 let mut mus = [[0u8; TR_BYTES]; RECORD_TILE];
                 engine.shake256_many(&mu_inputs, TR_BYTES, mus[..tile.len()].as_flattened_mut());
@@ -347,7 +347,7 @@ impl<P: ParamSet> PublicInstance<P> {
                         let i = first + k;
                         PublicRecord {
                             key: key_of(i),
-                            msg: msg.to_vec(),
+                            m_prime: msg.to_vec(),
                             c_tilde: *c_tilde,
                             mu,
                             c,
@@ -364,7 +364,7 @@ impl<P: ParamSet> PublicInstance<P> {
     pub fn from_records_for(records: &[crate::gen::Record]) -> Result<Self, InstanceError> {
         let inputs: Vec<(&[u8], &[u8], P::CTilde)> = records
             .iter()
-            .map(|r| (r.pk.as_slice(), r.msg.as_slice(), P::c_tilde_from_slice(&r.sig)))
+            .map(|r| (r.pk.as_slice(), r.m_prime.as_slice(), P::c_tilde_from_slice(&r.sig)))
             .collect();
         Self::new_for(&inputs)
     }
@@ -426,7 +426,7 @@ mod tests {
         records.extend(crate::gen::records_shared_keys_for::<P>(seed + 1, 9, 3));
         let instance = PublicInstance::<P>::from_records_for(&records).unwrap();
         for (r, rec) in instance.records.iter().zip(&records) {
-            assert_eq!(r.mu, crate::native::mu(&r.key.tr, &rec.msg, &[]));
+            assert_eq!(r.mu, crate::native::mu(&r.key.tr, &rec.m_prime));
             let c = crate::native::sample_in_ball_for::<P>(&rec.sig[..P::C_TILDE_BYTES]);
             assert_eq!(r.c, c);
             let mut t = vec![[0_i32; N]; P::K];

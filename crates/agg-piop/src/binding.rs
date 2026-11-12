@@ -1,6 +1,6 @@
 //! Public-record binding and the canonical instance record.
 //!
-//! The transcript binds `X = LE64(N) || ||_i (pk_i || LE64(|M_i|) || M_i || c~_i)` with a
+//! The transcript binds `X = LE64(N) || ||_i (pk_i || LE64(|M'_i|) || M'_i || c~_i)` with a
 //! 16-KiB-leaf cSHAKE256 tree: leaf `i` is `cSHAKE256(block_i, 32)` under
 //! `agg-mldsa/v1/record-leaf`, the root `cSHAKE256(LE64(blocks) || leaves, 32)` under
 //! `agg-mldsa/v1/public-records-binding`. The instance record is the manifest binding

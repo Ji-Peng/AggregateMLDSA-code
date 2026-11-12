@@ -65,7 +65,7 @@ fn derived_values_satisfy_relation_h() {
         // Re-encoding reproduces the original signature, which the crate accepts.
         let bytes = reencode_h(&inst.records[i].c_tilde, &w.z, &w.u, &w.w1).expect("re-encodable");
         assert_eq!(bytes, records[i].sig, "record {i}");
-        assert!(crate_verify(&records[i].pk, &records[i].msg, &bytes));
+        assert!(crate_verify(&records[i].pk, &records[i].m_prime, &bytes));
     }
     // Hints at both signs of r0 and Decompose edge positions occur in the batch.
     assert!(both_signs[0] > 0 && both_signs[1] > 0, "{both_signs:?}");
@@ -104,7 +104,7 @@ fn derived_values_satisfy_relation_h_65() {
         }
         let bytes = agg_witness::derive::reencode_h_for::<Set65>(&inst.records[i].c_tilde, &w.z, &w.u, &w.w1).expect("re-encodable");
         assert_eq!(bytes, records[i].sig, "record {i}");
-        assert!(agg_witness::gen::crate_verify_for::<Set65>(&records[i].pk, &records[i].msg, &bytes));
+        assert!(agg_witness::gen::crate_verify_for::<Set65>(&records[i].pk, &records[i].m_prime, &bytes));
     }
 }
 
@@ -137,7 +137,7 @@ fn derived_values_satisfy_relation_h_87() {
         }
         let bytes = agg_witness::derive::reencode_h_for::<Set87>(&inst.records[i].c_tilde, &w.z, &w.u, &w.w1).expect("re-encodable");
         assert_eq!(bytes, records[i].sig, "record {i}");
-        assert!(agg_witness::gen::crate_verify_for::<Set87>(&records[i].pk, &records[i].msg, &bytes));
+        assert!(agg_witness::gen::crate_verify_for::<Set87>(&records[i].pk, &records[i].m_prime, &bytes));
     }
 }
 

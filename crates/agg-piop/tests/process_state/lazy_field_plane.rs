@@ -23,7 +23,7 @@ pub fn run() {
             .map(|record| {
                 let mut c_tilde = [0_u8; C_TILDE_BYTES];
                 c_tilde.copy_from_slice(&record.sig[..C_TILDE_BYTES]);
-                (record.pk.as_slice(), record.msg.as_slice(), c_tilde)
+                (record.pk.as_slice(), record.m_prime.as_slice(), c_tilde)
             })
             .collect();
         let signatures: Vec<&[u8]> = records.iter().map(|record| record.sig.as_slice()).collect();

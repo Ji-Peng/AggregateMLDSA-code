@@ -225,7 +225,7 @@ fn challenge_from_c39(c39: &Challenge39) -> Challenge {
 }
 
 impl StreamedPublic {
-    /// The light precomputation from `(pk, M, c~)` triples (pure mode, empty context): the
+    /// The light precomputation from `(pk, M', c~)` triples: the
     /// distinct keys by full `pk` bytes ([`distinct_keys`]), `pkDecode` and `tr` per distinct
     /// uncached key (a cached key reuses its entry), `mu` and `SampleInBall` per record.
     pub fn prepare(
@@ -308,7 +308,7 @@ impl StreamedPublic {
                 for j in 0..count {
                     let key_idx = key_tile[j];
                     let msg = input_tile[j].1;
-                    mu_inputs[j] = [keys[key_idx].tr(), &[0u8, 0u8], &[], msg];
+                    mu_inputs[j] = [keys[key_idx].tr(), msg, &[], &[]];
                 }
                 let mut mu_out = [0u8; 64 * TR_BYTES];
                 engine.shake256_many(
@@ -805,11 +805,11 @@ mod tests {
         let mut records = gen::records(41, 3);
         for i in 0..6_u64 {
             let (sk, pk) = if i % 2 == 0 { (&victim_sk, &victim) } else { (&other_sk, &other) };
-            let msg = gen::message(42, i);
+            let m_prime = gen::pure(&gen::message(42, i));
             records.push(gen::Record {
                 pk: pk.clone(),
-                sig: gen::sign(sk, &msg, None),
-                msg,
+                sig: gen::sign(sk, &m_prime, None),
+                m_prime,
             });
         }
         let instance = PublicInstance::from_records(&records).unwrap();
@@ -817,7 +817,7 @@ mod tests {
             .records
             .iter()
             .zip(&records)
-            .map(|(record, source)| (source.pk.as_slice(), source.msg.as_slice(), record.c_tilde))
+            .map(|(record, source)| (source.pk.as_slice(), source.m_prime.as_slice(), record.c_tilde))
             .collect();
         let stored = PublicData::from_instance(&instance);
         let mut cache = KeyCache::default();
@@ -908,7 +908,7 @@ mod tests {
         time("mu x N (parallel)", || {
             inputs
                 .par_iter()
-                .map(|(_, m, _)| mu(&[0; 64], m, &[])[0])
+                .map(|(_, m, _)| mu(&[0; 64], m)[0])
                 .collect::<Vec<_>>()
         });
         time("sample_in_ball x N (parallel)", || {
@@ -938,7 +938,7 @@ mod tests {
             .par_iter()
             .zip(&record_keys)
             .map(|(&(_, msg, c), &key)| {
-                mu(&keys[key].1, msg, &[])[0] ^ sample_in_ball(&c).positions[0]
+                mu(&keys[key].1, msg)[0] ^ sample_in_ball(&c).positions[0]
             })
             .collect();
         black_box(sink);
@@ -1119,7 +1119,7 @@ mod tests {
         });
         let mu_old = best(|| {
             for (t, m) in trs.iter().zip(&msgs) {
-                black_box(mu(t, m, &[]));
+                black_box(mu(t, m));
             }
         });
         let ball_old = best(|| {
@@ -1163,7 +1163,7 @@ mod tests {
                     let ins: Vec<[&[u8]; 4]> = tt
                         .iter()
                         .zip(mt)
-                        .map(|(t, m)| [&t[..], &[0u8, 0u8][..], &[][..], &m[..]])
+                        .map(|(t, m)| [&t[..], &m[..], &[][..], &[][..]])
                         .collect();
                     e.shake256_many(&ins, TR_BYTES, &mut out[..tt.len() * TR_BYTES]);
                     black_box(&out);
@@ -1306,7 +1306,7 @@ mod tests {
             .records
             .iter()
             .zip(&records)
-            .map(|(record, source)| (source.pk.as_slice(), source.msg.as_slice(), record.c_tilde))
+            .map(|(record, source)| (source.pk.as_slice(), source.m_prime.as_slice(), record.c_tilde))
             .collect();
         let stored = PublicData::from_instance(&instance);
         let d_main = instance.geom.d_main() as usize;
@@ -1381,11 +1381,11 @@ mod tests {
                 let mut records = gen::records(201, 3);
                 for i in 0..6_u64 {
                     let (sk, pk) = if i % 2 == 0 { (&victim_sk, &victim) } else { (&other_sk, &other) };
-                    let msg = gen::message(202, i);
+                    let m_prime = gen::pure(&gen::message(202, i));
                     records.push(gen::Record {
                         pk: pk.clone(),
-                        sig: gen::sign(sk, &msg, None),
-                        msg,
+                        sig: gen::sign(sk, &m_prime, None),
+                        m_prime,
                     });
                 }
                 check_backend_streamed_pass(&engine, &records);
@@ -1399,7 +1399,7 @@ mod tests {
             .records
             .iter()
             .zip(records)
-            .map(|(record, source)| (source.pk.as_slice(), source.msg.as_slice(), record.c_tilde))
+            .map(|(record, source)| (source.pk.as_slice(), source.m_prime.as_slice(), record.c_tilde))
             .collect();
         let stored = PublicData::from_instance(&instance);
         let d_main = instance.geom.d_main() as usize;

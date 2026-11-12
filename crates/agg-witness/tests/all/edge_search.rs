@@ -16,7 +16,7 @@ fn find(
     let key = ExpandedKey::from_bytes(&pk).unwrap();
     (0..limit).into_par_iter().find_first(|&i| {
         let r = gen::record_hedged(seed, 0, i);
-        let m = mu(&key.tr, &r.msg, &[]);
+        let m = mu(&key.tr, &r.m_prime);
         let w = derive(&key, &m, &r.sig).unwrap();
         pred(&w)
     })

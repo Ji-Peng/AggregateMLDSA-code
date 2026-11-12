@@ -330,7 +330,7 @@ pub fn prove_mode_b(
 }
 
 /// Verify a mode-B aggregate (the proof bytes, which carry `c~_i` and the public bits) for
-/// the records `(pk_i, M_i)` under the caller's `relation`, with the timing of every step.
+/// the records `(pk_i, M'_i)` under the caller's `relation`, with the timing of every step.
 pub fn verify_mode_b(
     records: &[(&[u8], &[u8])],
     aggregate: &[u8],

@@ -45,7 +45,7 @@ fn prove_and_verify_ten(seed: u64) {
         .map(|r| {
             let mut ct = [0_u8; C_TILDE_BYTES];
             ct.copy_from_slice(&r.sig[..C_TILDE_BYTES]);
-            (r.pk.as_slice(), r.msg.as_slice(), ct)
+            (r.pk.as_slice(), r.m_prime.as_slice(), ct)
         })
         .collect();
     let signatures: Vec<&[u8]> = records.iter().map(|r| r.sig.as_slice()).collect();
@@ -64,7 +64,7 @@ fn prove_and_verify_ten(seed: u64) {
     .expect("prove");
     let public: Vec<(&[u8], &[u8])> = records
         .iter()
-        .map(|r| (r.pk.as_slice(), r.msg.as_slice()))
+        .map(|r| (r.pk.as_slice(), r.m_prime.as_slice()))
         .collect();
     verify(
         &public,

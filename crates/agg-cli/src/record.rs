@@ -3,9 +3,10 @@
 //! - Keys (`keygen-batch`): `"AGGKEYS1" || count LE32 || (seed[32] || LE32 len || pk)*`. The seed
 //!   is the FIPS 204 `KeyGen` seed `xi`; this is a test and benchmark tool, so the file holds
 //!   secret material and must be treated as such.
-//! - Records (`sign-batch`, input of `aggregate` and `verify`): `"AGGRECS1" || count LE32 ||
-//!   (LE32 len || pk, LE32 len || M, LE32 len || signature)*`. The verifier reads only `(pk, M)`
-//!   and never touches the signatures.
+//! - Records (`sign-batch`, input of `aggregate` and `verify`): `"AGGRECS2" || count LE32 ||
+//!   (LE32 len || pk, LE32 len || M', LE32 len || signature)*`, with M' the formatted message
+//!   of FIPS 204 (pure or pre-hash, any context; `sign-batch` writes pure mode with an empty
+//!   context). The verifier reads only `(pk, M')` and never touches the signatures.
 //! - Aggregates (`aggregate`, input of `verify`): the wire bytes of `agg_piop::wire`, which
 //!   start with the header and the `c~_i` list.
 
@@ -14,7 +15,7 @@ use std::path::Path;
 /// Magic of a key file.
 pub const KEYS_MAGIC: &[u8; 8] = b"AGGKEYS1";
 /// Magic of a record file.
-pub const RECORDS_MAGIC: &[u8; 8] = b"AGGRECS1";
+pub const RECORDS_MAGIC: &[u8; 8] = b"AGGRECS2";
 
 /// A malformed batch file.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,8 +48,8 @@ pub struct KeyEntry {
 pub struct RecordEntry {
     /// Encoded public key.
     pub pk: Vec<u8>,
-    /// Message.
-    pub msg: Vec<u8>,
+    /// Formatted message M' (FIPS 204 Algorithm 3 line 5 or Algorithm 5 line 18).
+    pub m_prime: Vec<u8>,
     /// Signature.
     pub sig: Vec<u8>,
 }
@@ -149,7 +150,7 @@ pub fn records_to_bytes(records: &[RecordEntry]) -> Vec<u8> {
     out.extend_from_slice(&(records.len() as u32).to_le_bytes());
     for r in records {
         put_framed(&mut out, &r.pk);
-        put_framed(&mut out, &r.msg);
+        put_framed(&mut out, &r.m_prime);
         put_framed(&mut out, &r.sig);
     }
     out
@@ -166,7 +167,7 @@ pub fn records_from_bytes(bytes: &[u8]) -> Result<Vec<RecordEntry>, FileError> {
         .map(|_| {
             Ok(RecordEntry {
                 pk: r.framed()?,
-                msg: r.framed()?,
+                m_prime: r.framed()?,
                 sig: r.framed()?,
             })
         })
@@ -214,7 +215,7 @@ mod tests {
         assert!(keys_from_bytes(&bytes[..bytes.len() - 1]).is_err());
         let records = vec![RecordEntry {
             pk: vec![4; 3],
-            msg: vec![],
+            m_prime: vec![],
             sig: vec![5; 7],
         }];
         let bytes = records_to_bytes(&records);

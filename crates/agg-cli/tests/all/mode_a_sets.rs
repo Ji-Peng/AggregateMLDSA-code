@@ -5,7 +5,7 @@
 //! commitment is absorbed before the bridge seed, its final vector is the F_p side's public
 //! `Y` and is absorbed at the final-vector step, and the part's Flock seed is the span seed
 //! of the transcript's Flock seed and final-vector record. The verifier builds its public
-//! data from `(pk, M, c~)` only. The full mode-A driver (`Aggregator`, `AggregateVerifier`:
+//! data from `(pk, M', c~)` only. The full mode-A driver (`Aggregator`, `AggregateVerifier`:
 //! the Akita opening and the wire format) runs at the end, with tampered witnesses and
 //! aggregates. Relation H-FIPS also runs on the synthetic records of hint weight exactly omega
 //! (`agg_witness::gen::hint_corner_record_for`) for all three sets, ML-DSA-44 included. Run
@@ -92,7 +92,7 @@ where
     // The instance record of mode A with the set's plan (the tied part's tie and chain sites).
     let inputs: Vec<(&[u8], &[u8], P::CTilde)> = records
         .iter()
-        .map(|r| (r.pk.as_slice(), r.msg.as_slice(), P::c_tilde_from_slice(&r.sig)))
+        .map(|r| (r.pk.as_slice(), r.m_prime.as_slice(), P::c_tilde_from_slice(&r.sig)))
         .collect();
     let keccak = keccak_plan(&gate, &geometry, 13, true, FlockProfile::Fast);
     assert_eq!(keccak.parts.len(), 1);
@@ -124,7 +124,7 @@ where
         flock_proof.bytes.len() as f64 / n as f64
     );
 
-    // The verifier: (pk, M, c~), the record, the nonce stream, the commitment and the proofs.
+    // The verifier: (pk, M', c~), the record, the nonce stream, the commitment and the proofs.
     let mut cache = LaneKeyCache::new(P::SET);
     let lane_data = LaneStreamedPublic::prepare::<P>(&inputs, Some(&cache)).expect("public data");
     let mut v = Transcript::replay(&manifest, &record, &work).expect("verifier transcript");
@@ -190,7 +190,7 @@ fn ml_dsa_87_end_to_end_without_the_opening_at_1k() {
 }
 
 /// The full mode-A driver for a set with lanes: `Aggregator` (instance, tables, Flock side,
-/// PIOP, Akita opening, wire bytes) and `AggregateVerifier` from `(pk, M)` only, uncached
+/// PIOP, Akita opening, wire bytes) and `AggregateVerifier` from `(pk, M')` only, uncached
 /// and with a warm `LaneKeyCache`; then tampered witnesses and aggregates are rejected.
 fn full_driver<P: ParamSet>(seed: u64, n: usize, other: Set) {
     use agg_cli::mode_a::{AggregateHooks, AggregateVerifier, Aggregator, AggregatorConfig, KeyCacheMut};
@@ -201,8 +201,8 @@ fn full_driver<P: ParamSet>(seed: u64, n: usize, other: Set) {
 
     let records = agg_witness::gen::records_shared_keys_for::<P>(seed, n, n / 4);
     let signed: Vec<(&[u8], &[u8], &[u8])> =
-        records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice(), r.sig.as_slice())).collect();
-    let statements: Vec<(&[u8], &[u8])> = records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice())).collect();
+        records.iter().map(|r| (r.pk.as_slice(), r.m_prime.as_slice(), r.sig.as_slice())).collect();
+    let statements: Vec<(&[u8], &[u8])> = records.iter().map(|r| (r.pk.as_slice(), r.m_prime.as_slice())).collect();
     let config = AggregatorConfig { set: P::SET, ..AggregatorConfig::default() };
     let aggregator = Aggregator::new(config);
     let aggregate = aggregator.aggregate(&signed).expect("aggregate");
@@ -326,8 +326,8 @@ fn default_layout_round_trip<P: ParamSet>(seed: u64, n: usize) {
 
     let records = agg_witness::gen::records_shared_keys_for::<P>(seed, n, n.div_ceil(4));
     let signed: Vec<(&[u8], &[u8], &[u8])> =
-        records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice(), r.sig.as_slice())).collect();
-    let statements: Vec<(&[u8], &[u8])> = records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice())).collect();
+        records.iter().map(|r| (r.pk.as_slice(), r.m_prime.as_slice(), r.sig.as_slice())).collect();
+    let statements: Vec<(&[u8], &[u8])> = records.iter().map(|r| (r.pk.as_slice(), r.m_prime.as_slice())).collect();
     let aggregate = Aggregator::new(AggregatorConfig { set: P::SET, ..AggregatorConfig::default() })
         .aggregate(&signed)
         .expect("aggregate");
@@ -412,8 +412,8 @@ fn h_fips_corner_records<P: ParamSet>(seed: u64) {
     }
 
     let signed: Vec<(&[u8], &[u8], &[u8])> =
-        records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice(), r.sig.as_slice())).collect();
-    let statements: Vec<(&[u8], &[u8])> = records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice())).collect();
+        records.iter().map(|r| (r.pk.as_slice(), r.m_prime.as_slice(), r.sig.as_slice())).collect();
+    let statements: Vec<(&[u8], &[u8])> = records.iter().map(|r| (r.pk.as_slice(), r.m_prime.as_slice())).collect();
     let config = AggregatorConfig { set: P::SET, relation: Relation::HFips, ..AggregatorConfig::default() };
     let aggregator = Aggregator::new(config);
     let aggregate = aggregator.aggregate(&signed).expect("H-FIPS aggregate");

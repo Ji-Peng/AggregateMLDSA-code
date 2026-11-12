@@ -66,7 +66,7 @@ impl Fixture {
             .map(|r| {
                 let mut ct = [0_u8; C_TILDE_BYTES];
                 ct.copy_from_slice(&r.sig[..C_TILDE_BYTES]);
-                (r.pk.as_slice(), r.msg.as_slice(), ct)
+                (r.pk.as_slice(), r.m_prime.as_slice(), ct)
             })
             .collect()
     }
@@ -74,7 +74,7 @@ impl Fixture {
     fn public(&self) -> Vec<(&[u8], &[u8])> {
         self.records
             .iter()
-            .map(|r| (r.pk.as_slice(), r.msg.as_slice()))
+            .map(|r| (r.pk.as_slice(), r.m_prime.as_slice()))
             .collect()
     }
 

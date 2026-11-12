@@ -399,11 +399,25 @@ pub fn tr(pk: &[u8]) -> [u8; TR_BYTES] {
     out
 }
 
-/// mu = H(tr || M', 64) with M' = 0x00 || |ctx| || ctx || M (Algorithms 3 and 8, pure mode).
-pub fn mu(tr: &[u8; TR_BYTES], msg: &[u8], ctx: &[u8]) -> [u8; TR_BYTES] {
-    assert!(ctx.len() <= 255);
+/// The formatted message of pure ML-DSA, M' = 0 || |ctx| || ctx || M with one byte per integer
+/// (Algorithm 3 line 5); `None` if the context string exceeds 255 bytes.
+pub fn pure_message(msg: &[u8], ctx: &[u8]) -> Option<Vec<u8>> {
+    let len = u8::try_from(ctx.len()).ok()?;
+    Some([&[0u8, len][..], ctx, msg].concat())
+}
+
+/// The formatted message of HashML-DSA, M' = 1 || |ctx| || ctx || OID || PH(M) (Algorithm 5
+/// line 18), with `oid` the DER encoding of the pre-hash function's identifier and `ph` the
+/// pre-hash of the message; `None` if the context string exceeds 255 bytes.
+pub fn prehash_message(ctx: &[u8], oid: &[u8], ph: &[u8]) -> Option<Vec<u8>> {
+    let len = u8::try_from(ctx.len()).ok()?;
+    Some([&[1u8, len][..], ctx, oid, ph].concat())
+}
+
+/// mu = H(tr || M', 64) for a formatted message M' (Algorithm 8 line 7).
+pub fn mu(tr: &[u8; TR_BYTES], m_prime: &[u8]) -> [u8; TR_BYTES] {
     let mut out = [0u8; TR_BYTES];
-    shake256(&[tr, &[0u8, ctx.len() as u8], ctx, msg], &mut out);
+    shake256(&[tr, m_prime], &mut out);
     out
 }
 
@@ -573,17 +587,7 @@ pub fn verify_internal_trace_for<P: ParamSet>(
 
 /// ML-DSA.Verify (Algorithm 3) with context `ctx` for parameter set P.
 pub fn verify_with_context_for<P: ParamSet>(pk: &[u8], msg: &[u8], ctx: &[u8], sig: &[u8]) -> bool {
-    if ctx.len() > 255 {
-        return false;
-    }
-    let Some(key) = ExpandedKey::<P>::from_bytes_for(pk) else {
-        return false;
-    };
-    let mu = mu(&key.tr, msg, ctx);
-    match verify_internal_trace_for::<P>(&key, &mu, sig) {
-        Ok(t) => t.accept,
-        Err(_) => false,
-    }
+    pure_message(msg, ctx).is_some_and(|m_prime| verify_for::<P>(pk, &m_prime, sig))
 }
 
 /// ML-DSA.Verify (Algorithm 3) with context `ctx`, using only this crate's arithmetic.
@@ -591,14 +595,22 @@ pub fn verify_with_context(pk: &[u8], msg: &[u8], ctx: &[u8], sig: &[u8]) -> boo
     verify_with_context_for::<Set44>(pk, msg, ctx, sig)
 }
 
-/// ML-DSA.Verify in pure mode with empty context for parameter set P.
-pub fn verify_for<P: ParamSet>(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
-    verify_with_context_for::<P>(pk, msg, &[], sig)
+/// ML-DSA.Verify_internal (Algorithm 8) on a formatted message M' for parameter set P: the
+/// aggregated statement, for either form and any context.
+pub fn verify_for<P: ParamSet>(pk: &[u8], m_prime: &[u8], sig: &[u8]) -> bool {
+    let Some(key) = ExpandedKey::<P>::from_bytes_for(pk) else {
+        return false;
+    };
+    let mu = mu(&key.tr, m_prime);
+    match verify_internal_trace_for::<P>(&key, &mu, sig) {
+        Ok(t) => t.accept,
+        Err(_) => false,
+    }
 }
 
-/// ML-DSA.Verify in pure mode with empty context (the aggregated statement).
-pub fn verify(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
-    verify_for::<Set44>(pk, msg, sig)
+/// ML-DSA.Verify_internal (Algorithm 8) on a formatted message M'.
+pub fn verify(pk: &[u8], m_prime: &[u8], sig: &[u8]) -> bool {
+    verify_for::<Set44>(pk, m_prime, sig)
 }
 
 #[cfg(test)]

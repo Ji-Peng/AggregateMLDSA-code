@@ -1,5 +1,5 @@
 //! Mode A end to end: the aggregator on real ML-DSA-44 records and the verifier on `(pk_i,
-//! M_i)` and the aggregate.
+//! M'_i)` and the aggregate.
 //!
 //! - Round trips at 64, 256 (two Flock parts), 512 and (`Slim`) 1,024 signatures under each mode-A Flock
 //!   profile (`Fast`, `Slim`, `Slim8`): the aggregate size per part, the prover's and the verifier's
@@ -43,6 +43,7 @@ use agg_piop::transcript::TranscriptError;
 use agg_piop::verifier::{verify_timed, ConfigurationError, VerifyError};
 use agg_piop::wire::AggregateProof;
 use agg_witness::gen::{self, Record};
+use agg_witness::native;
 use agg_witness::padding::{main_index, Geometry};
 use agg_witness::params::{C_TILDE_BYTES, K, OMEGA, SIG_BYTES, Z_BITS};
 
@@ -65,7 +66,7 @@ fn records(seed: u64, own: usize, shared: usize) -> Vec<Record> {
 fn signed(records: &[Record]) -> Vec<(&[u8], &[u8], &[u8])> {
     records
         .iter()
-        .map(|r| (r.pk.as_slice(), r.msg.as_slice(), r.sig.as_slice()))
+        .map(|r| (r.pk.as_slice(), r.m_prime.as_slice(), r.sig.as_slice()))
         .collect()
 }
 
@@ -94,7 +95,7 @@ fn aggregating_twice_reuses_pools_without_changing_the_bytes() {
 fn statements(records: &[Record]) -> Vec<(&[u8], &[u8])> {
     records
         .iter()
-        .map(|r| (r.pk.as_slice(), r.msg.as_slice()))
+        .map(|r| (r.pk.as_slice(), r.m_prime.as_slice()))
         .collect()
 }
 
@@ -602,6 +603,51 @@ impl agg_piop::verifier::KeccakVerifier for OtherPlan<'_> {
     }
 }
 
+/// Records of both FIPS 204 forms and of several contexts aggregate together: the verifier
+/// reads each formatted message M' only through mu. Replacing one record's M' by the same
+/// message under another context, or by its pure form, is rejected.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Flock and Akita proofs: run with --release"
+)]
+fn formatted_messages_of_both_forms_and_any_context_verify() {
+    // DER encoding of the SHAKE128 object identifier (FIPS 204 Algorithm 4 line 18).
+    const SHAKE128_OID: [u8; 11] = [0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x0B];
+    on_large_stack(|| {
+        let mut records = gen::records(0x6d, 8);
+        for i in 0..12_u64 {
+            let (sk, pk) = gen::keypair(&gen::key_seed(0x6e, i));
+            let msg = gen::message(0x6f, i);
+            let ctx = vec![i as u8; (i as usize * 23) % 256];
+            let m_prime = if i % 2 == 0 {
+                native::pure_message(&msg, &ctx).unwrap()
+            } else {
+                let mut ph = [0u8; 32];
+                gen::derive_bytes(b"test-prehash", &[i], &mut ph);
+                native::prehash_message(&ctx, &SHAKE128_OID, &ph).unwrap()
+            };
+            let sig = gen::sign(&sk, &m_prime, None);
+            records.push(Record { pk, m_prime, sig });
+        }
+        let aggregate = Aggregator::new(AggregatorConfig::default())
+            .aggregate(&signed(&records))
+            .expect("aggregate");
+        let public = statements(&records);
+        let verifier = AggregateVerifier::new();
+        let report = verifier.verify(&public, &aggregate.bytes, None);
+        assert!(report.accepted(), "{report}");
+        let msg = gen::message(0x6f, 2);
+        let other_context = native::pure_message(&msg, b"other").unwrap();
+        let pure = gen::pure(&msg);
+        for replacement in [&other_context, &pure] {
+            let mut changed = public.clone();
+            changed[10].1 = replacement.as_slice();
+            assert!(!verifier.verify(&changed, &aggregate.bytes, None).accepted());
+        }
+    });
+}
+
 /// Two genuine keys sharing `rho` (`rho` is the signer's choice, so the verifier must key its
 /// expansions and records by the full `pk`): an aggregate over records of both keys verifies
 /// (uncached, with only the first key cached, fully cached), and the records verify only
@@ -623,11 +669,11 @@ fn keys_sharing_rho_verify_only_against_their_own_t1() {
             } else {
                 (&other_sk, &other)
             };
-            let msg = gen::message(0x5c, i);
-            let sig = gen::sign(sk, &msg, None);
+            let m_prime = gen::pure(&gen::message(0x5c, i));
+            let sig = gen::sign(sk, &m_prime, None);
             records.push(Record {
                 pk: pk.clone(),
-                msg,
+                m_prime,
                 sig,
             });
         }
@@ -924,7 +970,7 @@ fn corrupted_aggregates_are_rejected() {
             &verifier.verify(&swapped, &bytes, None),
             |_| true,
         );
-        let other_msg = [records[7].msg.as_slice(), b"!"].concat();
+        let other_msg = [records[7].m_prime.as_slice(), b"!"].concat();
         let mut wrong_msg = public.clone();
         wrong_msg[7].1 = &other_msg;
         expect_rejected(
@@ -1455,7 +1501,7 @@ fn invalid_signatures_are_refused_by_the_aggregator() {
         refuse("hint byte", 1, &|r| {
             r.sig[SIG_BYTES - OMEGA - K + 3] ^= 0x40
         });
-        refuse("message", 6, &|r| r.msg.push(0));
+        refuse("message", 6, &|r| r.m_prime.push(0));
         refuse("signature length", 2, &|r| {
             r.sig.pop();
         });

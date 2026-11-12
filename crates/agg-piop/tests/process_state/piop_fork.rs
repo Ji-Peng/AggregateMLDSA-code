@@ -66,7 +66,7 @@ pub fn run() {
         let instance = PublicInstance::from_records(&records).unwrap();
         let inputs: Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> = records
             .iter()
-            .map(|r| (r.pk.as_slice(), r.msg.as_slice(), r.sig[..C_TILDE_BYTES].try_into().unwrap()))
+            .map(|r| (r.pk.as_slice(), r.m_prime.as_slice(), r.sig[..C_TILDE_BYTES].try_into().unwrap()))
             .collect();
         let signatures: Vec<&[u8]> = records.iter().map(|r| r.sig.as_slice()).collect();
         let bridge = FixedMatrices(BridgeMatrices::random_for_tests(0xf0c));
@@ -78,7 +78,7 @@ pub fn run() {
         };
         let public: Vec<(&[u8], &[u8])> = records
             .iter()
-            .map(|r| (r.pk.as_slice(), r.msg.as_slice()))
+            .map(|r| (r.pk.as_slice(), r.m_prime.as_slice()))
             .collect();
         let check = |proof: &AggregateProof| {
             verify(&public, &proof.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, Relation::HFips, None)

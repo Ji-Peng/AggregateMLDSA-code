@@ -24,7 +24,7 @@ fn instance(engine: &Engine, records: &[Record]) -> PublicInstance {
             let mut c = [0u8; C_TILDE_BYTES];
             let n = r.sig.len().min(C_TILDE_BYTES);
             c[..n].copy_from_slice(&r.sig[..n]);
-            (r.pk.as_slice(), r.msg.as_slice(), c)
+            (r.pk.as_slice(), r.m_prime.as_slice(), c)
         })
         .collect();
     PublicInstance::new_with(engine, &inputs).unwrap()
